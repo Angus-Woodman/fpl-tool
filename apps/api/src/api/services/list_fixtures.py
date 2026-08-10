@@ -10,7 +10,8 @@ class FixtureReadRepositoryPort(Protocol):
     def list_upcoming(
         self,
         *,
-        limit: int,
+        page: int,
+        page_size: int,
         team_id: int | None,
         gameweek: int | None,
     ) -> FixtureTickerResult: ...
@@ -18,7 +19,8 @@ class FixtureReadRepositoryPort(Protocol):
 
 @dataclass(frozen=True)
 class ListFixtureTickerRequest:
-    limit: int
+    page: int
+    page_size: int
     team_id: int | None = None
     gameweek: int | None = None
 
@@ -29,7 +31,8 @@ class ListFixtureTickerService:
 
     def execute(self, request: ListFixtureTickerRequest) -> FixtureTickerResult:
         return self._repository.list_upcoming(
-            limit=request.limit,
+            page=request.page,
+            page_size=request.page_size,
             team_id=request.team_id,
             gameweek=request.gameweek,
         )

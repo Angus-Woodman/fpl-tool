@@ -15,3 +15,5 @@ class FixtureTickerItemResponse(BaseModel):
 class FixtureTickerResponse(BaseModel):
     items: list[FixtureTickerItemResponse]
     total: int
+    page: int
+    page_size: int

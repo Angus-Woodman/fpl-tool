@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from api.models import FixtureModel, GameweekModel, TeamModel
@@ -22,6 +22,8 @@ class FixtureTickerItem:
 class FixtureTickerResult:
     items: list[FixtureTickerItem]
     total: int
+    page: int
+    page_size: int
 
 
 class FixtureReadRepository:
@@ -31,7 +33,8 @@ class FixtureReadRepository:
     def list_upcoming(
         self,
         *,
-        limit: int,
+        page: int,
+        page_size: int,
         team_id: int | None,
         gameweek: int | None,
     ) -> FixtureTickerResult:
@@ -51,8 +54,13 @@ class FixtureReadRepository:
             .join(away_team, away_team.id == FixtureModel.away_team_id)
             .outerjoin(GameweekModel, GameweekModel.id == FixtureModel.gameweek_id)
             .where(FixtureModel.finished.is_(False))
-            .order_by(FixtureModel.kickoff_time.asc())
-            .limit(limit)
+        )
+
+        count_stmt = (
+            select(func.count())
+            .select_from(FixtureModel)
+            .outerjoin(GameweekModel, GameweekModel.id == FixtureModel.gameweek_id)
+            .where(FixtureModel.finished.is_(False))
         )
 
         if team_id is not None:
@@ -62,11 +70,22 @@ class FixtureReadRepository:
                     FixtureModel.away_team_id == team_id,
                 )
             )
+            count_stmt = count_stmt.where(
+                or_(
+                    FixtureModel.home_team_id == team_id,
+                    FixtureModel.away_team_id == team_id,
+                )
+            )
 
         if gameweek is not None:
             stmt = stmt.where(GameweekModel.number == gameweek)
+            count_stmt = count_stmt.where(GameweekModel.number == gameweek)
+
+        offset = (page - 1) * page_size
+        stmt = stmt.order_by(FixtureModel.kickoff_time.asc()).offset(offset).limit(page_size)
 
         rows = self._session.execute(stmt).all()
+        total = self._session.execute(count_stmt).scalar_one()
 
         items = [
             FixtureTickerItem(
@@ -80,4 +99,4 @@ class FixtureReadRepository:
             for row in rows
         ]
 
-        return FixtureTickerResult(items=items, total=len(items))
+        return FixtureTickerResult(items=items, total=total, page=page, page_size=page_size)

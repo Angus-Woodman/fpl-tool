@@ -55,6 +55,8 @@ describe("FixtureTicker", () => {
             },
           ],
           total: 1,
+          page: 1,
+          page_size: 20,
         }),
       } as Response;
     });
@@ -63,12 +65,12 @@ describe("FixtureTicker", () => {
 
     await waitFor(() => {
       expect(screen.getByText("ARS vs AVL")).toBeInTheDocument();
-      expect(screen.getByText("Showing 1 fixtures")).toBeInTheDocument();
+      expect(screen.getByText("Showing 1 of 1 fixtures")).toBeInTheDocument();
     });
 
     expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/teams");
     expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/gameweeks");
-    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/fixtures/ticker?limit=20");
+    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20");
   });
 
   it("applies filters and refetches ticker", async () => {
@@ -118,7 +120,9 @@ describe("FixtureTicker", () => {
         ok: true,
         json: async () => ({
           items: [],
-          total: 0,
+          total: 4,
+          page: 1,
+          page_size: 20,
         }),
       } as Response;
     });
@@ -136,7 +140,7 @@ describe("FixtureTicker", () => {
 
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenLastCalledWith(
-        "http://127.0.0.1:8000/fixtures/ticker?limit=5&team_id=2&gameweek=2"
+        "http://127.0.0.1:8000/fixtures/ticker?page=1&limit=5&team_id=2&gameweek=2"
       );
     });
 
@@ -181,7 +185,9 @@ describe("FixtureTicker", () => {
         ok: true,
         json: async () => ({
           items: [],
-          total: 0,
+          total: 4,
+          page: 1,
+          page_size: 20,
         }),
       } as Response;
     });
@@ -199,14 +205,71 @@ describe("FixtureTicker", () => {
 
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenLastCalledWith(
-        "http://127.0.0.1:8000/fixtures/ticker?limit=5&team_id=2&gameweek=2"
+        "http://127.0.0.1:8000/fixtures/ticker?page=1&limit=5&team_id=2&gameweek=2"
       );
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
 
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?limit=20");
+      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20");
+    });
+  });
+
+  it("navigates to next fixture ticker page", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [],
+            total: 0,
+          }),
+        } as Response;
+      }
+
+      if (url.endsWith("/gameweeks")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [],
+            total: 0,
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              fixture_id: 1,
+              gameweek_number: 2,
+              kickoff_time: "2026-08-21T18:30:00+00:00",
+              home_team_short_name: "ARS",
+              away_team_short_name: "AVL",
+              finished: false,
+            },
+          ],
+          total: 40,
+          page: url.includes("page=2") ? 2 : 1,
+          page_size: 20,
+        }),
+      } as Response;
+    });
+
+    render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=2&limit=20");
+      expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
     });
   });
 
@@ -237,7 +300,9 @@ describe("FixtureTicker", () => {
         ok: true,
         json: async () => ({
           items: [],
-          total: 0,
+          total: 4,
+          page: 1,
+          page_size: 20,
         }),
       } as Response;
     });
@@ -303,7 +368,9 @@ describe("FixtureTicker", () => {
         ok: true,
         json: async () => ({
           items: [],
-          total: 0,
+          total: 4,
+          page: 1,
+          page_size: 20,
         }),
       } as Response;
     });
@@ -336,7 +403,9 @@ describe("FixtureTicker", () => {
         ok: true,
         json: async () => ({
           items: [],
-          total: 0,
+          total: 4,
+          page: 1,
+          page_size: 20,
         }),
       } as Response;
     });

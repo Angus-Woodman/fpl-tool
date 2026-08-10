@@ -24,15 +24,18 @@ def get_list_fixture_ticker_service(
 @router.get("/ticker", response_model=FixtureTickerResponse)
 def get_fixture_ticker(
     service: Annotated[ListFixtureTickerService, Depends(get_list_fixture_ticker_service)],
+    page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     team_id: int | None = Query(default=None, ge=1),
     gameweek: int | None = Query(default=None, ge=1, le=38),
 ) -> FixtureTickerResponse:
     result = service.execute(
-        ListFixtureTickerRequest(limit=limit, team_id=team_id, gameweek=gameweek)
+        ListFixtureTickerRequest(page=page, page_size=limit, team_id=team_id, gameweek=gameweek)
     )
 
     return FixtureTickerResponse(
         items=[FixtureTickerItemResponse.model_validate(item) for item in result.items],
         total=result.total,
+        page=result.page,
+        page_size=result.page_size,
     )

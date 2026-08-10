@@ -29,6 +29,8 @@ export type FixtureTickerItem = {
 export type FixtureTickerResponse = {
   items: FixtureTickerItem[];
   total: number;
+  page: number;
+  page_size: number;
 };
 
 export type TeamItem = {
@@ -84,11 +86,13 @@ export async function fetchPlayers(params: {
 }
 
 export async function fetchFixtureTicker(params?: {
+  page?: number;
   limit?: number;
   team_id?: number;
   gameweek?: number;
 }): Promise<FixtureTickerResponse> {
   const query = new URLSearchParams();
+  query.set("page", String(params?.page ?? 1));
   query.set("limit", String(params?.limit ?? 20));
   if (params?.team_id !== undefined) query.set("team_id", String(params.team_id));
   if (params?.gameweek !== undefined) query.set("gameweek", String(params.gameweek));

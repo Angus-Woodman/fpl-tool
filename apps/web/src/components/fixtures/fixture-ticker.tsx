@@ -14,7 +14,13 @@ import {
 type LoadState =
   | { type: "loading" }
   | { type: "error"; message: string }
-  | { type: "loaded"; items: FixtureTickerItem[]; total: number };
+  | {
+      type: "loaded";
+      items: FixtureTickerItem[];
+      total: number;
+      page: number;
+      pageSize: number;
+    };
 
 function formatKickoff(value: string): string {
   const date = new Date(value);
@@ -42,6 +48,7 @@ export function FixtureTicker(): JSX.Element {
   const [gameweeksError, setGameweeksError] = useState<string | null>(null);
 
   const [appliedLimit, setAppliedLimit] = useState(20);
+  const [appliedPage, setAppliedPage] = useState(1);
   const [appliedTeamId, setAppliedTeamId] = useState<number | undefined>(undefined);
   const [appliedGameweek, setAppliedGameweek] = useState<number | undefined>(undefined);
 
@@ -110,6 +117,7 @@ export function FixtureTicker(): JSX.Element {
       setState({ type: "loading" });
       try {
         const data = await fetchFixtureTicker({
+          page: appliedPage,
           limit: appliedLimit,
           team_id: appliedTeamId,
           gameweek: appliedGameweek,
@@ -118,7 +126,13 @@ export function FixtureTicker(): JSX.Element {
           return;
         }
 
-        setState({ type: "loaded", items: data.items, total: data.total });
+        setState({
+          type: "loaded",
+          items: data.items,
+          total: data.total,
+          page: data.page,
+          pageSize: data.page_size,
+        });
       } catch (error) {
         if (cancelled) {
           return;
@@ -135,7 +149,7 @@ export function FixtureTicker(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [appliedGameweek, appliedLimit, appliedTeamId]);
+  }, [appliedGameweek, appliedLimit, appliedPage, appliedTeamId]);
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -184,6 +198,7 @@ export function FixtureTicker(): JSX.Element {
             } else {
               setAppliedLimit(Math.min(100, Math.max(1, parsedLimit)));
             }
+            setAppliedPage(1);
 
             const parsedTeamId = Number.parseInt(selectedTeamId, 10);
             setAppliedTeamId(Number.isNaN(parsedTeamId) ? undefined : parsedTeamId);
@@ -204,6 +219,7 @@ export function FixtureTicker(): JSX.Element {
               onClick={() => {
                 setLimit("20");
                 setAppliedLimit(20);
+                setAppliedPage(1);
               }}
             >
               Limit: {appliedLimit} x
@@ -216,6 +232,7 @@ export function FixtureTicker(): JSX.Element {
               onClick={() => {
                 setSelectedTeamId("");
                 setAppliedTeamId(undefined);
+                setAppliedPage(1);
               }}
             >
               Team: {teams.find((team) => team.id === appliedTeamId)?.short_name ?? appliedTeamId} x
@@ -228,6 +245,7 @@ export function FixtureTicker(): JSX.Element {
               onClick={() => {
                 setSelectedGameweek("");
                 setAppliedGameweek(undefined);
+                setAppliedPage(1);
               }}
             >
               GW: {appliedGameweek} x
@@ -243,6 +261,7 @@ export function FixtureTicker(): JSX.Element {
               setAppliedLimit(20);
               setAppliedTeamId(undefined);
               setAppliedGameweek(undefined);
+              setAppliedPage(1);
             }}
           >
             Clear all
@@ -278,7 +297,32 @@ export function FixtureTicker(): JSX.Element {
               ))}
             </tbody>
           </table>
-          <p className="mt-3 text-xs text-slate-600">Showing {state.total} fixtures</p>
+          <p className="mt-3 text-xs text-slate-600">
+            Showing {state.items.length} of {state.total} fixtures
+          </p>
+          <div className="mt-3 flex items-center justify-between">
+            <p className="text-xs text-slate-600">
+              Page {state.page} of {Math.max(1, Math.ceil(state.total / state.pageSize))}
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 px-3 py-1 text-xs disabled:opacity-40"
+                disabled={state.page <= 1}
+                onClick={() => setAppliedPage((value) => Math.max(1, value - 1))}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 px-3 py-1 text-xs disabled:opacity-40"
+                disabled={state.page >= Math.max(1, Math.ceil(state.total / state.pageSize))}
+                onClick={() => setAppliedPage((value) => value + 1)}
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </section>
