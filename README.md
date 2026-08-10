@@ -4,12 +4,13 @@ Local-first Fantasy Premier League decision-support application.
 
 ## Purpose
 
-This repository contains Phase 0 foundation for an FPL tool with:
+This repository contains Phase 0-1 foundation for an FPL tool with:
 - Next.js frontend
 - FastAPI backend
 - standalone Python `fpl_engine` package
 - PostgreSQL in Docker Compose
 - strict typing, linting, tests, and CI
+- typed FPL bootstrap ingestion (teams, players, gameweeks)
 
 ## Development Environment Strategy
 
@@ -72,6 +73,7 @@ This repository contains Phase 0 foundation for an FPL tool with:
 - `make db-up`
 - `make db-down`
 - `make db-migrate`
+- `make data-refresh`
 - `make test`
 - `make lint`
 - `make typecheck`
@@ -82,19 +84,40 @@ This repository contains Phase 0 foundation for an FPL tool with:
 - Apply migrations: `make db-migrate`
 - Create migration: `make db-revision m="description"`
 
-## Testing strategy (Phase 0)
+## Testing strategy
 
 - Domain/unit tests concentrated in `packages/fpl_engine/tests`
 - Backend tests in `apps/api/tests`
 - Frontend unit tests with Vitest + React Testing Library
+- Optional PostgreSQL integration tests are marked and run with `RUN_DB_TESTS=1`
 
-## Data ingestion approach (Phase 1 preview)
+## Data ingestion (Phase 1)
 
-Planned flow:
+Implemented flow:
 
 external FPL API -> typed external DTOs -> parser/mapper -> domain objects -> repositories
 
 No raw dictionaries should pass through core business logic.
+
+Import command:
+
+- `make data-refresh`
+
+This command fetches `bootstrap-static`, validates the payload, maps to domain entities, and upserts:
+
+- Teams
+- Players
+- Gameweeks
+
+Environment variables used:
+
+- `DATABASE_URL`
+- `FPL_API_BASE_URL`
+
+Local import endpoints:
+
+- `POST /imports/fpl/run` triggers import of teams, players, gameweeks, and fixtures.
+- `GET /imports/fpl/status` returns the latest in-memory import status and summary.
 
 ## Clean reset
 

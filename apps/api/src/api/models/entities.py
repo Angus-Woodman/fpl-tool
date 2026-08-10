@@ -66,9 +66,7 @@ class FixtureModel(Base):
 
 class PlayerGameweekStatModel(Base):
     __tablename__ = "player_gameweek_stats"
-    __table_args__ = (
-        UniqueConstraint("player_id", "fixture_id", name="uq_player_fixture_stat"),
-    )
+    __table_args__ = (UniqueConstraint("player_id", "fixture_id", name="uq_player_fixture_stat"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
@@ -86,9 +84,7 @@ class PlayerGameweekStatModel(Base):
 
 class PlayerSnapshotModel(Base):
     __tablename__ = "player_snapshots"
-    __table_args__ = (
-        UniqueConstraint("player_id", "captured_at", name="uq_player_snapshot_time"),
-    )
+    __table_args__ = (UniqueConstraint("player_id", "captured_at", name="uq_player_snapshot_time"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)

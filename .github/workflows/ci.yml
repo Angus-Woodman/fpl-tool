@@ -19,13 +19,13 @@ jobs:
       - name: Ruff
         run: uv run ruff check apps/api/src apps/api/tests packages/fpl_engine/src packages/fpl_engine/tests
       - name: Mypy (engine)
-        run: uv run --package fpl-engine mypy packages/fpl_engine/src
+        run: uv run --package fpl-engine mypy --config-file packages/fpl_engine/pyproject.toml packages/fpl_engine/src
       - name: Mypy (api)
-        run: uv run --package api mypy apps/api/src
+        run: MYPYPATH=packages/fpl_engine/src uv run --package api mypy --config-file apps/api/pyproject.toml apps/api/src
       - name: Python tests
         run: |
           uv run --package fpl-engine pytest -q packages/fpl_engine/tests
-          uv run --package api pytest -q apps/api/tests
+          PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q apps/api/tests
 
   frontend:
     runs-on: ubuntu-latest

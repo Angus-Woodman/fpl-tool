@@ -10,14 +10,14 @@ repos:
     hooks:
       - id: api-mypy
         name: api mypy
-        entry: uv run --package api mypy apps/api/src
+        entry: bash -lc 'MYPYPATH=packages/fpl_engine/src uv run --package api mypy --config-file apps/api/pyproject.toml apps/api/src'
         language: system
         pass_filenames: false
         files: ^apps/api/
 
       - id: api-pytest
         name: api pytest
-        entry: uv run --package api pytest -q apps/api/tests
+        entry: bash -lc 'PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q apps/api/tests'
         language: system
         pass_filenames: false
         files: ^(apps/api|packages/fpl_engine)/

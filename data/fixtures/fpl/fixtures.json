@@ -1,1 +1,22 @@
-[]
+[
+	{
+		"id": 9001,
+		"event": 1,
+		"team_h": 1,
+		"team_a": 2,
+		"kickoff_time": "2026-08-16T15:00:00Z",
+		"team_h_score": null,
+		"team_a_score": null,
+		"finished": false
+	},
+	{
+		"id": 9002,
+		"event": 2,
+		"team_h": 2,
+		"team_a": 1,
+		"kickoff_time": "2026-08-23T15:00:00Z",
+		"team_h_score": null,
+		"team_a_score": null,
+		"finished": false
+	}
+]

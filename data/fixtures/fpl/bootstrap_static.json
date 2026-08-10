@@ -1,5 +1,54 @@
 {
-  "teams": [],
-  "elements": [],
-  "events": []
+  "teams": [
+    {
+      "id": 1,
+      "name": "Arsenal",
+      "short_name": "ARS"
+    },
+    {
+      "id": 2,
+      "name": "Aston Villa",
+      "short_name": "AVL"
+    }
+  ],
+  "elements": [
+    {
+      "id": 101,
+      "first_name": "Bukayo",
+      "second_name": "Saka",
+      "web_name": "Saka",
+      "team": 1,
+      "element_type": 3,
+      "now_cost": 105,
+      "status": "a"
+    },
+    {
+      "id": 102,
+      "first_name": "Ollie",
+      "second_name": "Watkins",
+      "web_name": "Watkins",
+      "team": 2,
+      "element_type": 4,
+      "now_cost": 90,
+      "status": "a"
+    }
+  ],
+  "events": [
+    {
+      "id": 1,
+      "name": "Gameweek 1",
+      "deadline_time": "2026-08-14T18:30:00Z",
+      "is_current": false,
+      "is_next": true,
+      "is_finished": false
+    },
+    {
+      "id": 2,
+      "name": "Gameweek 2",
+      "deadline_time": "2026-08-21T18:30:00Z",
+      "is_current": false,
+      "is_next": false,
+      "is_finished": false
+    }
+  ]
 }

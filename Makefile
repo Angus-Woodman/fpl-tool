@@ -12,7 +12,7 @@ dev:
 	@echo "Run in separate terminals: make db-up, make backend-dev, make frontend-dev"
 
 backend-dev:
-	uv run --package api uvicorn api.main:app --reload --host $${API_HOST:-127.0.0.1} --port $${API_PORT:-8000}
+	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api uvicorn api.main:app --reload --host $${API_HOST:-127.0.0.1} --port $${API_PORT:-8000}
 
 frontend-dev:
 	pnpm --filter web dev
@@ -28,7 +28,7 @@ db-logs:
 
 test:
 	uv run --package fpl-engine pytest -q packages/fpl_engine/tests
-	uv run --package api pytest -q apps/api/tests
+	PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q apps/api/tests
 	pnpm --filter web test:run
 
 lint:
@@ -36,8 +36,8 @@ lint:
 	pnpm --filter web lint
 
 typecheck:
-	uv run --package fpl-engine mypy packages/fpl_engine/src
-	uv run --package api mypy apps/api/src
+	uv run --package fpl-engine mypy --config-file packages/fpl_engine/pyproject.toml packages/fpl_engine/src
+	MYPYPATH=packages/fpl_engine/src uv run --package api mypy --config-file apps/api/pyproject.toml apps/api/src
 	pnpm --filter web typecheck
 
 format:
@@ -45,13 +45,13 @@ format:
 	pnpm --filter web format
 
 db-migrate:
-	uv run --package api alembic upgrade head
+	cd apps/api && uv run --package api alembic upgrade head
 
 db-revision:
-	uv run --package api alembic revision --autogenerate -m "$(m)"
+	cd apps/api && uv run --package api alembic revision --autogenerate -m "$(m)"
 
 data-refresh:
-	@echo "Phase 1 placeholder: data refresh command will be added with ingestion adapter."
+	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api python -m api.scripts.import_fpl_data
 
 clean:
 	rm -rf .venv
