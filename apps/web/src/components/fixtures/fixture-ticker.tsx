@@ -26,6 +26,14 @@ function formatKickoff(value: string): string {
 }
 
 export function FixtureTicker(): JSX.Element {
+  const [limit, setLimit] = useState("20");
+  const [teamIdInput, setTeamIdInput] = useState("");
+  const [gameweekInput, setGameweekInput] = useState("");
+
+  const [appliedLimit, setAppliedLimit] = useState(20);
+  const [appliedTeamId, setAppliedTeamId] = useState<number | undefined>(undefined);
+  const [appliedGameweek, setAppliedGameweek] = useState<number | undefined>(undefined);
+
   const [state, setState] = useState<LoadState>({ type: "loading" });
 
   useEffect(() => {
@@ -34,7 +42,11 @@ export function FixtureTicker(): JSX.Element {
     async function run(): Promise<void> {
       setState({ type: "loading" });
       try {
-        const data = await fetchFixtureTicker(20);
+        const data = await fetchFixtureTicker({
+          limit: appliedLimit,
+          team_id: appliedTeamId,
+          gameweek: appliedGameweek,
+        });
         if (cancelled) {
           return;
         }
@@ -56,11 +68,58 @@ export function FixtureTicker(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [appliedGameweek, appliedLimit, appliedTeamId]);
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <h2 className="mb-3 text-xl font-semibold">Upcoming Fixtures</h2>
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <input
+          aria-label="Fixture limit"
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+          value={limit}
+          onChange={(event) => setLimit(event.target.value)}
+          placeholder="Limit (1-100)"
+        />
+        <input
+          aria-label="Filter by team id"
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+          value={teamIdInput}
+          onChange={(event) => setTeamIdInput(event.target.value)}
+          placeholder="Team ID"
+        />
+        <input
+          aria-label="Filter by gameweek"
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+          value={gameweekInput}
+          onChange={(event) => setGameweekInput(event.target.value)}
+          placeholder="Gameweek (1-38)"
+        />
+        <button
+          type="button"
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50"
+          onClick={() => {
+            const parsedLimit = Number.parseInt(limit, 10);
+            if (Number.isNaN(parsedLimit)) {
+              setAppliedLimit(20);
+            } else {
+              setAppliedLimit(Math.min(100, Math.max(1, parsedLimit)));
+            }
+
+            const parsedTeamId = Number.parseInt(teamIdInput, 10);
+            setAppliedTeamId(Number.isNaN(parsedTeamId) ? undefined : parsedTeamId);
+
+            const parsedGameweek = Number.parseInt(gameweekInput, 10);
+            if (Number.isNaN(parsedGameweek)) {
+              setAppliedGameweek(undefined);
+            } else {
+              setAppliedGameweek(Math.min(38, Math.max(1, parsedGameweek)));
+            }
+          }}
+        >
+          Apply filters
+        </button>
+      </div>
       {state.type === "loading" && <p className="text-sm text-slate-600">Loading fixtures...</p>}
       {state.type === "error" && <p className="text-sm text-red-700">{state.message}</p>}
       {state.type === "loaded" && state.items.length === 0 && (

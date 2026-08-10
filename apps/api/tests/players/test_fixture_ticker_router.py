@@ -49,11 +49,16 @@ def test_fixture_ticker_route_passes_limit() -> None:
     app.dependency_overrides[get_list_fixture_ticker_service] = lambda: service
     try:
         client = TestClient(app)
-        response = client.get("/fixtures/ticker", params={"limit": 8})
+        response = client.get(
+            "/fixtures/ticker",
+            params={"limit": 8, "team_id": 3, "gameweek": 6},
+        )
 
         assert response.status_code == 200
         assert service.last_request is not None
         assert service.last_request.limit == 8
+        assert service.last_request.team_id == 3
+        assert service.last_request.gameweek == 6
     finally:
         app.dependency_overrides.clear()
 
@@ -64,6 +69,18 @@ def test_fixture_ticker_route_validation_error() -> None:
     try:
         client = TestClient(app)
         response = client.get("/fixtures/ticker", params={"limit": 0})
+
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_fixture_ticker_route_gameweek_validation_error() -> None:
+    service = _FakeFixtureTickerService()
+    app.dependency_overrides[get_list_fixture_ticker_service] = lambda: service
+    try:
+        client = TestClient(app)
+        response = client.get("/fixtures/ticker", params={"gameweek": 39})
 
         assert response.status_code == 422
     finally:

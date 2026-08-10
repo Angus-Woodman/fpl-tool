@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, aliased
 
 from api.models import FixtureModel, GameweekModel, TeamModel
@@ -28,7 +28,13 @@ class FixtureReadRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def list_upcoming(self, limit: int) -> FixtureTickerResult:
+    def list_upcoming(
+        self,
+        *,
+        limit: int,
+        team_id: int | None,
+        gameweek: int | None,
+    ) -> FixtureTickerResult:
         home_team = aliased(TeamModel)
         away_team = aliased(TeamModel)
 
@@ -48,6 +54,17 @@ class FixtureReadRepository:
             .order_by(FixtureModel.kickoff_time.asc())
             .limit(limit)
         )
+
+        if team_id is not None:
+            stmt = stmt.where(
+                or_(
+                    FixtureModel.home_team_id == team_id,
+                    FixtureModel.away_team_id == team_id,
+                )
+            )
+
+        if gameweek is not None:
+            stmt = stmt.where(GameweekModel.number == gameweek)
 
         rows = self._session.execute(stmt).all()
 

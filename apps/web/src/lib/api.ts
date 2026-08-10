@@ -58,8 +58,17 @@ export async function fetchPlayers(params: {
   return (await response.json()) as PlayerListResponse;
 }
 
-export async function fetchFixtureTicker(limit = 20): Promise<FixtureTickerResponse> {
-  const response = await fetch(`${API_BASE_URL}/fixtures/ticker?limit=${limit}`);
+export async function fetchFixtureTicker(params?: {
+  limit?: number;
+  team_id?: number;
+  gameweek?: number;
+}): Promise<FixtureTickerResponse> {
+  const query = new URLSearchParams();
+  query.set("limit", String(params?.limit ?? 20));
+  if (params?.team_id !== undefined) query.set("team_id", String(params.team_id));
+  if (params?.gameweek !== undefined) query.set("gameweek", String(params.gameweek));
+
+  const response = await fetch(`${API_BASE_URL}/fixtures/ticker?${query.toString()}`);
   if (!response.ok) {
     throw new Error(`Fixture ticker request failed with status ${response.status}`);
   }
