@@ -32,6 +32,7 @@ playwright-report/
 # Build
 dist/
 build/
+*.tsbuildinfo
 
 # Alembic artifacts
 *.db

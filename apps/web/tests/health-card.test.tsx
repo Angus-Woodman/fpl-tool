@@ -14,8 +14,8 @@ describe("HealthCard", () => {
       json: async () => ({
         status: "ok",
         service: "api",
-        environment: "test"
-      })
+        environment: "test",
+      }),
     } as Response);
 
     render(<HealthCard />);

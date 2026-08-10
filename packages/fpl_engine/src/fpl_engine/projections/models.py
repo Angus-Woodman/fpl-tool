@@ -14,8 +14,7 @@ class ProjectionInput:
 class ProjectionModel(Protocol):
     model_version: str
 
-    def project_points(self, data: ProjectionInput) -> float:
-        ...
+    def project_points(self, data: ProjectionInput) -> float: ...
 
 
 @dataclass(frozen=True)

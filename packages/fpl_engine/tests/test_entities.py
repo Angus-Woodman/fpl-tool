@@ -1,4 +1,3 @@
-
 from fpl_engine.domain import Player, PlayerPosition, Team
 
 

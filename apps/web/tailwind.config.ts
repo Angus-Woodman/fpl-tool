@@ -7,11 +7,11 @@ const config: Config = {
       colors: {
         canvas: "#f6f4ef",
         ink: "#111111",
-        accent: "#0f766e"
-      }
-    }
+        accent: "#0f766e",
+      },
+    },
   },
-  plugins: []
+  plugins: [],
 };
 
 export default config;
