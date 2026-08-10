@@ -2,7 +2,14 @@
 
 import { useEffect, useState } from "react";
 
-import { FixtureTickerItem, TeamItem, fetchFixtureTicker, fetchTeams } from "@/lib/api";
+import {
+  FixtureTickerItem,
+  GameweekItem,
+  TeamItem,
+  fetchFixtureTicker,
+  fetchGameweeks,
+  fetchTeams,
+} from "@/lib/api";
 
 type LoadState =
   | { type: "loading" }
@@ -28,9 +35,11 @@ function formatKickoff(value: string): string {
 export function FixtureTicker(): JSX.Element {
   const [limit, setLimit] = useState("20");
   const [selectedTeamId, setSelectedTeamId] = useState("");
-  const [gameweekInput, setGameweekInput] = useState("");
+  const [selectedGameweek, setSelectedGameweek] = useState("");
   const [teams, setTeams] = useState<TeamItem[]>([]);
+  const [gameweeks, setGameweeks] = useState<GameweekItem[]>([]);
   const [teamsError, setTeamsError] = useState<string | null>(null);
+  const [gameweeksError, setGameweeksError] = useState<string | null>(null);
 
   const [appliedLimit, setAppliedLimit] = useState(20);
   const [appliedTeamId, setAppliedTeamId] = useState<number | undefined>(undefined);
@@ -56,6 +65,34 @@ export function FixtureTicker(): JSX.Element {
 
         const message = error instanceof Error ? error.message : "Failed to load teams";
         setTeamsError(message);
+      }
+    }
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run(): Promise<void> {
+      try {
+        const data = await fetchGameweeks();
+        if (cancelled) {
+          return;
+        }
+
+        setGameweeks(data.items);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : "Failed to load gameweeks";
+        setGameweeksError(message);
       }
     }
 
@@ -124,13 +161,19 @@ export function FixtureTicker(): JSX.Element {
             </option>
           ))}
         </select>
-        <input
+        <select
           aria-label="Filter by gameweek"
           className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-          value={gameweekInput}
-          onChange={(event) => setGameweekInput(event.target.value)}
-          placeholder="Gameweek (1-38)"
-        />
+          value={selectedGameweek}
+          onChange={(event) => setSelectedGameweek(event.target.value)}
+        >
+          <option value="">All gameweeks</option>
+          {gameweeks.map((gameweek) => (
+            <option key={gameweek.id} value={String(gameweek.number)}>
+              GW {gameweek.number}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
           className="rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50"
@@ -145,18 +188,69 @@ export function FixtureTicker(): JSX.Element {
             const parsedTeamId = Number.parseInt(selectedTeamId, 10);
             setAppliedTeamId(Number.isNaN(parsedTeamId) ? undefined : parsedTeamId);
 
-            const parsedGameweek = Number.parseInt(gameweekInput, 10);
-            if (Number.isNaN(parsedGameweek)) {
-              setAppliedGameweek(undefined);
-            } else {
-              setAppliedGameweek(Math.min(38, Math.max(1, parsedGameweek)));
-            }
+            const parsedGameweek = Number.parseInt(selectedGameweek, 10);
+            setAppliedGameweek(Number.isNaN(parsedGameweek) ? undefined : parsedGameweek);
           }}
         >
           Apply filters
         </button>
       </div>
+      {(appliedLimit !== 20 || appliedTeamId !== undefined || appliedGameweek !== undefined) && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          {appliedLimit !== 20 && (
+            <button
+              type="button"
+              className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs"
+              onClick={() => {
+                setLimit("20");
+                setAppliedLimit(20);
+              }}
+            >
+              Limit: {appliedLimit} x
+            </button>
+          )}
+          {appliedTeamId !== undefined && (
+            <button
+              type="button"
+              className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs"
+              onClick={() => {
+                setSelectedTeamId("");
+                setAppliedTeamId(undefined);
+              }}
+            >
+              Team: {teams.find((team) => team.id === appliedTeamId)?.short_name ?? appliedTeamId} x
+            </button>
+          )}
+          {appliedGameweek !== undefined && (
+            <button
+              type="button"
+              className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs"
+              onClick={() => {
+                setSelectedGameweek("");
+                setAppliedGameweek(undefined);
+              }}
+            >
+              GW: {appliedGameweek} x
+            </button>
+          )}
+          <button
+            type="button"
+            className="rounded-full border border-slate-300 px-3 py-1 text-xs hover:bg-slate-50"
+            onClick={() => {
+              setLimit("20");
+              setSelectedTeamId("");
+              setSelectedGameweek("");
+              setAppliedLimit(20);
+              setAppliedTeamId(undefined);
+              setAppliedGameweek(undefined);
+            }}
+          >
+            Clear all
+          </button>
+        </div>
+      )}
       {teamsError && <p className="mb-3 text-sm text-amber-700">{teamsError}</p>}
+      {gameweeksError && <p className="mb-3 text-sm text-amber-700">{gameweeksError}</p>}
       {state.type === "loading" && <p className="text-sm text-slate-600">Loading fixtures...</p>}
       {state.type === "error" && <p className="text-sm text-red-700">{state.message}</p>}
       {state.type === "loaded" && state.items.length === 0 && (

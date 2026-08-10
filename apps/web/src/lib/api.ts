@@ -42,6 +42,20 @@ export type TeamListResponse = {
   total: number;
 };
 
+export type GameweekItem = {
+  id: number;
+  number: number;
+  name: string;
+  is_current: boolean;
+  is_next: boolean;
+  is_finished: boolean;
+};
+
+export type GameweekListResponse = {
+  items: GameweekItem[];
+  total: number;
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchPlayers(params: {
@@ -94,4 +108,13 @@ export async function fetchTeams(): Promise<TeamListResponse> {
   }
 
   return (await response.json()) as TeamListResponse;
+}
+
+export async function fetchGameweeks(): Promise<GameweekListResponse> {
+  const response = await fetch(`${API_BASE_URL}/gameweeks`);
+  if (!response.ok) {
+    throw new Error(`Gameweeks request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as GameweekListResponse;
 }

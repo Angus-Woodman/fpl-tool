@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.core.logging import configure_logging
 from api.routers.fixtures import router as fixtures_router
+from api.routers.gameweeks import router as gameweeks_router
 from api.routers.health import router as health_router
 from api.routers.imports import router as imports_router
 from api.routers.players import router as players_router
@@ -25,3 +26,4 @@ app.include_router(imports_router)
 app.include_router(players_router)
 app.include_router(fixtures_router)
 app.include_router(teams_router)
+app.include_router(gameweeks_router)
