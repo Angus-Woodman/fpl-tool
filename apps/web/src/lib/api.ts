@@ -31,6 +31,17 @@ export type FixtureTickerResponse = {
   total: number;
 };
 
+export type TeamItem = {
+  id: number;
+  name: string;
+  short_name: string;
+};
+
+export type TeamListResponse = {
+  items: TeamItem[];
+  total: number;
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchPlayers(params: {
@@ -74,4 +85,13 @@ export async function fetchFixtureTicker(params?: {
   }
 
   return (await response.json()) as FixtureTickerResponse;
+}
+
+export async function fetchTeams(): Promise<TeamListResponse> {
+  const response = await fetch(`${API_BASE_URL}/teams`);
+  if (!response.ok) {
+    throw new Error(`Teams request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as TeamListResponse;
 }

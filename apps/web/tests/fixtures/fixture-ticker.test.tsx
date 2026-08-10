@@ -10,22 +10,35 @@ afterEach(() => {
 
 describe("FixtureTicker", () => {
   it("renders loaded fixture rows", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        items: [
-          {
-            fixture_id: 1,
-            gameweek_number: 2,
-            kickoff_time: "2026-08-21T18:30:00+00:00",
-            home_team_short_name: "ARS",
-            away_team_short_name: "AVL",
-            finished: false,
-          },
-        ],
-        total: 1,
-      }),
-    } as Response);
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{ id: 1, name: "Arsenal", short_name: "ARS" }],
+            total: 1,
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              fixture_id: 1,
+              gameweek_number: 2,
+              kickoff_time: "2026-08-21T18:30:00+00:00",
+              home_team_short_name: "ARS",
+              away_team_short_name: "AVL",
+              finished: false,
+            },
+          ],
+          total: 1,
+        }),
+      } as Response;
+    });
 
     render(<FixtureTicker />);
 
@@ -34,44 +47,74 @@ describe("FixtureTicker", () => {
       expect(screen.getByText("Showing 1 fixtures")).toBeInTheDocument();
     });
 
+    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/teams");
     expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/fixtures/ticker?limit=20");
   });
 
   it("applies filters and refetches ticker", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        items: [],
-        total: 0,
-      }),
-    } as Response);
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              { id: 1, name: "Arsenal", short_name: "ARS" },
+              { id: 2, name: "Aston Villa", short_name: "AVL" },
+            ],
+            total: 2,
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          items: [],
+          total: 0,
+        }),
+      } as Response;
+    });
 
     render(<FixtureTicker />);
 
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
 
     fireEvent.change(screen.getByLabelText("Fixture limit"), { target: { value: "5" } });
-    fireEvent.change(screen.getByLabelText("Filter by team id"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("Filter by team"), { target: { value: "2" } });
     fireEvent.change(screen.getByLabelText("Filter by gameweek"), { target: { value: "7" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
 
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenLastCalledWith(
-        "http://127.0.0.1:8000/fixtures/ticker?limit=5&team_id=3&gameweek=7"
+        "http://127.0.0.1:8000/fixtures/ticker?limit=5&team_id=2&gameweek=7"
       );
     });
   });
 
   it("renders empty state", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        items: [],
-        total: 0,
-      }),
-    } as Response);
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [],
+            total: 0,
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          items: [],
+          total: 0,
+        }),
+      } as Response;
+    });
 
     render(<FixtureTicker />);
 
@@ -81,12 +124,48 @@ describe("FixtureTicker", () => {
   });
 
   it("renders error state", async () => {
-    vi.spyOn(global, "fetch").mockRejectedValue(new Error("fixtures unavailable"));
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [],
+            total: 0,
+          }),
+        } as Response;
+      }
+
+      throw new Error("fixtures unavailable");
+    });
 
     render(<FixtureTicker />);
 
     await waitFor(() => {
       expect(screen.getByText("fixtures unavailable")).toBeInTheDocument();
+    });
+  });
+
+  it("shows teams load warning when teams request fails", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        throw new Error("teams unavailable");
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          items: [],
+          total: 0,
+        }),
+      } as Response;
+    });
+
+    render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(screen.getByText("teams unavailable")).toBeInTheDocument();
     });
   });
 });

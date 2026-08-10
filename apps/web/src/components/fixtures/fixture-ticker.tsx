@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { FixtureTickerItem, fetchFixtureTicker } from "@/lib/api";
+import { FixtureTickerItem, TeamItem, fetchFixtureTicker, fetchTeams } from "@/lib/api";
 
 type LoadState =
   | { type: "loading" }
@@ -27,14 +27,44 @@ function formatKickoff(value: string): string {
 
 export function FixtureTicker(): JSX.Element {
   const [limit, setLimit] = useState("20");
-  const [teamIdInput, setTeamIdInput] = useState("");
+  const [selectedTeamId, setSelectedTeamId] = useState("");
   const [gameweekInput, setGameweekInput] = useState("");
+  const [teams, setTeams] = useState<TeamItem[]>([]);
+  const [teamsError, setTeamsError] = useState<string | null>(null);
 
   const [appliedLimit, setAppliedLimit] = useState(20);
   const [appliedTeamId, setAppliedTeamId] = useState<number | undefined>(undefined);
   const [appliedGameweek, setAppliedGameweek] = useState<number | undefined>(undefined);
 
   const [state, setState] = useState<LoadState>({ type: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run(): Promise<void> {
+      try {
+        const data = await fetchTeams();
+        if (cancelled) {
+          return;
+        }
+
+        setTeams(data.items);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : "Failed to load teams";
+        setTeamsError(message);
+      }
+    }
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,13 +111,19 @@ export function FixtureTicker(): JSX.Element {
           onChange={(event) => setLimit(event.target.value)}
           placeholder="Limit (1-100)"
         />
-        <input
-          aria-label="Filter by team id"
+        <select
+          aria-label="Filter by team"
           className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-          value={teamIdInput}
-          onChange={(event) => setTeamIdInput(event.target.value)}
-          placeholder="Team ID"
-        />
+          value={selectedTeamId}
+          onChange={(event) => setSelectedTeamId(event.target.value)}
+        >
+          <option value="">All teams</option>
+          {teams.map((team) => (
+            <option key={team.id} value={String(team.id)}>
+              {team.name} ({team.short_name})
+            </option>
+          ))}
+        </select>
         <input
           aria-label="Filter by gameweek"
           className="rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -106,7 +142,7 @@ export function FixtureTicker(): JSX.Element {
               setAppliedLimit(Math.min(100, Math.max(1, parsedLimit)));
             }
 
-            const parsedTeamId = Number.parseInt(teamIdInput, 10);
+            const parsedTeamId = Number.parseInt(selectedTeamId, 10);
             setAppliedTeamId(Number.isNaN(parsedTeamId) ? undefined : parsedTeamId);
 
             const parsedGameweek = Number.parseInt(gameweekInput, 10);
@@ -120,6 +156,7 @@ export function FixtureTicker(): JSX.Element {
           Apply filters
         </button>
       </div>
+      {teamsError && <p className="mb-3 text-sm text-amber-700">{teamsError}</p>}
       {state.type === "loading" && <p className="text-sm text-slate-600">Loading fixtures...</p>}
       {state.type === "error" && <p className="text-sm text-red-700">{state.message}</p>}
       {state.type === "loaded" && state.items.length === 0 && (
