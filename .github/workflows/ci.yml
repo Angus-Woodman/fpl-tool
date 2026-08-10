@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: Install tools
+        run: mise install
+      - name: Install Python dependencies
+        run: uv sync --all-packages --dev
+      - name: Ruff
+        run: uv run ruff check apps/api/src apps/api/tests packages/fpl_engine/src packages/fpl_engine/tests
+      - name: Mypy (engine)
+        run: uv run --package fpl-engine mypy packages/fpl_engine/src
+      - name: Mypy (api)
+        run: uv run --package api mypy apps/api/src
+      - name: Python tests
+        run: |
+          uv run --package fpl-engine pytest -q packages/fpl_engine/tests
+          uv run --package api pytest -q apps/api/tests
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: Install tools
+        run: mise install
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Frontend lint
+        run: pnpm --filter web lint
+      - name: Frontend typecheck
+        run: pnpm --filter web typecheck
+      - name: Frontend unit tests
+        run: pnpm --filter web test:run

@@ -1,0 +1,37 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.8
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: api-mypy
+        name: api mypy
+        entry: uv run --package api mypy apps/api/src
+        language: system
+        pass_filenames: false
+        files: ^apps/api/
+
+      - id: api-pytest
+        name: api pytest
+        entry: uv run --package api pytest -q apps/api/tests
+        language: system
+        pass_filenames: false
+        files: ^(apps/api|packages/fpl_engine)/
+
+      - id: web-lint
+        name: web lint
+        entry: pnpm --filter web lint
+        language: system
+        pass_filenames: false
+        files: ^apps/web/
+
+      - id: web-test
+        name: web unit tests
+        entry: pnpm --filter web test:run
+        language: system
+        pass_filenames: false
+        files: ^apps/web/

@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass
+from enum import StrEnum
+
+
+class PlayerPosition(StrEnum):
+    GOALKEEPER = "GK"
+    DEFENDER = "DEF"
+    MIDFIELDER = "MID"
+    FORWARD = "FWD"
+
+
+@dataclass(frozen=True)
+class Team:
+    id: int
+    name: str
+    short_name: str
+    external_fpl_id: int
+
+
+@dataclass(frozen=True)
+class Player:
+    id: int
+    external_fpl_id: int
+    first_name: str
+    second_name: str
+    web_name: str
+    team_id: int
+    position: PlayerPosition
+    current_price: float
+    status: str
+
+
+@dataclass(frozen=True)
+class Gameweek:
+    id: int
+    number: int
+    name: str
+    deadline: dt.datetime
+    is_current: bool
+    is_next: bool
+    is_finished: bool
+
+
+@dataclass(frozen=True)
+class Fixture:
+    id: int
+    external_fpl_id: int
+    gameweek_id: int | None
+    home_team_id: int
+    away_team_id: int
+    kickoff_time: dt.datetime
+    home_score: int | None
+    away_score: int | None
+    finished: bool
+
+
+@dataclass(frozen=True)
+class PlayerGameweekStat:
+    player_id: int
+    gameweek_id: int
+    fixture_id: int
+    minutes: int
+    total_points: int
+    goals_scored: int
+    assists: int
+    clean_sheets: int
+    goals_conceded: int
+    bonus: int
+    bps: int
+
+
+@dataclass(frozen=True)
+class PlayerSnapshot:
+    player_id: int
+    captured_at: dt.datetime
+    gameweek_id: int | None
+    price: float
+    ownership_percent: float
+    transfers_in: int
+    transfers_out: int
+    status: str
+    chance_of_playing_next_round: int | None
+
+
+@dataclass(frozen=True)
+class Projection:
+    player_id: int
+    fixture_id: int | None
+    gameweek_id: int | None
+    projected_points: float
+    expected_minutes: float
+    generated_at: dt.datetime
+    model_version: str

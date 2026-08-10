@@ -1,0 +1,24 @@
+# Agent Instructions
+
+- Domain code must not depend on FastAPI.
+- External API calls belong in infrastructure adapters.
+- All new domain behaviour requires tests.
+- Database schema changes require Alembic migrations.
+- Python application code must be typed.
+- TypeScript strict mode must remain enabled.
+- Do not silently catch errors.
+- Do not introduce unnecessary dependencies.
+- Prefer small focused changes.
+- Explain architectural changes before making large refactors.
+- Do not rewrite working modules without a clear reason.
+- Preserve backward-compatible behaviour unless intentionally changing it.
+- Run appropriate tests after modifications.
+- Do not assume globally installed Node or Python versions.
+- Respect the versions declared by mise.
+- Never install application dependencies globally.
+- Python dependencies belong in the project-local uv environment.
+- JavaScript dependencies belong in project-local node_modules.
+- PostgreSQL runs through Docker Compose rather than as a native host service.
+- Do not containerise the frontend/backend development workflow without a clear reason.
+- Do not introduce Codespaces or Dev Containers unless explicitly requested later.
+- Do not add infrastructure services merely because they might be useful in future.

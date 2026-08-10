@@ -1,0 +1,11 @@
+{
+  "name": "fpl-tool",
+  "private": true,
+  "packageManager": "pnpm@9.9.0",
+  "scripts": {
+    "lint": "pnpm --filter web lint",
+    "typecheck": "pnpm --filter web typecheck",
+    "test": "pnpm --filter web test:run",
+    "format": "pnpm --filter web format"
+  }
+}
