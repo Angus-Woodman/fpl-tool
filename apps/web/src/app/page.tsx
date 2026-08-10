@@ -12,12 +12,20 @@ export default function HomePage(): JSX.Element {
           Phase 0 foundation: a local-first stack with typed API, isolated
           domain engine, and test-first engineering.
         </p>
-        <Link
-          href="/players"
-          className="mt-4 inline-block rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50"
-        >
-          Open Player Browser
-        </Link>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <Link
+            href="/players"
+            className="inline-block rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50"
+          >
+            Open Player Browser
+          </Link>
+          <Link
+            href="/fixtures"
+            className="inline-block rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50"
+          >
+            Open Fixture Ticker
+          </Link>
+        </div>
       </header>
       <HealthCard />
     </main>

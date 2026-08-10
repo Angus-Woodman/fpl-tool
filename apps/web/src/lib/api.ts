@@ -17,6 +17,20 @@ export type PlayerListResponse = {
   page_size: number;
 };
 
+export type FixtureTickerItem = {
+  fixture_id: number;
+  gameweek_number: number | null;
+  kickoff_time: string;
+  home_team_short_name: string;
+  away_team_short_name: string;
+  finished: boolean;
+};
+
+export type FixtureTickerResponse = {
+  items: FixtureTickerItem[];
+  total: number;
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchPlayers(params: {
@@ -42,4 +56,13 @@ export async function fetchPlayers(params: {
   }
 
   return (await response.json()) as PlayerListResponse;
+}
+
+export async function fetchFixtureTicker(limit = 20): Promise<FixtureTickerResponse> {
+  const response = await fetch(`${API_BASE_URL}/fixtures/ticker?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Fixture ticker request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as FixtureTickerResponse;
 }
