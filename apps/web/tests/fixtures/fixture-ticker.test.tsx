@@ -70,7 +70,7 @@ describe("FixtureTicker", () => {
 
     expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/teams");
     expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/gameweeks");
-    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20");
+    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=1");
   });
 
   it("applies filters and refetches ticker", async () => {
@@ -133,6 +133,8 @@ describe("FixtureTicker", () => {
       expect(fetchSpy).toHaveBeenCalledTimes(3);
     });
 
+    expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
+
     fireEvent.change(screen.getByLabelText("Fixture limit"), { target: { value: "5" } });
     fireEvent.change(screen.getByLabelText("Filter by team"), { target: { value: "2" } });
     fireEvent.change(screen.getByLabelText("Filter by gameweek"), { target: { value: "2" } });
@@ -146,7 +148,7 @@ describe("FixtureTicker", () => {
 
     expect(screen.getByRole("button", { name: "Limit: 5 x" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Team: AVL x" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "GW: 2 x" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "GW: 2 x" })).not.toBeInTheDocument();
   });
 
   it("clears all applied filters via chip action", async () => {
@@ -198,6 +200,8 @@ describe("FixtureTicker", () => {
       expect(fetchSpy).toHaveBeenCalledTimes(3);
     });
 
+    expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
+
     fireEvent.change(screen.getByLabelText("Fixture limit"), { target: { value: "5" } });
     fireEvent.change(screen.getByLabelText("Filter by team"), { target: { value: "2" } });
     fireEvent.change(screen.getByLabelText("Filter by gameweek"), { target: { value: "2" } });
@@ -212,7 +216,78 @@ describe("FixtureTicker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
 
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20");
+      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
+    });
+  });
+
+  it("resets filters to next gameweek baseline", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{ id: 2, name: "Aston Villa", short_name: "AVL" }],
+            total: 1,
+          }),
+        } as Response;
+      }
+
+      if (url.endsWith("/gameweeks")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                id: 1,
+                number: 1,
+                name: "Gameweek 1",
+                is_current: true,
+                is_next: false,
+                is_finished: false,
+              },
+              {
+                id: 2,
+                number: 2,
+                name: "Gameweek 2",
+                is_current: false,
+                is_next: true,
+                is_finished: false,
+              },
+            ],
+            total: 2,
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          items: [],
+          total: 4,
+          page: 1,
+          page_size: 20,
+        }),
+      } as Response;
+    });
+
+    render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
+    });
+
+    fireEvent.change(screen.getByLabelText("Filter by gameweek"), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=1");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset to next GW" }));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
     });
   });
 

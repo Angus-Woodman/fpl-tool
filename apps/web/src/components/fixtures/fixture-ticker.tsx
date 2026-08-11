@@ -44,6 +44,7 @@ export function FixtureTicker(): JSX.Element {
   const [selectedGameweek, setSelectedGameweek] = useState("");
   const [teams, setTeams] = useState<TeamItem[]>([]);
   const [gameweeks, setGameweeks] = useState<GameweekItem[]>([]);
+  const [gameweeksLoaded, setGameweeksLoaded] = useState(false);
   const [teamsError, setTeamsError] = useState<string | null>(null);
   const [gameweeksError, setGameweeksError] = useState<string | null>(null);
 
@@ -53,6 +54,12 @@ export function FixtureTicker(): JSX.Element {
   const [appliedGameweek, setAppliedGameweek] = useState<number | undefined>(undefined);
 
   const [state, setState] = useState<LoadState>({ type: "loading" });
+
+  const defaultGameweek =
+    gameweeks.find((gameweek) => gameweek.is_next)?.number ??
+    gameweeks.find((gameweek) => gameweek.is_current)?.number;
+  const hasAppliedGameweekFilter =
+    appliedGameweek !== undefined && appliedGameweek !== defaultGameweek;
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +100,15 @@ export function FixtureTicker(): JSX.Element {
         }
 
         setGameweeks(data.items);
+
+        const defaultNumber =
+          data.items.find((gameweek) => gameweek.is_next)?.number ??
+          data.items.find((gameweek) => gameweek.is_current)?.number;
+
+        if (defaultNumber !== undefined) {
+          setSelectedGameweek(String(defaultNumber));
+          setAppliedGameweek(defaultNumber);
+        }
       } catch (error) {
         if (cancelled) {
           return;
@@ -100,6 +116,10 @@ export function FixtureTicker(): JSX.Element {
 
         const message = error instanceof Error ? error.message : "Failed to load gameweeks";
         setGameweeksError(message);
+      } finally {
+        if (!cancelled) {
+          setGameweeksLoaded(true);
+        }
       }
     }
 
@@ -111,6 +131,10 @@ export function FixtureTicker(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    if (!gameweeksLoaded) {
+      return;
+    }
+
     let cancelled = false;
 
     async function run(): Promise<void> {
@@ -149,7 +173,7 @@ export function FixtureTicker(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [appliedGameweek, appliedLimit, appliedPage, appliedTeamId]);
+  }, [appliedGameweek, appliedLimit, appliedPage, appliedTeamId, gameweeksLoaded]);
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -210,7 +234,22 @@ export function FixtureTicker(): JSX.Element {
           Apply filters
         </button>
       </div>
-      {(appliedLimit !== 20 || appliedTeamId !== undefined || appliedGameweek !== undefined) && (
+      {defaultGameweek !== undefined && appliedGameweek !== defaultGameweek && (
+        <div className="mb-3">
+          <button
+            type="button"
+            className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1 text-xs hover:bg-slate-100"
+            onClick={() => {
+              setSelectedGameweek(String(defaultGameweek));
+              setAppliedGameweek(defaultGameweek);
+              setAppliedPage(1);
+            }}
+          >
+            Reset to next GW
+          </button>
+        </div>
+      )}
+      {(appliedLimit !== 20 || appliedTeamId !== undefined || hasAppliedGameweekFilter) && (
         <div className="mb-3 flex flex-wrap items-center gap-2">
           {appliedLimit !== 20 && (
             <button
@@ -238,7 +277,7 @@ export function FixtureTicker(): JSX.Element {
               Team: {teams.find((team) => team.id === appliedTeamId)?.short_name ?? appliedTeamId} x
             </button>
           )}
-          {appliedGameweek !== undefined && (
+          {hasAppliedGameweekFilter && (
             <button
               type="button"
               className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs"
@@ -257,10 +296,10 @@ export function FixtureTicker(): JSX.Element {
             onClick={() => {
               setLimit("20");
               setSelectedTeamId("");
-              setSelectedGameweek("");
+              setSelectedGameweek(defaultGameweek !== undefined ? String(defaultGameweek) : "");
               setAppliedLimit(20);
               setAppliedTeamId(undefined);
-              setAppliedGameweek(undefined);
+              setAppliedGameweek(defaultGameweek);
               setAppliedPage(1);
             }}
           >
