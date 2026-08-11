@@ -79,6 +79,7 @@ def get_my_team(
 @router.put("", response_model=CurrentSquadResponse)
 def put_my_team(
     body: UpsertCurrentSquadRequestBody,
+    db_session: Annotated[Session, Depends(get_db_session)],
     service: Annotated[UpsertCurrentSquadService, Depends(get_upsert_current_squad_service)],
 ) -> CurrentSquadResponse:
     try:
@@ -98,8 +99,13 @@ def put_my_team(
                 ],
             )
         )
+        db_session.commit()
     except ValueError as error:
+        db_session.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    except Exception:
+        db_session.rollback()
+        raise
 
     return CurrentSquadResponse(
         squad_id=result.squad_id,

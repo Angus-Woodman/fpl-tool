@@ -1,5 +1,6 @@
 from typing import Any
 
+from api.db.session import get_db_session
 from api.main import app
 from api.repositories.current_squad_repository import (
     CurrentSquadPlayerRecord,
@@ -52,6 +53,18 @@ class _FakeUpsertCurrentSquadService:
                 )
             ],
         )
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.committed = False
+        self.rolled_back = False
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def rollback(self) -> None:
+        self.rolled_back = True
 
 
 def _payload_player(
@@ -167,7 +180,9 @@ def test_get_my_team_returns_current_squad() -> None:
 
 def test_put_my_team_returns_saved_squad() -> None:
     service = _FakeUpsertCurrentSquadService()
+    session = _FakeSession()
     app.dependency_overrides[get_upsert_current_squad_service] = lambda: service
+    app.dependency_overrides[get_db_session] = lambda: session
     try:
         client = TestClient(app)
         response = client.put("/my-team", json=_build_payload())
@@ -178,5 +193,7 @@ def test_put_my_team_returns_saved_squad() -> None:
         assert payload["players"][0]["is_captain"] is True
         assert service.last_request is not None
         assert service.last_request.free_transfers == 2
+        assert session.committed is True
+        assert session.rolled_back is False
     finally:
         app.dependency_overrides.clear()
