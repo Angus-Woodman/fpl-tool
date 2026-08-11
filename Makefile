@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs test lint typecheck format db-migrate db-revision data-refresh clean
+.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs test lint typecheck format db-migrate db-revision data-refresh projections-refresh clean
 
 setup:
 	mise install
@@ -52,6 +52,9 @@ db-revision:
 
 data-refresh:
 	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api python -m api.scripts.import_fpl_data
+
+projections-refresh:
+	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api python -m api.scripts.generate_projections
 
 clean:
 	rm -rf .venv

@@ -120,6 +120,13 @@ class ProjectionModel(Base):
     gameweek_id: Mapped[int | None] = mapped_column(ForeignKey("gameweeks.id"), index=True)
     projected_points: Mapped[float] = mapped_column(Float, nullable=False)
     expected_minutes: Mapped[float] = mapped_column(Float, nullable=False)
+    appearance_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    goal_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    assist_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    clean_sheet_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    bonus_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    defensive_contribution_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    other_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     generated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
