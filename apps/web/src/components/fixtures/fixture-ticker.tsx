@@ -39,6 +39,7 @@ function formatKickoff(value: string): string {
 }
 
 export function FixtureTicker(): JSX.Element {
+  const [viewMode, setViewMode] = useState<"table" | "cards">("table");
   const [limit, setLimit] = useState("20");
   const [selectedTeamId, setSelectedTeamId] = useState("");
   const [selectedGameweek, setSelectedGameweek] = useState("");
@@ -177,7 +178,35 @@ export function FixtureTicker(): JSX.Element {
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <h2 className="mb-3 text-xl font-semibold">Upcoming Fixtures</h2>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold">Upcoming Fixtures</h2>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            aria-label="Table view"
+            className={`rounded-md border px-3 py-1 text-xs ${
+              viewMode == "table"
+                ? "border-slate-800 bg-slate-800 text-white"
+                : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+            }`}
+            onClick={() => setViewMode("table")}
+          >
+            Table
+          </button>
+          <button
+            type="button"
+            aria-label="Card view"
+            className={`rounded-md border px-3 py-1 text-xs ${
+              viewMode == "cards"
+                ? "border-slate-800 bg-slate-800 text-white"
+                : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+            }`}
+            onClick={() => setViewMode("cards")}
+          >
+            Cards
+          </button>
+        </div>
+      </div>
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <input
           aria-label="Fixture limit"
@@ -316,26 +345,43 @@ export function FixtureTicker(): JSX.Element {
       )}
       {state.type === "loaded" && state.items.length > 0 && (
         <div className="overflow-x-auto">
-          <table className="min-w-full border-collapse text-left text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                <th className="px-3 py-2 font-medium">GW</th>
-                <th className="px-3 py-2 font-medium">Fixture</th>
-                <th className="px-3 py-2 font-medium">Kickoff (UTC)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.items.map((item) => (
-                <tr key={item.fixture_id} className="border-b border-slate-100">
-                  <td className="px-3 py-2 text-slate-700">{item.gameweek_number ?? "-"}</td>
-                  <td className="px-3 py-2 font-medium text-slate-900">
-                    {item.home_team_short_name} vs {item.away_team_short_name}
-                  </td>
-                  <td className="px-3 py-2 text-slate-700">{formatKickoff(item.kickoff_time)}</td>
+          {viewMode === "table" ? (
+            <table className="min-w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                  <th className="px-3 py-2 font-medium">GW</th>
+                  <th className="px-3 py-2 font-medium">Fixture</th>
+                  <th className="px-3 py-2 font-medium">Kickoff (UTC)</th>
                 </tr>
+              </thead>
+              <tbody>
+                {state.items.map((item) => (
+                  <tr key={item.fixture_id} className="border-b border-slate-100">
+                    <td className="px-3 py-2 text-slate-700">{item.gameweek_number ?? "-"}</td>
+                    <td className="px-3 py-2 font-medium text-slate-900">
+                      {item.home_team_short_name} vs {item.away_team_short_name}
+                    </td>
+                    <td className="px-3 py-2 text-slate-700">{formatKickoff(item.kickoff_time)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {state.items.map((item) => (
+                <article
+                  key={item.fixture_id}
+                  className="rounded-lg border border-slate-200 bg-slate-50 p-3"
+                >
+                  <p className="text-xs text-slate-500">GW {item.gameweek_number ?? "-"}</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">
+                    {item.home_team_short_name} vs {item.away_team_short_name}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-600">Kickoff: {formatKickoff(item.kickoff_time)} UTC</p>
+                </article>
               ))}
-            </tbody>
-          </table>
+            </div>
+          )}
           <p className="mt-3 text-xs text-slate-600">
             Showing {state.items.length} of {state.total} fixtures
           </p>

@@ -348,6 +348,70 @@ describe("FixtureTicker", () => {
     });
   });
 
+  it("switches fixture display to cards view", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [],
+            total: 0,
+          }),
+        } as Response;
+      }
+
+      if (url.endsWith("/gameweeks")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                id: 2,
+                number: 2,
+                name: "Gameweek 2",
+                is_current: false,
+                is_next: true,
+                is_finished: false,
+              },
+            ],
+            total: 1,
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              fixture_id: 1,
+              gameweek_number: 2,
+              kickoff_time: "2026-08-21T18:30:00+00:00",
+              home_team_short_name: "ARS",
+              away_team_short_name: "AVL",
+              finished: false,
+            },
+          ],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        }),
+      } as Response;
+    });
+
+    render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Kickoff (UTC)")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Card view" }));
+
+    expect(screen.queryByText("Kickoff (UTC)")).not.toBeInTheDocument();
+    expect(screen.getByText("Kickoff: 21 Aug, 18:30 UTC")).toBeInTheDocument();
+  });
+
   it("renders empty state", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = String(input);
