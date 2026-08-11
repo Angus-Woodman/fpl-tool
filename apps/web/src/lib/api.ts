@@ -92,6 +92,20 @@ export type MyTeamResponse = {
   players: MyTeamPlayerItem[];
 };
 
+export type SaveMyTeamPlayerSelection = {
+  player_id: number;
+  is_starting: boolean;
+  bench_order: number | null;
+  is_captain: boolean;
+  is_vice_captain: boolean;
+};
+
+export type SaveMyTeamRequest = {
+  bank: number;
+  free_transfers: number;
+  players: SaveMyTeamPlayerSelection[];
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchPlayers(params: {
@@ -164,6 +178,21 @@ export async function fetchMyTeam(): Promise<MyTeamResponse | null> {
   }
   if (!response.ok) {
     throw new Error(`My team request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as MyTeamResponse;
+}
+
+export async function saveMyTeam(payload: SaveMyTeamRequest): Promise<MyTeamResponse> {
+  const response = await fetch(`${API_BASE_URL}/my-team`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Save my team request failed with status ${response.status}`);
   }
 
   return (await response.json()) as MyTeamResponse;
