@@ -58,6 +58,30 @@ export type GameweekListResponse = {
   total: number;
 };
 
+export type MyTeamPlayerItem = {
+  player_id: number;
+  web_name: string;
+  first_name: string;
+  second_name: string;
+  team_name: string;
+  team_short_name: string;
+  position: "GK" | "DEF" | "MID" | "FWD";
+  current_price: number;
+  status: string;
+  is_starting: boolean;
+  bench_order: number | null;
+  is_captain: boolean;
+  is_vice_captain: boolean;
+};
+
+export type MyTeamResponse = {
+  squad_id: number;
+  name: string;
+  bank: number;
+  free_transfers: number;
+  players: MyTeamPlayerItem[];
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchPlayers(params: {
@@ -121,4 +145,16 @@ export async function fetchGameweeks(): Promise<GameweekListResponse> {
   }
 
   return (await response.json()) as GameweekListResponse;
+}
+
+export async function fetchMyTeam(): Promise<MyTeamResponse | null> {
+  const response = await fetch(`${API_BASE_URL}/my-team`);
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`My team request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as MyTeamResponse;
 }

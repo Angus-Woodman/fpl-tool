@@ -6,6 +6,8 @@ from api.models.entities import (
     PlayerPosition,
     PlayerSnapshotModel,
     ProjectionModel,
+    SquadModel,
+    SquadPlayerModel,
     TeamModel,
 )
 
@@ -17,5 +19,7 @@ __all__ = [
     "PlayerPosition",
     "PlayerSnapshotModel",
     "ProjectionModel",
+    "SquadModel",
+    "SquadPlayerModel",
     "TeamModel",
 ]

@@ -126,3 +126,38 @@ class ProjectionModel(Base):
         index=True,
     )
     model_version: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+
+class SquadModel(Base):
+    __tablename__ = "squads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, default="My Team")
+    bank: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    free_transfers: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=dt.datetime.now(dt.UTC),
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=dt.datetime.now(dt.UTC),
+    )
+
+
+class SquadPlayerModel(Base):
+    __tablename__ = "squad_players"
+    __table_args__ = (
+        UniqueConstraint("squad_id", "player_id", name="uq_squad_player"),
+        UniqueConstraint("squad_id", "bench_order", name="uq_squad_bench_order"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    squad_id: Mapped[int] = mapped_column(ForeignKey("squads.id"), index=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
+    is_starting: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    bench_order: Mapped[int | None] = mapped_column(Integer)
+    is_captain: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_vice_captain: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

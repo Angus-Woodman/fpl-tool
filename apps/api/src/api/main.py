@@ -6,6 +6,7 @@ from api.routers.fixtures import router as fixtures_router
 from api.routers.gameweeks import router as gameweeks_router
 from api.routers.health import router as health_router
 from api.routers.imports import router as imports_router
+from api.routers.my_team import router as my_team_router
 from api.routers.players import router as players_router
 from api.routers.teams import router as teams_router
 
@@ -23,6 +24,7 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(imports_router)
+app.include_router(my_team_router)
 app.include_router(players_router)
 app.include_router(fixtures_router)
 app.include_router(teams_router)

@@ -14,6 +14,12 @@ export default function HomePage(): JSX.Element {
         </p>
         <div className="mt-4 flex flex-wrap gap-3">
           <Link
+            href="/my-team"
+            className="inline-block rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50"
+          >
+            Open My Team
+          </Link>
+          <Link
             href="/players"
             className="inline-block rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50"
           >
