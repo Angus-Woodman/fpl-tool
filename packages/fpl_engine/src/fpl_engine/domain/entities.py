@@ -86,6 +86,29 @@ class PlayerSnapshot:
 
 
 @dataclass(frozen=True)
+class ProjectionComponentBreakdown:
+    appearance_points: float
+    goal_points: float
+    assist_points: float
+    clean_sheet_points: float
+    bonus_points: float
+    defensive_contribution_points: float
+    other_points: float
+
+    @property
+    def total_points(self) -> float:
+        return (
+            self.appearance_points
+            + self.goal_points
+            + self.assist_points
+            + self.clean_sheet_points
+            + self.bonus_points
+            + self.defensive_contribution_points
+            + self.other_points
+        )
+
+
+@dataclass(frozen=True)
 class Projection:
     player_id: int
     fixture_id: int | None
@@ -94,3 +117,4 @@ class Projection:
     expected_minutes: float
     generated_at: dt.datetime
     model_version: str
+    components: ProjectionComponentBreakdown

@@ -6,6 +6,7 @@ from fpl_engine.domain.entities import (
     PlayerPosition,
     PlayerSnapshot,
     Projection,
+    ProjectionComponentBreakdown,
     Team,
 )
 
@@ -16,6 +17,7 @@ __all__ = [
     "PlayerGameweekStat",
     "PlayerPosition",
     "PlayerSnapshot",
+    "ProjectionComponentBreakdown",
     "Projection",
     "Team",
 ]
