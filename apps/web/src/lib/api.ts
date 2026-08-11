@@ -72,6 +72,13 @@ export type MyTeamPlayerItem = {
   bench_order: number | null;
   is_captain: boolean;
   is_vice_captain: boolean;
+  projection_totals: HorizonProjectionTotals | null;
+};
+
+export type HorizonProjectionTotals = {
+  horizon_1: number;
+  horizon_3: number;
+  horizon_5: number;
 };
 
 export type MyTeamResponse = {
@@ -79,6 +86,9 @@ export type MyTeamResponse = {
   name: string;
   bank: number;
   free_transfers: number;
+  projection_totals: HorizonProjectionTotals | null;
+  bench_projection_totals: HorizonProjectionTotals | null;
+  captain_adjusted_projection_totals: HorizonProjectionTotals | null;
   players: MyTeamPlayerItem[];
 };
 

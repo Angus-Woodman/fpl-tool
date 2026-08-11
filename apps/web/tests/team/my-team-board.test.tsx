@@ -17,6 +17,9 @@ describe("MyTeamBoard", () => {
         name: "My Team",
         bank: 1.5,
         free_transfers: 2,
+        projection_totals: { horizon_1: 5.5, horizon_3: 14.0, horizon_5: 21.0 },
+        bench_projection_totals: { horizon_1: 2.0, horizon_3: 4.0, horizon_5: 6.0 },
+        captain_adjusted_projection_totals: { horizon_1: 9.0, horizon_3: 22.0, horizon_5: 31.0 },
         players: [
           {
             player_id: 1,
@@ -32,6 +35,7 @@ describe("MyTeamBoard", () => {
             bench_order: null,
             is_captain: true,
             is_vice_captain: false,
+            projection_totals: { horizon_1: 5.0, horizon_3: 13.0, horizon_5: 18.0 },
           },
           {
             player_id: 2,
@@ -47,6 +51,7 @@ describe("MyTeamBoard", () => {
             bench_order: 1,
             is_captain: false,
             is_vice_captain: true,
+            projection_totals: { horizon_1: 2.0, horizon_3: 4.0, horizon_5: 6.0 },
           },
         ],
       }),
@@ -58,7 +63,12 @@ describe("MyTeamBoard", () => {
       expect(screen.getByText("My Team")).toBeInTheDocument();
       expect(screen.getByText("Bank: 1.5")).toBeInTheDocument();
       expect(screen.getByText("Free Transfers: 2")).toBeInTheDocument();
+      expect(screen.getByText("1 GW xPts")).toBeInTheDocument();
+      expect(screen.getByText("9.0")).toBeInTheDocument();
+      expect(screen.getByText("3 GW xPts")).toBeInTheDocument();
+      expect(screen.getByText("22.0")).toBeInTheDocument();
       expect(screen.getByText("Saka")).toBeInTheDocument();
+      expect(screen.getByText("xPts 1/3/5: 5.0 / 13.0 / 18.0")).toBeInTheDocument();
       expect(screen.getByText("Turner")).toBeInTheDocument();
       expect(screen.getByText("Bench 1 · NFO · GK")).toBeInTheDocument();
       expect(screen.getByText("C")).toBeInTheDocument();

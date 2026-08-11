@@ -82,6 +82,21 @@ export function MyTeamBoard(): JSX.Element {
     .filter((player) => !player.is_starting)
     .sort((left, right) => (left.bench_order ?? 99) - (right.bench_order ?? 99));
 
+  const projectionCards = [
+    {
+      label: "1 GW xPts",
+      value: state.team.captain_adjusted_projection_totals?.horizon_1,
+    },
+    {
+      label: "3 GW xPts",
+      value: state.team.captain_adjusted_projection_totals?.horizon_3,
+    },
+    {
+      label: "5 GW xPts",
+      value: state.team.captain_adjusted_projection_totals?.horizon_5,
+    },
+  ];
+
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
@@ -95,6 +110,19 @@ export function MyTeamBoard(): JSX.Element {
             Free Transfers: {state.team.free_transfers}
           </span>
         </div>
+      </div>
+
+      <div className="mb-5 grid gap-3 sm:grid-cols-3">
+        {projectionCards.map((card) => (
+          <article key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              {card.label}
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">
+              {card.value?.toFixed(1) ?? "-"}
+            </p>
+          </article>
+        ))}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
@@ -121,6 +149,11 @@ export function MyTeamBoard(): JSX.Element {
                     )}
                   </div>
                   <p className="mt-2 text-xs text-slate-600">Price: {player.current_price.toFixed(1)}</p>
+                  {player.projection_totals && (
+                    <p className="mt-2 text-xs text-slate-600">
+                      xPts 1/3/5: {player.projection_totals.horizon_1.toFixed(1)} / {player.projection_totals.horizon_3.toFixed(1)} / {player.projection_totals.horizon_5.toFixed(1)}
+                    </p>
+                  )}
                 </article>
               );
             })}
@@ -148,6 +181,11 @@ export function MyTeamBoard(): JSX.Element {
                     )}
                   </div>
                   <p className="mt-2 text-xs text-slate-600">Price: {player.current_price.toFixed(1)}</p>
+                  {player.projection_totals && (
+                    <p className="mt-2 text-xs text-slate-600">
+                      xPts 1/3/5: {player.projection_totals.horizon_1.toFixed(1)} / {player.projection_totals.horizon_3.toFixed(1)} / {player.projection_totals.horizon_5.toFixed(1)}
+                    </p>
+                  )}
                 </article>
               );
             })}

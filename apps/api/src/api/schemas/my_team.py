@@ -31,6 +31,15 @@ class CurrentSquadPlayerResponse(BaseModel):
     bench_order: int | None
     is_captain: bool
     is_vice_captain: bool
+    projection_totals: "HorizonProjectionTotalsResponse | None" = None
+
+
+class HorizonProjectionTotalsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    horizon_1: float
+    horizon_3: float
+    horizon_5: float
 
 
 class CurrentSquadResponse(BaseModel):
@@ -38,4 +47,7 @@ class CurrentSquadResponse(BaseModel):
     name: str
     bank: float
     free_transfers: int
+    projection_totals: HorizonProjectionTotalsResponse | None = None
+    bench_projection_totals: HorizonProjectionTotalsResponse | None = None
+    captain_adjusted_projection_totals: HorizonProjectionTotalsResponse | None = None
     players: list[CurrentSquadPlayerResponse]

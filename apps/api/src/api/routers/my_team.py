@@ -4,18 +4,20 @@ from typing import Annotated
 
 from api.db.session import get_db_session
 from api.repositories.current_squad_repository import CurrentSquadRepository
+from api.repositories.my_team_projection_repository import MyTeamProjectionRepository
 from api.repositories.squad_player_lookup_repository import SquadPlayerLookupRepository
 from api.schemas.my_team import (
     CurrentSquadPlayerResponse,
     CurrentSquadResponse,
+    HorizonProjectionTotalsResponse,
     UpsertCurrentSquadRequestBody,
 )
 from api.services.current_squad import (
     CurrentSquadPlayerSelection,
-    GetCurrentSquadService,
     UpsertCurrentSquadRequest,
     UpsertCurrentSquadService,
 )
+from api.services.get_my_team_view import GetMyTeamViewService
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -24,8 +26,11 @@ router = APIRouter(prefix="/my-team", tags=["my-team"])
 
 def get_current_squad_service(
     db_session: Annotated[Session, Depends(get_db_session)],
-) -> GetCurrentSquadService:
-    return GetCurrentSquadService(CurrentSquadRepository(db_session))
+) -> GetMyTeamViewService:
+    return GetMyTeamViewService(
+        CurrentSquadRepository(db_session),
+        MyTeamProjectionRepository(db_session),
+    )
 
 
 def get_upsert_current_squad_service(
@@ -39,7 +44,7 @@ def get_upsert_current_squad_service(
 
 @router.get("", response_model=CurrentSquadResponse)
 def get_my_team(
-    service: Annotated[GetCurrentSquadService, Depends(get_current_squad_service)],
+    service: Annotated[GetMyTeamViewService, Depends(get_current_squad_service)],
 ) -> CurrentSquadResponse:
     result = service.execute()
     if result is None:
@@ -50,6 +55,23 @@ def get_my_team(
         name=result.name,
         bank=result.bank,
         free_transfers=result.free_transfers,
+        projection_totals=(
+            HorizonProjectionTotalsResponse.model_validate(result.projection_totals)
+            if result.projection_totals is not None
+            else None
+        ),
+        bench_projection_totals=(
+            HorizonProjectionTotalsResponse.model_validate(result.bench_projection_totals)
+            if result.bench_projection_totals is not None
+            else None
+        ),
+        captain_adjusted_projection_totals=(
+            HorizonProjectionTotalsResponse.model_validate(
+                result.captain_adjusted_projection_totals
+            )
+            if result.captain_adjusted_projection_totals is not None
+            else None
+        ),
         players=[CurrentSquadPlayerResponse.model_validate(player) for player in result.players],
     )
 
@@ -84,5 +106,8 @@ def put_my_team(
         name=result.name,
         bank=result.bank,
         free_transfers=result.free_transfers,
+        projection_totals=None,
+        bench_projection_totals=None,
+        captain_adjusted_projection_totals=None,
         players=[CurrentSquadPlayerResponse.model_validate(player) for player in result.players],
     )

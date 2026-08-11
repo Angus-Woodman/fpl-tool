@@ -7,14 +7,19 @@ from api.repositories.current_squad_repository import (
 )
 from api.routers.my_team import get_current_squad_service, get_upsert_current_squad_service
 from api.services.current_squad import UpsertCurrentSquadRequest
+from api.services.get_my_team_view import (
+    HorizonProjectionTotals,
+    MyTeamPlayerViewRecord,
+    MyTeamViewRecord,
+)
 from fastapi.testclient import TestClient
 
 
 class _FakeGetCurrentSquadService:
-    def __init__(self, result: CurrentSquadRecord | None) -> None:
+    def __init__(self, result: MyTeamViewRecord | None) -> None:
         self._result = result
 
-    def execute(self) -> CurrentSquadRecord | None:
+    def execute(self) -> MyTeamViewRecord | None:
         return self._result
 
 
@@ -103,13 +108,13 @@ def test_get_my_team_returns_404_when_missing() -> None:
 
 
 def test_get_my_team_returns_current_squad() -> None:
-    record = CurrentSquadRecord(
+    record = MyTeamViewRecord(
         squad_id=1,
         name="My Team",
         bank=1.5,
         free_transfers=2,
         players=[
-            CurrentSquadPlayerRecord(
+            MyTeamPlayerViewRecord(
                 player_id=1,
                 web_name="Saka",
                 first_name="Bukayo",
@@ -123,8 +128,24 @@ def test_get_my_team_returns_current_squad() -> None:
                 bench_order=None,
                 is_captain=True,
                 is_vice_captain=False,
+                projection_totals=HorizonProjectionTotals(
+                    horizon_1=5.0,
+                    horizon_3=13.0,
+                    horizon_5=18.0,
+                ),
             )
         ],
+        projection_totals=HorizonProjectionTotals(
+            horizon_1=5.0,
+            horizon_3=13.0,
+            horizon_5=18.0,
+        ),
+        bench_projection_totals=None,
+        captain_adjusted_projection_totals=HorizonProjectionTotals(
+            horizon_1=10.0,
+            horizon_3=26.0,
+            horizon_5=36.0,
+        ),
     )
     app.dependency_overrides[get_current_squad_service] = lambda: _FakeGetCurrentSquadService(
         record
@@ -136,7 +157,10 @@ def test_get_my_team_returns_current_squad() -> None:
         assert response.status_code == 200
         payload = response.json()
         assert payload["name"] == "My Team"
+        assert payload["projection_totals"]["horizon_1"] == 5.0
+        assert payload["captain_adjusted_projection_totals"]["horizon_1"] == 10.0
         assert payload["players"][0]["web_name"] == "Saka"
+        assert payload["players"][0]["projection_totals"]["horizon_3"] == 13.0
     finally:
         app.dependency_overrides.clear()
 
