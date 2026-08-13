@@ -1,3 +1,4 @@
+from fpl_engine.eligibility import is_established_at_club
 from fpl_engine.minutes.availability import (
     STATUS_FALLBACK_MULTIPLIERS,
     availability_multiplier,
@@ -11,7 +12,6 @@ from fpl_engine.minutes.expected_minutes import (
     RoleConfidence,
     RoleLabel,
     estimate_pre_season_expected_minutes,
-    is_established_at_club,
 )
 
 __all__ = [

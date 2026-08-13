@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import calendar
 import datetime as dt
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from fpl_engine.eligibility import is_established_at_club
 from fpl_engine.minutes.availability import availability_multiplier
 from fpl_engine.projections.shrinkage import shrink_rate
 
@@ -76,28 +76,6 @@ class ExpectedMinutesResult:
     probability_60_plus: float
     availability_multiplier: float
     observed_history_weight: float
-
-
-def is_established_at_club(
-    team_join_date: dt.date | None, *, as_of: dt.date, cutoff_months: int
-) -> bool:
-    """Whether `starts / 38` is defensible: the player was at this club before last
-    season began. This does not detect loans away or mid-season returns; that
-    information isn't available, so those cases are simply not treated as
-    established (an accepted limitation, not solved).
-    """
-    if team_join_date is None:
-        return False
-
-    return team_join_date <= _months_before(as_of, cutoff_months)
-
-
-def _months_before(date: dt.date, months: int) -> dt.date:
-    month_index = date.month - 1 - months
-    year = date.year + month_index // 12
-    month = month_index % 12 + 1
-    day = min(date.day, calendar.monthrange(year, month)[1])
-    return dt.date(year, month, day)
 
 
 def _role_label(start_probability: float, parameters: PreSeasonMinutesParameters) -> RoleLabel:
