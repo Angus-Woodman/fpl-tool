@@ -111,7 +111,6 @@ class ProjectionGenerationRepository:
             .order_by(
                 PlayerGameweekStatModel.player_id.asc(),
                 PlayerGameweekStatModel.gameweek_id.desc(),
-                PlayerGameweekStatModel.fixture_id.desc(),
             )
         ).all()
 

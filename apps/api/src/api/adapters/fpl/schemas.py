@@ -71,3 +71,36 @@ class FplFixtureDto(BaseModel):
     team_h_score: int | None
     team_a_score: int | None
     finished: bool
+
+
+class FplLiveStatsDto(BaseModel):
+    """Gameweek-aggregated actuals for one player.
+
+    TODO: validate against a real /event/{id}/live/ response once GW1 completes.
+    The endpoint returns an empty element list before a season starts, so the
+    field set below follows the documented shape rather than a captured payload.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    minutes: int = 0
+    total_points: int = 0
+    goals_scored: int = 0
+    assists: int = 0
+    clean_sheets: int = 0
+    goals_conceded: int = 0
+    bonus: int = 0
+    bps: int = 0
+
+
+class FplLiveElementDto(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    stats: FplLiveStatsDto = Field(default_factory=FplLiveStatsDto)
+
+
+class EventLiveDto(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    elements: list[FplLiveElementDto] = Field(default_factory=list)

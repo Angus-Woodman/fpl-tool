@@ -9,12 +9,19 @@ from api.db.session import get_db_session
 from api.repositories import (
     FixtureRepository,
     GameweekRepository,
+    PlayerGameweekStatRepository,
     PlayerRepository,
     PlayerSnapshotRepository,
     TeamRepository,
 )
-from api.services import IMPORT_STATUS_STORE, ImportFplDataService, ImportState, ImportStatusStore
-from fastapi import APIRouter, Depends
+from api.services import (
+    IMPORT_STATUS_STORE,
+    ImportFplDataService,
+    ImportPlayerStatsService,
+    ImportState,
+    ImportStatusStore,
+)
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -37,6 +44,11 @@ class ImportStatusResponse(BaseModel):
     last_summary: ImportSummaryResponse | None
 
 
+class ImportResultsResponse(BaseModel):
+    gameweeks_imported: int
+    stats_imported: int
+
+
 def get_import_status_store() -> ImportStatusStore:
     return IMPORT_STATUS_STORE
 
@@ -57,7 +69,21 @@ def get_import_service(
     )
 
 
+def get_player_stats_service(
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> ImportPlayerStatsService:
+    settings = get_settings()
+
+    return ImportPlayerStatsService(
+        provider=FplApiClient(base_url=settings.fpl_api_base_url),
+        gameweek_repository=GameweekRepository(db_session),
+        player_repository=PlayerRepository(db_session),
+        stat_repository=PlayerGameweekStatRepository(db_session),
+    )
+
+
 ImportServiceDep = Annotated[ImportFplDataService, Depends(get_import_service)]
+PlayerStatsServiceDep = Annotated[ImportPlayerStatsService, Depends(get_player_stats_service)]
 DbSessionDep = Annotated[Session, Depends(get_db_session)]
 ImportStatusStoreDep = Annotated[ImportStatusStore, Depends(get_import_status_store)]
 
@@ -95,6 +121,32 @@ def run_import(
         gameweeks_imported=summary.gameweeks_imported,
         fixtures_imported=summary.fixtures_imported,
         player_snapshots_captured=summary.player_snapshots_captured,
+    )
+
+
+@router.post("/results/run", response_model=ImportResultsResponse)
+def run_results_import(
+    service: PlayerStatsServiceDep,
+    db_session: DbSessionDep,
+    gameweek: int | None = None,
+) -> ImportResultsResponse:
+    try:
+        summary = (
+            service.import_gameweek(gameweek)
+            if gameweek is not None
+            else service.import_finished_gameweeks()
+        )
+        db_session.commit()
+    except LookupError as error:
+        db_session.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except Exception:
+        db_session.rollback()
+        raise
+
+    return ImportResultsResponse(
+        gameweeks_imported=summary.gameweeks_imported,
+        stats_imported=summary.stats_imported,
     )
 
 

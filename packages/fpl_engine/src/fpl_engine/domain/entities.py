@@ -60,9 +60,14 @@ class Fixture:
 
 @dataclass(frozen=True)
 class PlayerGameweekStat:
+    """A player's actual return for a gameweek.
+
+    The source is gameweek-aggregated, so `fixture_id` is only populated if a
+    fixture-level breakdown is ever recorded.
+    """
+
     player_id: int
     gameweek_id: int
-    fixture_id: int
     minutes: int
     total_points: int
     goals_scored: int
@@ -71,6 +76,7 @@ class PlayerGameweekStat:
     goals_conceded: int
     bonus: int
     bps: int
+    fixture_id: int | None = None
 
 
 @dataclass(frozen=True)

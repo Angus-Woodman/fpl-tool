@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs db-test-up test test-integration lint typecheck format db-migrate db-revision data-refresh projections-refresh clean
+.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs db-test-up test test-integration lint typecheck format db-migrate db-revision data-refresh results-refresh projections-refresh clean
 
 TEST_DATABASE_URL ?= postgresql+psycopg://fpl:fpl@localhost:5432/fpl_test
 
@@ -64,6 +64,9 @@ db-revision:
 
 data-refresh:
 	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api python -m api.scripts.import_fpl_data
+
+results-refresh:
+	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api python -m api.scripts.import_player_stats
 
 projections-refresh:
 	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api python -m api.scripts.generate_projections

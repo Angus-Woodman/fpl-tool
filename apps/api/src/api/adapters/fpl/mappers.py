@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
-from api.adapters.fpl.schemas import BootstrapStaticDto, FplFixtureDto
+from api.adapters.fpl.schemas import BootstrapStaticDto, EventLiveDto, FplFixtureDto
 from api.core.exceptions import DataMappingError
 from fpl_engine.domain import Gameweek, PlayerPosition, Team
 
@@ -57,6 +57,20 @@ class PlayerSnapshotSeed:
     form: float
     expected_goals: float | None
     expected_assists: float | None
+
+
+@dataclass(frozen=True)
+class PlayerGameweekStatSeed:
+    player_external_fpl_id: int
+    gameweek_number: int
+    minutes: int
+    total_points: int
+    goals_scored: int
+    assists: int
+    clean_sheets: int
+    goals_conceded: int
+    bonus: int
+    bps: int
 
 
 _POSITION_MAP: dict[int, PlayerPosition] = {
@@ -168,6 +182,27 @@ def map_player_snapshots(
             form=_parse_float(element.form) or 0.0,
             expected_goals=_parse_float(element.expected_goals),
             expected_assists=_parse_float(element.expected_assists),
+        )
+        for element in payload.elements
+    ]
+
+
+def map_event_live_stats(
+    payload: EventLiveDto, *, gameweek_number: int
+) -> list[PlayerGameweekStatSeed]:
+    """Map gameweek-aggregated actuals. Empty before a gameweek has been played."""
+    return [
+        PlayerGameweekStatSeed(
+            player_external_fpl_id=element.id,
+            gameweek_number=gameweek_number,
+            minutes=element.stats.minutes,
+            total_points=element.stats.total_points,
+            goals_scored=element.stats.goals_scored,
+            assists=element.stats.assists,
+            clean_sheets=element.stats.clean_sheets,
+            goals_conceded=element.stats.goals_conceded,
+            bonus=element.stats.bonus,
+            bps=element.stats.bps,
         )
         for element in payload.elements
     ]

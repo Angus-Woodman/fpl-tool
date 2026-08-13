@@ -50,3 +50,23 @@ class GameweekRepository:
         )
         rows = self._session.execute(statement).all()
         return {number: internal_id for number, internal_id in rows}
+
+    def list_finished(self) -> list[Gameweek]:
+        rows = self._session.execute(
+            select(GameweekModel)
+            .where(GameweekModel.is_finished.is_(True))
+            .order_by(GameweekModel.number.asc())
+        ).scalars()
+
+        return [
+            Gameweek(
+                id=row.id,
+                number=row.number,
+                name=row.name,
+                deadline=row.deadline,
+                is_current=row.is_current,
+                is_next=row.is_next,
+                is_finished=row.is_finished,
+            )
+            for row in rows
+        ]

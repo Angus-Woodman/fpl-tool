@@ -67,12 +67,12 @@ class FixtureModel(Base):
 
 class PlayerGameweekStatModel(Base):
     __tablename__ = "player_gameweek_stats"
-    __table_args__ = (UniqueConstraint("player_id", "fixture_id", name="uq_player_fixture_stat"),)
+    __table_args__ = (UniqueConstraint("player_id", "gameweek_id", name="uq_player_gameweek_stat"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
     gameweek_id: Mapped[int] = mapped_column(ForeignKey("gameweeks.id"), index=True)
-    fixture_id: Mapped[int] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    fixture_id: Mapped[int | None] = mapped_column(ForeignKey("fixtures.id"), index=True)
     minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     total_points: Mapped[int] = mapped_column(Integer, nullable=False)
     goals_scored: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

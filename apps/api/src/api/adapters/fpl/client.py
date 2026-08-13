@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import httpx
-from api.adapters.fpl.schemas import BootstrapStaticDto, FplFixtureDto
+from api.adapters.fpl.schemas import BootstrapStaticDto, EventLiveDto, FplFixtureDto
 from api.core.exceptions import ExternalServiceError
 from pydantic import ValidationError
 
@@ -39,3 +39,16 @@ class FplApiClient:
             return [FplFixtureDto.model_validate(item) for item in payload]
         except ValidationError as exc:
             raise ExternalServiceError("FPL fixtures payload schema validation failed") from exc
+
+    def fetch_event_live(self, event_id: int) -> EventLiveDto:
+        url = f"{self._base_url}/event/{event_id}/live/"
+        try:
+            response = httpx.get(url, timeout=30.0)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ExternalServiceError(f"Failed to fetch FPL live data from {url}") from exc
+
+        try:
+            return EventLiveDto.model_validate(response.json())
+        except ValidationError as exc:
+            raise ExternalServiceError("FPL live payload schema validation failed") from exc
