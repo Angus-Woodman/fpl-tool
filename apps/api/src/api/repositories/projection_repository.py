@@ -37,6 +37,7 @@ class ProjectionRepository:
                     "other_points": projection.components.other_points,
                     "generated_at": projection.generated_at,
                     "model_version": projection.model_version,
+                    "run_id": projection.run_id,
                 }
                 for projection in batch
             ]
@@ -57,6 +58,7 @@ class ProjectionRepository:
                         statement.excluded.defensive_contribution_points
                     ),
                     "other_points": statement.excluded.other_points,
+                    "run_id": statement.excluded.run_id,
                 },
             )
             self._session.execute(statement)

@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy import Enum as SqlEnum
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from api.db.base import Base
@@ -175,6 +176,33 @@ class ProjectionModel(Base):
         index=True,
     )
     model_version: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("projection_runs.id"), index=True)
+
+
+class ProjectionRunModel(Base):
+    """Provenance for one projection-generation pass: what produced these rows, from what."""
+
+    __tablename__ = "projection_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    model_version: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    generated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    gameweeks_covered: Mapped[list[int]] = mapped_column(JSONB, nullable=False)
+    parameters: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    # team_id (stringified) -> {source_difficulty, override, effective_difficulty}, frozen at
+    # generation time so a later override change cannot alter this run's provenance.
+    team_strength_snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    # The captured_at of the freshest player_snapshots row consumed by this run.
+    player_snapshot_generated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
 
 
 class SquadModel(Base):

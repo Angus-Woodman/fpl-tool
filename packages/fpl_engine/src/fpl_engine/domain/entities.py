@@ -153,3 +153,4 @@ class Projection:
     generated_at: dt.datetime
     model_version: str
     components: ProjectionComponentBreakdown
+    run_id: int | None = None

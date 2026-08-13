@@ -5,6 +5,8 @@ from typing import Annotated
 from api.db.session import get_db_session
 from api.repositories.projection_generation_repository import ProjectionGenerationRepository
 from api.repositories.projection_repository import ProjectionRepository
+from api.repositories.projection_run_repository import ProjectionRunRepository
+from api.repositories.team_read_repository import TeamReadRepository
 from api.services.generate_projections import GenerateProjectionsService
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
@@ -29,6 +31,8 @@ def get_generate_projections_service(
     return GenerateProjectionsService(
         source_repository=ProjectionGenerationRepository(db_session),
         projection_repository=ProjectionRepository(db_session),
+        team_repository=TeamReadRepository(db_session),
+        run_repository=ProjectionRunRepository(db_session),
     )
 
 

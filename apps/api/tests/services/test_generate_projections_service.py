@@ -121,9 +121,76 @@ class _FakeProjectionRepository:
         self.saved = projections
 
 
+class _FakeTeamReadItem:
+    def __init__(
+        self, *, id: int, difficulty: int, source_difficulty: int, difficulty_override: int | None
+    ) -> None:
+        self.id = id
+        self.difficulty = difficulty
+        self.source_difficulty = source_difficulty
+        self.difficulty_override = difficulty_override
+
+
+class _FakeTeamRepository:
+    def __init__(self, teams: list[_FakeTeamReadItem] | None = None) -> None:
+        self._teams = teams or [
+            _FakeTeamReadItem(id=1, difficulty=4, source_difficulty=4, difficulty_override=None),
+            _FakeTeamReadItem(id=2, difficulty=2, source_difficulty=3, difficulty_override=2),
+        ]
+
+    def list_teams(self) -> list[_FakeTeamReadItem]:
+        return self._teams
+
+
+class _FakeRunRepository:
+    def __init__(self) -> None:
+        self.created_runs: list[dict[str, object]] = []
+        self.next_id = 1
+
+    def create(
+        self,
+        *,
+        model_version: str,
+        generated_at: dt.datetime,
+        gameweeks_covered: list[int],
+        parameters: dict[str, object],
+        team_strength_snapshot: dict[str, object],
+        player_snapshot_generated_at: dt.datetime | None,
+    ) -> int:
+        run_id = self.next_id
+        self.next_id += 1
+        self.created_runs.append(
+            {
+                "id": run_id,
+                "model_version": model_version,
+                "generated_at": generated_at,
+                "gameweeks_covered": gameweeks_covered,
+                "parameters": parameters,
+                "team_strength_snapshot": team_strength_snapshot,
+                "player_snapshot_generated_at": player_snapshot_generated_at,
+            }
+        )
+        return run_id
+
+
+def _service(
+    source_repository: _FakeProjectionGenerationRepository,
+    projection_repository: _FakeProjectionRepository,
+    *,
+    team_repository: _FakeTeamRepository | None = None,
+    run_repository: _FakeRunRepository | None = None,
+) -> GenerateProjectionsService:
+    return GenerateProjectionsService(
+        source_repository,
+        projection_repository,
+        team_repository=team_repository or _FakeTeamRepository(),
+        run_repository=run_repository or _FakeRunRepository(),
+    )
+
+
 def test_generate_projections_service_creates_and_persists_projection_batch() -> None:
     sink = _FakeProjectionRepository()
-    service = GenerateProjectionsService(_FakeProjectionGenerationRepository(), sink)
+    service = _service(_FakeProjectionGenerationRepository(), sink)
 
     summary = service.execute()
 
@@ -144,10 +211,70 @@ def test_generate_projections_service_uses_position_fallback_without_recent_stat
             return []
 
     sink = _FakeProjectionRepository()
-    service = GenerateProjectionsService(_NoStatsRepository(), sink)
+    service = _service(_NoStatsRepository(), sink)
 
     service.execute()
 
     fallback_projection = next(projection for projection in sink.saved if projection.player_id == 2)
     assert fallback_projection.projected_points > 0.0
     assert fallback_projection.expected_minutes == 42.1875
+
+
+def test_generate_projections_service_creates_a_run_and_links_every_projection() -> None:
+    sink = _FakeProjectionRepository()
+    runs = _FakeRunRepository()
+    service = _service(_FakeProjectionGenerationRepository(), sink, run_repository=runs)
+
+    service.execute()
+
+    assert len(runs.created_runs) == 1
+    run = runs.created_runs[0]
+    assert run["model_version"] == "baseline_v1"
+    assert run["gameweeks_covered"] == [5]
+    assert all(projection.run_id == run["id"] for projection in sink.saved)
+
+
+def test_generate_projections_service_records_the_effective_team_strength() -> None:
+    sink = _FakeProjectionRepository()
+    runs = _FakeRunRepository()
+    teams = _FakeTeamRepository(
+        [
+            _FakeTeamReadItem(id=1, difficulty=4, source_difficulty=4, difficulty_override=None),
+            _FakeTeamReadItem(id=2, difficulty=2, source_difficulty=3, difficulty_override=2),
+        ]
+    )
+    service = _service(
+        _FakeProjectionGenerationRepository(), sink, team_repository=teams, run_repository=runs
+    )
+
+    service.execute()
+
+    snapshot = runs.created_runs[0]["team_strength_snapshot"]
+    assert snapshot["1"] == {"source_difficulty": 4, "override": None, "effective_difficulty": 4}
+    assert snapshot["2"] == {"source_difficulty": 3, "override": 2, "effective_difficulty": 2}
+
+
+def test_generate_projections_service_records_the_freshest_snapshot_generation() -> None:
+    sink = _FakeProjectionRepository()
+    runs = _FakeRunRepository()
+    service = _service(_FakeProjectionGenerationRepository(), sink, run_repository=runs)
+
+    service.execute()
+
+    assert runs.created_runs[0]["player_snapshot_generated_at"] == dt.datetime(
+        2026, 8, 19, 12, 0, tzinfo=dt.UTC
+    )
+
+
+def test_generate_projections_service_none_snapshot_generation_without_snapshots() -> None:
+    class _NoSnapshotsRepository(_FakeProjectionGenerationRepository):
+        def list_latest_snapshots(self, player_ids: set[int]) -> list[PlayerSnapshot]:
+            return []
+
+    sink = _FakeProjectionRepository()
+    runs = _FakeRunRepository()
+    service = _service(_NoSnapshotsRepository(), sink, run_repository=runs)
+
+    service.execute()
+
+    assert runs.created_runs[0]["player_snapshot_generated_at"] is None
