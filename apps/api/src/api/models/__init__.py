@@ -1,6 +1,10 @@
 from api.models.entities import (
     FixtureModel,
     GameweekModel,
+    PlanChip,
+    PlanGameweekModel,
+    PlanGameweekPlayerModel,
+    PlanModel,
     PlayerGameweekStatModel,
     PlayerModel,
     PlayerPosition,
@@ -14,6 +18,10 @@ from api.models.entities import (
 __all__ = [
     "FixtureModel",
     "GameweekModel",
+    "PlanChip",
+    "PlanGameweekModel",
+    "PlanGameweekPlayerModel",
+    "PlanModel",
     "PlayerGameweekStatModel",
     "PlayerModel",
     "PlayerPosition",

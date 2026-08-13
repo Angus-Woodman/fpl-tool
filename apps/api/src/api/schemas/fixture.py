@@ -9,6 +9,8 @@ class FixtureTickerItemResponse(BaseModel):
     kickoff_time: str
     home_team_short_name: str
     away_team_short_name: str
+    home_team_difficulty: int
+    away_team_difficulty: int
     finished: bool
 
 

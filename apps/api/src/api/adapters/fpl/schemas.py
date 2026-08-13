@@ -11,6 +11,7 @@ class FplTeamDto(BaseModel):
     id: int
     name: str
     short_name: str
+    strength: int | None = None
 
 
 class FplElementDto(BaseModel):

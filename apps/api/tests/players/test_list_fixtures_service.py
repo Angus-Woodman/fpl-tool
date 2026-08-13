@@ -29,6 +29,8 @@ class _FakeFixtureReadRepository:
                     kickoff_time="2026-08-28T18:30:00+00:00",
                     home_team_short_name="LIV",
                     away_team_short_name="MCI",
+                    home_team_difficulty=4,
+                    away_team_difficulty=5,
                     finished=False,
                 )
             ],

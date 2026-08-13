@@ -8,551 +8,271 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const TEAMS = [
+  { id: 1, name: "Arsenal", short_name: "ARS", difficulty: 4 },
+  { id: 2, name: "Aston Villa", short_name: "AVL", difficulty: 3 },
+];
+
+const GAMEWEEKS = Array.from({ length: 8 }, (_, index) => ({
+  id: index + 1,
+  number: index + 1,
+  name: `Gameweek ${index + 1}`,
+  is_current: false,
+  is_next: index === 0,
+  is_finished: false,
+}));
+
+function fixtureFor(gameweekNumber: number, homeDifficulty: number, awayDifficulty: number) {
+  return {
+    fixture_id: gameweekNumber,
+    gameweek_number: gameweekNumber,
+    kickoff_time: "2026-08-21T18:30:00+00:00",
+    home_team_short_name: "ARS",
+    away_team_short_name: "AVL",
+    home_team_difficulty: homeDifficulty,
+    away_team_difficulty: awayDifficulty,
+    finished: false,
+  };
+}
+
+function mockFetch(fixturesByGameweek: Record<number, ReturnType<typeof fixtureFor>[]>) {
+  return vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+
+    if (url.endsWith("/teams")) {
+      return { ok: true, json: async () => ({ items: TEAMS, total: TEAMS.length }) } as Response;
+    }
+
+    if (url.endsWith("/gameweeks")) {
+      return {
+        ok: true,
+        json: async () => ({ items: GAMEWEEKS, total: GAMEWEEKS.length }),
+      } as Response;
+    }
+
+    const gameweekMatch = /gameweek=(\d+)/.exec(url);
+    const gameweekNumber = gameweekMatch ? Number(gameweekMatch[1]) : undefined;
+    const items =
+      gameweekNumber !== undefined ? (fixturesByGameweek[gameweekNumber] ?? []) : [];
+
+    return {
+      ok: true,
+      json: async () => ({ items, total: items.length, page: 1, page_size: 20 }),
+    } as Response;
+  });
+}
+
 describe("FixtureTicker", () => {
-  it("renders loaded fixture rows", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [{ id: 1, name: "Arsenal", short_name: "ARS" }],
-            total: 1,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [
-              {
-                id: 1,
-                number: 1,
-                name: "Gameweek 1",
-                is_current: true,
-                is_next: false,
-                is_finished: false,
-              },
-            ],
-            total: 1,
-          }),
-        } as Response;
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [
-            {
-              fixture_id: 1,
-              gameweek_number: 2,
-              kickoff_time: "2026-08-21T18:30:00+00:00",
-              home_team_short_name: "ARS",
-              away_team_short_name: "AVL",
-              finished: false,
-            },
-          ],
-          total: 1,
-          page: 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
+  it("renders a team x gameweek grid with difficulty-coded opponents", async () => {
+    mockFetch({ 1: [fixtureFor(1, 3, 4)] });
 
     render(<FixtureTicker />);
 
     await waitFor(() => {
-      expect(screen.getByText("ARS vs AVL")).toBeInTheDocument();
-      expect(screen.getByText("Showing 1 of 1 fixtures")).toBeInTheDocument();
+      expect(screen.getByText("GW1")).toBeInTheDocument();
     });
 
-    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/teams");
-    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/gameweeks");
-    expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=1");
+    await waitFor(() => {
+      expect(screen.getByText("AVL (H)")).toBeInTheDocument();
+      expect(screen.getByText("ARS (A)")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("ARS")).toBeInTheDocument();
+    expect(screen.getByText("AVL")).toBeInTheDocument();
   });
 
-  it("applies filters and refetches ticker", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+  it("navigates the gameweek window with Prev/Next", async () => {
+    const fetchSpy = mockFetch({ 1: [fixtureFor(1, 3, 4)], 2: [fixtureFor(2, 3, 4)] });
+
+    render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(screen.getByText("GW1")).toBeInTheDocument();
+      expect(screen.getByText("GW6")).toBeInTheDocument();
+    });
+
+    expect(screen.getByLabelText("Previous gameweeks")).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("Next gameweeks"));
+
+    await waitFor(() => {
+      expect(screen.getByText("GW7")).toBeInTheDocument();
+      expect(screen.queryByText("GW1")).not.toBeInTheDocument();
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=7"
+    );
+  });
+
+  it("sorts teams via the sort dropdown (A-Z, easiest, hardest)", async () => {
+    mockFetch({ 1: [fixtureFor(1, 3, 4)] });
+
+    const { container } = render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(screen.getByText("AVL (H)")).toBeInTheDocument();
+    });
+
+    function rowLabels(): (string | null)[] {
+      return Array.from(container.querySelectorAll("tbody tr td:first-child span")).map(
+        (cell) => cell.textContent
+      );
+    }
+
+    expect(rowLabels()).toEqual(["ARS", "AVL"]);
+
+    fireEvent.change(screen.getByLabelText("Sort teams"), {
+      target: { value: "hardest-first" },
+    });
+    await waitFor(() => {
+      expect(rowLabels()).toEqual(["ARS", "AVL"]);
+    });
+
+    fireEvent.change(screen.getByLabelText("Sort teams"), {
+      target: { value: "easiest-first" },
+    });
+    await waitFor(() => {
+      expect(rowLabels()).toEqual(["AVL", "ARS"]);
+    });
+
+    fireEvent.change(screen.getByLabelText("Sort teams"), { target: { value: "alphabetical" } });
+    await waitFor(() => {
+      expect(rowLabels()).toEqual(["ARS", "AVL"]);
+    });
+  });
+
+  it("re-sorts by the total difficulty across the whole visible window when it changes", async () => {
+    mockFetch({
+      1: [fixtureFor(1, 3, 4)],
+      3: [
+        {
+          fixture_id: 30,
+          gameweek_number: 3,
+          kickoff_time: "2026-09-04T18:30:00+00:00",
+          home_team_short_name: "AVL",
+          away_team_short_name: "ARS",
+          home_team_difficulty: 1,
+          away_team_difficulty: 5,
+          finished: false,
+        },
+      ],
+    });
+
+    const { container } = render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(screen.getByText("AVL (H)")).toBeInTheDocument();
+    });
+
+    function rowLabels(): (string | null)[] {
+      return Array.from(container.querySelectorAll("tbody tr td:first-child span")).map(
+        (cell) => cell.textContent
+      );
+    }
+
+    fireEvent.change(screen.getByLabelText("Sort teams"), {
+      target: { value: "hardest-first" },
+    });
+    fireEvent.change(screen.getByLabelText("Gameweek window size"), {
+      target: { value: "2" },
+    });
+
+    // Window covers only GW1 (ARS faces a difficulty-4 AVL, AVL faces a difficulty-3 ARS).
+    await waitFor(() => {
+      expect(rowLabels()).toEqual(["ARS", "AVL"]);
+    });
+
+    fireEvent.change(screen.getByLabelText("Gameweek window size"), {
+      target: { value: "3" },
+    });
+
+    // GW3 tips AVL's cumulative difficulty above ARS's, flipping the order.
+    await waitFor(() => {
+      expect(rowLabels()).toEqual(["AVL", "ARS"]);
+    });
+  });
+
+  it("adjusts the visible gameweek window size", async () => {
+    mockFetch({ 1: [fixtureFor(1, 3, 4)] });
+
+    render(<FixtureTicker />);
+
+    await waitFor(() => {
+      expect(screen.getByText("GW1")).toBeInTheDocument();
+      expect(screen.getByText("GW6")).toBeInTheDocument();
+      expect(screen.queryByText("GW7")).not.toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText("Gameweek window size"), {
+      target: { value: "2" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("GW1")).toBeInTheDocument();
+      expect(screen.getByText("GW2")).toBeInTheDocument();
+      expect(screen.queryByText("GW3")).not.toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText("Gameweek window size"), {
+      target: { value: "10" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("GW8")).toBeInTheDocument();
+    });
+  });
+
+  it("saves an edited team difficulty and refreshes fixture colours", async () => {
+    const fetchSpy = mockFetch({ 1: [fixtureFor(1, 3, 4)] });
+    fetchSpy.mockImplementation(async (input, init) => {
       const url = String(input);
+
       if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [
-              { id: 1, name: "Arsenal", short_name: "ARS" },
-              { id: 2, name: "Aston Villa", short_name: "AVL" },
-            ],
-            total: 2,
-          }),
-        } as Response;
+        return { ok: true, json: async () => ({ items: TEAMS, total: TEAMS.length }) } as Response;
       }
 
       if (url.endsWith("/gameweeks")) {
         return {
           ok: true,
-          json: async () => ({
-            items: [
-              {
-                id: 1,
-                number: 1,
-                name: "Gameweek 1",
-                is_current: true,
-                is_next: false,
-                is_finished: false,
-              },
-              {
-                id: 2,
-                number: 2,
-                name: "Gameweek 2",
-                is_current: false,
-                is_next: true,
-                is_finished: false,
-              },
-            ],
-            total: 2,
-          }),
+          json: async () => ({ items: GAMEWEEKS, total: GAMEWEEKS.length }),
         } as Response;
       }
 
+      if (url.endsWith("/teams/1") && init?.method === "PATCH") {
+        return {
+          ok: true,
+          json: async () => ({ id: 1, name: "Arsenal", short_name: "ARS", difficulty: 1 }),
+        } as Response;
+      }
+
+      const gameweekMatch = /gameweek=(\d+)/.exec(url);
+      const gameweekNumber = gameweekMatch ? Number(gameweekMatch[1]) : undefined;
+      const items = gameweekNumber === 1 ? [fixtureFor(1, 3, 1)] : [];
+
       return {
         ok: true,
-        json: async () => ({
-          items: [],
-          total: 4,
-          page: 1,
-          page_size: 20,
-        }),
+        json: async () => ({ items, total: items.length, page: 1, page_size: 20 }),
       } as Response;
     });
 
     render(<FixtureTicker />);
 
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(screen.getByText("AVL (H)")).toBeInTheDocument();
     });
 
-    expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
-
-    fireEvent.change(screen.getByLabelText("Fixture limit"), { target: { value: "5" } });
-    fireEvent.change(screen.getByLabelText("Filter by team"), { target: { value: "2" } });
-    fireEvent.change(screen.getByLabelText("Filter by gameweek"), { target: { value: "2" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    fireEvent.change(screen.getByLabelText("ARS difficulty"), { target: { value: "1" } });
 
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith(
-        "http://127.0.0.1:8000/fixtures/ticker?page=1&limit=5&team_id=2&gameweek=2"
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "http://127.0.0.1:8000/teams/1",
+        expect.objectContaining({ method: "PATCH" })
       );
     });
 
-    expect(screen.getByRole("button", { name: "Limit: 5 x" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Team: AVL x" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "GW: 2 x" })).not.toBeInTheDocument();
-  });
-
-  it("clears all applied filters via chip action", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [{ id: 2, name: "Aston Villa", short_name: "AVL" }],
-            total: 1,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [
-              {
-                id: 2,
-                number: 2,
-                name: "Gameweek 2",
-                is_current: false,
-                is_next: true,
-                is_finished: false,
-              },
-            ],
-            total: 1,
-          }),
-        } as Response;
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [],
-          total: 4,
-          page: 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
-
-    render(<FixtureTicker />);
-
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(3);
-    });
-
-    expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
-
-    fireEvent.change(screen.getByLabelText("Fixture limit"), { target: { value: "5" } });
-    fireEvent.change(screen.getByLabelText("Filter by team"), { target: { value: "2" } });
-    fireEvent.change(screen.getByLabelText("Filter by gameweek"), { target: { value: "2" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
-
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith(
-        "http://127.0.0.1:8000/fixtures/ticker?page=1&limit=5&team_id=2&gameweek=2"
-      );
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
-
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
-    });
-  });
-
-  it("resets filters to next gameweek baseline", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [{ id: 2, name: "Aston Villa", short_name: "AVL" }],
-            total: 1,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [
-              {
-                id: 1,
-                number: 1,
-                name: "Gameweek 1",
-                is_current: true,
-                is_next: false,
-                is_finished: false,
-              },
-              {
-                id: 2,
-                number: 2,
-                name: "Gameweek 2",
-                is_current: false,
-                is_next: true,
-                is_finished: false,
-              },
-            ],
-            total: 2,
-          }),
-        } as Response;
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [],
-          total: 4,
-          page: 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
-
-    render(<FixtureTicker />);
-
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
-    });
-
-    fireEvent.change(screen.getByLabelText("Filter by gameweek"), { target: { value: "1" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
-
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=1");
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Reset to next GW" }));
-
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=1&limit=20&gameweek=2");
-    });
-  });
-
-  it("navigates to next fixture ticker page", async () => {
-    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [
-            {
-              fixture_id: 1,
-              gameweek_number: 2,
-              kickoff_time: "2026-08-21T18:30:00+00:00",
-              home_team_short_name: "ARS",
-              away_team_short_name: "AVL",
-              finished: false,
-            },
-          ],
-          total: 40,
-          page: url.includes("page=2") ? 2 : 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
-
-    render(<FixtureTicker />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenLastCalledWith("http://127.0.0.1:8000/fixtures/ticker?page=2&limit=20");
-      expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
-    });
-  });
-
-  it("switches fixture display to cards view", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [
-              {
-                id: 2,
-                number: 2,
-                name: "Gameweek 2",
-                is_current: false,
-                is_next: true,
-                is_finished: false,
-              },
-            ],
-            total: 1,
-          }),
-        } as Response;
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [
-            {
-              fixture_id: 1,
-              gameweek_number: 2,
-              kickoff_time: "2026-08-21T18:30:00+00:00",
-              home_team_short_name: "ARS",
-              away_team_short_name: "AVL",
-              finished: false,
-            },
-          ],
-          total: 1,
-          page: 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
-
-    render(<FixtureTicker />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Kickoff (UTC)")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Card view" }));
-
-    expect(screen.queryByText("Kickoff (UTC)")).not.toBeInTheDocument();
-    expect(screen.getByText("Kickoff: 21 Aug, 18:30 UTC")).toBeInTheDocument();
-  });
-
-  it("renders empty state", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [],
-          total: 4,
-          page: 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
-
-    render(<FixtureTicker />);
-
-    await waitFor(() => {
-      expect(screen.getByText("No upcoming fixtures found.")).toBeInTheDocument();
-    });
-  });
-
-  it("renders error state", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      throw new Error("fixtures unavailable");
-    });
-
-    render(<FixtureTicker />);
-
-    await waitFor(() => {
-      expect(screen.getByText("fixtures unavailable")).toBeInTheDocument();
-    });
-  });
-
-  it("shows teams load warning when teams request fails", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        throw new Error("teams unavailable");
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [],
-          total: 4,
-          page: 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
-
-    render(<FixtureTicker />);
-
-    await waitFor(() => {
-      expect(screen.getByText("teams unavailable")).toBeInTheDocument();
-    });
-  });
-
-  it("shows gameweeks load warning when gameweeks request fails", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [],
-            total: 0,
-          }),
-        } as Response;
-      }
-
-      if (url.endsWith("/gameweeks")) {
-        throw new Error("gameweeks unavailable");
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          items: [],
-          total: 4,
-          page: 1,
-          page_size: 20,
-        }),
-      } as Response;
-    });
-
-    render(<FixtureTicker />);
-
-    await waitFor(() => {
-      expect(screen.getByText("gameweeks unavailable")).toBeInTheDocument();
+      expect(screen.getByLabelText("ARS difficulty")).toHaveValue("1");
     });
   });
 });

@@ -66,12 +66,60 @@ class _FakeProjectionRepository:
     ) -> list[PlayerProjectionFixtureRecord]:
         assert player_ids == [1, 2, 3]
         return [
-            PlayerProjectionFixtureRecord(player_id=1, gameweek_number=2, projected_points=5.0),
-            PlayerProjectionFixtureRecord(player_id=1, gameweek_number=3, projected_points=6.0),
-            PlayerProjectionFixtureRecord(player_id=1, gameweek_number=4, projected_points=4.0),
-            PlayerProjectionFixtureRecord(player_id=2, gameweek_number=2, projected_points=4.5),
-            PlayerProjectionFixtureRecord(player_id=2, gameweek_number=3, projected_points=3.5),
-            PlayerProjectionFixtureRecord(player_id=3, gameweek_number=2, projected_points=2.0),
+            PlayerProjectionFixtureRecord(
+                player_id=1,
+                fixture_id=101,
+                gameweek_number=2,
+                projected_points=5.0,
+                kickoff_time="2026-08-15T15:00:00+00:00",
+                opponent_team_short_name="CHE",
+                is_home=True,
+            ),
+            PlayerProjectionFixtureRecord(
+                player_id=1,
+                fixture_id=102,
+                gameweek_number=3,
+                projected_points=6.0,
+                kickoff_time="2026-08-22T15:00:00+00:00",
+                opponent_team_short_name="TOT",
+                is_home=False,
+            ),
+            PlayerProjectionFixtureRecord(
+                player_id=1,
+                fixture_id=103,
+                gameweek_number=4,
+                projected_points=4.0,
+                kickoff_time="2026-08-29T15:00:00+00:00",
+                opponent_team_short_name="MCI",
+                is_home=True,
+            ),
+            PlayerProjectionFixtureRecord(
+                player_id=2,
+                fixture_id=201,
+                gameweek_number=2,
+                projected_points=4.5,
+                kickoff_time="2026-08-15T15:00:00+00:00",
+                opponent_team_short_name="BHA",
+                is_home=False,
+            ),
+            PlayerProjectionFixtureRecord(
+                player_id=2,
+                fixture_id=202,
+                gameweek_number=3,
+                projected_points=3.5,
+                kickoff_time="2026-08-22T15:00:00+00:00",
+                opponent_team_short_name="NEW",
+                is_home=True,
+            ),
+            PlayerProjectionFixtureRecord(
+                player_id=3,
+                fixture_id=301,
+                gameweek_number=2,
+                projected_points=2.0,
+                kickoff_time="2026-08-15T15:00:00+00:00",
+                opponent_team_short_name="LIV",
+                is_home=False,
+            ),
         ]
 
 
@@ -91,3 +139,5 @@ def test_get_my_team_view_service_combines_squad_and_horizon_totals() -> None:
     assert result.bench_projection_totals.horizon_1 == 2.0
     assert result.captain_adjusted_projection_totals is not None
     assert result.captain_adjusted_projection_totals.horizon_1 == 14.5
+    assert result.gameweek_numbers == [2, 3, 4]
+    assert result.players[0].fixture_projections[0].opponent_team_short_name == "CHE"

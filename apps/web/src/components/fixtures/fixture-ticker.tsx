@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   FixtureTickerItem,
@@ -9,58 +9,109 @@ import {
   fetchFixtureTicker,
   fetchGameweeks,
   fetchTeams,
+  updateTeamDifficulty,
 } from "@/lib/api";
 
-type LoadState =
+const MIN_WINDOW_SIZE = 2;
+const MAX_WINDOW_SIZE = 10;
+const DEFAULT_WINDOW_SIZE = 6;
+const FIXTURES_PER_GAMEWEEK_LIMIT = 20;
+const DIFFICULTY_OPTIONS = [1, 2, 3, 4, 5];
+
+type FixturesLoadState =
   | { type: "loading" }
   | { type: "error"; message: string }
-  | {
-      type: "loaded";
-      items: FixtureTickerItem[];
-      total: number;
-      page: number;
-      pageSize: number;
-    };
+  | { type: "loaded"; itemsByGameweek: Map<number, FixtureTickerItem[]> };
 
-function formatKickoff(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) {
-    return value;
+type SortMode = "alphabetical" | "hardest-first" | "easiest-first";
+
+type TeamFixtureCell = {
+  gameweekNumber: number;
+  opponentShortName: string;
+  isHome: boolean;
+  difficulty: number;
+};
+
+const DIFFICULTY_STYLES: Record<number, string> = {
+  1: "bg-emerald-600 text-white",
+  2: "bg-emerald-300 text-emerald-950",
+  3: "bg-slate-200 text-slate-700",
+  4: "bg-rose-300 text-rose-950",
+  5: "bg-rose-600 text-white",
+};
+
+function difficultyStyle(difficulty: number): string {
+  return DIFFICULTY_STYLES[difficulty] ?? DIFFICULTY_STYLES[3];
+}
+
+function buildCells(
+  team: TeamItem,
+  visibleGameweeks: GameweekItem[],
+  itemsByGameweek: Map<number, FixtureTickerItem[]>
+): Map<number, TeamFixtureCell[]> {
+  const cellsByGameweek = new Map<number, TeamFixtureCell[]>();
+
+  for (const gameweek of visibleGameweeks) {
+    const fixtures = itemsByGameweek.get(gameweek.number) ?? [];
+    const cells: TeamFixtureCell[] = [];
+
+    for (const fixture of fixtures) {
+      if (fixture.home_team_short_name === team.short_name) {
+        cells.push({
+          gameweekNumber: gameweek.number,
+          opponentShortName: fixture.away_team_short_name,
+          isHome: true,
+          difficulty: fixture.away_team_difficulty,
+        });
+      } else if (fixture.away_team_short_name === team.short_name) {
+        cells.push({
+          gameweekNumber: gameweek.number,
+          opponentShortName: fixture.home_team_short_name,
+          isHome: false,
+          difficulty: fixture.home_team_difficulty,
+        });
+      }
+    }
+
+    cellsByGameweek.set(gameweek.number, cells);
   }
 
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "UTC",
-  }).format(date);
+  return cellsByGameweek;
+}
+
+function sumDifficultyAcrossWindow(
+  team: TeamItem,
+  visibleGameweeks: GameweekItem[],
+  itemsByGameweek: Map<number, FixtureTickerItem[]>
+): number {
+  let total = 0;
+
+  for (const gameweek of visibleGameweeks) {
+    const fixtures = itemsByGameweek.get(gameweek.number) ?? [];
+    for (const fixture of fixtures) {
+      if (fixture.home_team_short_name === team.short_name) {
+        total += fixture.away_team_difficulty;
+      } else if (fixture.away_team_short_name === team.short_name) {
+        total += fixture.home_team_difficulty;
+      }
+    }
+  }
+
+  return total;
 }
 
 export function FixtureTicker(): JSX.Element {
-  const [viewMode, setViewMode] = useState<"table" | "cards">("table");
-  const [limit, setLimit] = useState("20");
-  const [selectedTeamId, setSelectedTeamId] = useState("");
-  const [selectedGameweek, setSelectedGameweek] = useState("");
   const [teams, setTeams] = useState<TeamItem[]>([]);
   const [gameweeks, setGameweeks] = useState<GameweekItem[]>([]);
-  const [gameweeksLoaded, setGameweeksLoaded] = useState(false);
   const [teamsError, setTeamsError] = useState<string | null>(null);
   const [gameweeksError, setGameweeksError] = useState<string | null>(null);
-
-  const [appliedLimit, setAppliedLimit] = useState(20);
-  const [appliedPage, setAppliedPage] = useState(1);
-  const [appliedTeamId, setAppliedTeamId] = useState<number | undefined>(undefined);
-  const [appliedGameweek, setAppliedGameweek] = useState<number | undefined>(undefined);
-
-  const [state, setState] = useState<LoadState>({ type: "loading" });
-
-  const defaultGameweek =
-    gameweeks.find((gameweek) => gameweek.is_next)?.number ??
-    gameweeks.find((gameweek) => gameweek.is_current)?.number;
-  const hasAppliedGameweekFilter =
-    appliedGameweek !== undefined && appliedGameweek !== defaultGameweek;
+  const [windowStart, setWindowStart] = useState<number | undefined>(undefined);
+  const [windowSize, setWindowSize] = useState(DEFAULT_WINDOW_SIZE);
+  const [sortMode, setSortMode] = useState<SortMode>("alphabetical");
+  const [fixturesState, setFixturesState] = useState<FixturesLoadState>({ type: "loading" });
+  const [fixturesRefreshToken, setFixturesRefreshToken] = useState(0);
+  const [updatingTeamId, setUpdatingTeamId] = useState<number | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,23 +119,15 @@ export function FixtureTicker(): JSX.Element {
     async function run(): Promise<void> {
       try {
         const data = await fetchTeams();
-        if (cancelled) {
-          return;
-        }
-
-        setTeams(data.items);
+        if (!cancelled) setTeams(data.items);
       } catch (error) {
-        if (cancelled) {
-          return;
+        if (!cancelled) {
+          setTeamsError(error instanceof Error ? error.message : "Failed to load teams");
         }
-
-        const message = error instanceof Error ? error.message : "Failed to load teams";
-        setTeamsError(message);
       }
     }
 
     void run();
-
     return () => {
       cancelled = true;
     };
@@ -96,318 +139,308 @@ export function FixtureTicker(): JSX.Element {
     async function run(): Promise<void> {
       try {
         const data = await fetchGameweeks();
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
 
         setGameweeks(data.items);
 
         const defaultNumber =
           data.items.find((gameweek) => gameweek.is_next)?.number ??
-          data.items.find((gameweek) => gameweek.is_current)?.number;
+          data.items.find((gameweek) => gameweek.is_current)?.number ??
+          data.items[0]?.number;
 
         if (defaultNumber !== undefined) {
-          setSelectedGameweek(String(defaultNumber));
-          setAppliedGameweek(defaultNumber);
+          setWindowStart(defaultNumber);
         }
       } catch (error) {
-        if (cancelled) {
-          return;
-        }
-
-        const message = error instanceof Error ? error.message : "Failed to load gameweeks";
-        setGameweeksError(message);
-      } finally {
         if (!cancelled) {
-          setGameweeksLoaded(true);
+          setGameweeksError(error instanceof Error ? error.message : "Failed to load gameweeks");
         }
       }
     }
 
     void run();
-
     return () => {
       cancelled = true;
     };
   }, []);
 
+  const maxGameweekNumber = useMemo(
+    () => gameweeks.reduce((max, gameweek) => Math.max(max, gameweek.number), 0),
+    [gameweeks]
+  );
+  const minGameweekNumber = useMemo(
+    () => gameweeks.reduce((min, gameweek) => Math.min(min, gameweek.number), Infinity),
+    [gameweeks]
+  );
+
+  const visibleGameweeks = useMemo(() => {
+    if (windowStart === undefined) return [];
+
+    return gameweeks
+      .filter(
+        (gameweek) =>
+          gameweek.number >= windowStart && gameweek.number < windowStart + windowSize
+      )
+      .sort((a, b) => a.number - b.number);
+  }, [gameweeks, windowStart, windowSize]);
+
+  const visibleGameweekNumbers = visibleGameweeks.map((gameweek) => gameweek.number).join(",");
+
   useEffect(() => {
-    if (!gameweeksLoaded) {
-      return;
-    }
+    if (visibleGameweeks.length === 0) return;
 
     let cancelled = false;
 
     async function run(): Promise<void> {
-      setState({ type: "loading" });
+      setFixturesState({ type: "loading" });
       try {
-        const data = await fetchFixtureTicker({
-          page: appliedPage,
-          limit: appliedLimit,
-          team_id: appliedTeamId,
-          gameweek: appliedGameweek,
-        });
-        if (cancelled) {
-          return;
-        }
+        const responses = await Promise.all(
+          visibleGameweeks.map((gameweek) =>
+            fetchFixtureTicker({ gameweek: gameweek.number, limit: FIXTURES_PER_GAMEWEEK_LIMIT })
+          )
+        );
+        if (cancelled) return;
 
-        setState({
-          type: "loaded",
-          items: data.items,
-          total: data.total,
-          page: data.page,
-          pageSize: data.page_size,
+        const itemsByGameweek = new Map<number, FixtureTickerItem[]>();
+        visibleGameweeks.forEach((gameweek, index) => {
+          itemsByGameweek.set(gameweek.number, responses[index].items);
         });
+
+        setFixturesState({ type: "loaded", itemsByGameweek });
       } catch (error) {
-        if (cancelled) {
-          return;
+        if (!cancelled) {
+          const message =
+            error instanceof Error ? error.message : "Failed to load fixture ticker";
+          setFixturesState({ type: "error", message });
         }
-
-        const message =
-          error instanceof Error ? error.message : "Failed to load fixture ticker";
-        setState({ type: "error", message });
       }
     }
 
     void run();
-
     return () => {
       cancelled = true;
     };
-  }, [appliedGameweek, appliedLimit, appliedPage, appliedTeamId, gameweeksLoaded]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleGameweekNumbers, fixturesRefreshToken]);
+
+  const canGoPrevious =
+    windowStart !== undefined && Number.isFinite(minGameweekNumber) && windowStart > minGameweekNumber;
+  const canGoNext = windowStart !== undefined && windowStart + windowSize - 1 < maxGameweekNumber;
+
+  const visibleTeams = useMemo(() => {
+    if (sortMode === "alphabetical" || fixturesState.type !== "loaded") {
+      return [...teams].sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    const totalByTeamId = new Map<number, number>();
+    for (const team of teams) {
+      totalByTeamId.set(
+        team.id,
+        sumDifficultyAcrossWindow(team, visibleGameweeks, fixturesState.itemsByGameweek)
+      );
+    }
+
+    return [...teams].sort((a, b) => {
+      const totalA = totalByTeamId.get(a.id) ?? Infinity;
+      const totalB = totalByTeamId.get(b.id) ?? Infinity;
+      if (totalA === totalB) {
+        return a.name.localeCompare(b.name);
+      }
+      return sortMode === "easiest-first" ? totalA - totalB : totalB - totalA;
+    });
+  }, [teams, sortMode, fixturesState, visibleGameweeks]);
+
+  async function handleDifficultyChange(team: TeamItem, newDifficulty: number): Promise<void> {
+    setUpdateError(null);
+    setUpdatingTeamId(team.id);
+    try {
+      const updated = await updateTeamDifficulty(team.id, newDifficulty);
+      setTeams((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      // Fixture cells embed each opponent's difficulty at fetch time, so refetch to reflect the change.
+      setFixturesRefreshToken((value) => value + 1);
+    } catch (error) {
+      setUpdateError(error instanceof Error ? error.message : "Failed to update difficulty");
+    } finally {
+      setUpdatingTeamId(null);
+    }
+  }
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">Upcoming Fixtures</h2>
-        <div className="flex gap-2">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold">Fixture Ticker</h2>
+          <p className="mt-1 text-xs text-slate-600">
+            Every team&apos;s next fixtures, colour-coded by opponent difficulty.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-slate-600">
+            Sort by
+            <select
+              aria-label="Sort teams"
+              className="rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+              value={sortMode}
+              onChange={(event) => setSortMode(event.target.value as SortMode)}
+            >
+              <option value="alphabetical">A-Z</option>
+              <option value="hardest-first">Hardest to easiest</option>
+              <option value="easiest-first">Easiest to hardest</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-slate-600">
+            Window
+            <input
+              aria-label="Gameweek window size"
+              type="range"
+              min={MIN_WINDOW_SIZE}
+              max={MAX_WINDOW_SIZE}
+              value={windowSize}
+              onChange={(event) => setWindowSize(Number(event.target.value))}
+            />
+            <span className="w-16 font-medium text-slate-900">{windowSize} GWs</span>
+          </label>
           <button
             type="button"
-            aria-label="Table view"
-            className={`rounded-md border px-3 py-1 text-xs ${
-              viewMode == "table"
-                ? "border-slate-800 bg-slate-800 text-white"
-                : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
-            }`}
-            onClick={() => setViewMode("table")}
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-40"
+            aria-label="Previous gameweeks"
+            disabled={!canGoPrevious}
+            onClick={() => setWindowStart((value) => (value === undefined ? value : value - 1))}
           >
-            Table
+            &lsaquo; Prev
           </button>
           <button
             type="button"
-            aria-label="Card view"
-            className={`rounded-md border px-3 py-1 text-xs ${
-              viewMode == "cards"
-                ? "border-slate-800 bg-slate-800 text-white"
-                : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
-            }`}
-            onClick={() => setViewMode("cards")}
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-40"
+            aria-label="Next gameweeks"
+            disabled={!canGoNext}
+            onClick={() => setWindowStart((value) => (value === undefined ? value : value + 1))}
           >
-            Cards
+            Next &rsaquo;
           </button>
         </div>
       </div>
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <input
-          aria-label="Fixture limit"
-          className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-          value={limit}
-          onChange={(event) => setLimit(event.target.value)}
-          placeholder="Limit (1-100)"
-        />
-        <select
-          aria-label="Filter by team"
-          className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-          value={selectedTeamId}
-          onChange={(event) => setSelectedTeamId(event.target.value)}
-        >
-          <option value="">All teams</option>
-          {teams.map((team) => (
-            <option key={team.id} value={String(team.id)}>
-              {team.name} ({team.short_name})
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Filter by gameweek"
-          className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-          value={selectedGameweek}
-          onChange={(event) => setSelectedGameweek(event.target.value)}
-        >
-          <option value="">All gameweeks</option>
-          {gameweeks.map((gameweek) => (
-            <option key={gameweek.id} value={String(gameweek.number)}>
-              GW {gameweek.number}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50"
-          onClick={() => {
-            const parsedLimit = Number.parseInt(limit, 10);
-            if (Number.isNaN(parsedLimit)) {
-              setAppliedLimit(20);
-            } else {
-              setAppliedLimit(Math.min(100, Math.max(1, parsedLimit)));
-            }
-            setAppliedPage(1);
 
-            const parsedTeamId = Number.parseInt(selectedTeamId, 10);
-            setAppliedTeamId(Number.isNaN(parsedTeamId) ? undefined : parsedTeamId);
-
-            const parsedGameweek = Number.parseInt(selectedGameweek, 10);
-            setAppliedGameweek(Number.isNaN(parsedGameweek) ? undefined : parsedGameweek);
-          }}
-        >
-          Apply filters
-        </button>
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+        <span className="font-medium">Difficulty:</span>
+        {DIFFICULTY_OPTIONS.map((difficulty) => (
+          <span
+            key={difficulty}
+            className={`rounded px-2 py-0.5 font-semibold ${difficultyStyle(difficulty)}`}
+          >
+            {difficulty}
+          </span>
+        ))}
+        <span className="text-slate-500">
+          (1 = easiest, 5 = hardest &mdash; edit a team&apos;s rating in the Team column. Sorting by
+          difficulty totals the ratings across every fixture in the visible gameweek window.)
+        </span>
       </div>
-      {defaultGameweek !== undefined && appliedGameweek !== defaultGameweek && (
-        <div className="mb-3">
-          <button
-            type="button"
-            className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1 text-xs hover:bg-slate-100"
-            onClick={() => {
-              setSelectedGameweek(String(defaultGameweek));
-              setAppliedGameweek(defaultGameweek);
-              setAppliedPage(1);
-            }}
-          >
-            Reset to next GW
-          </button>
-        </div>
-      )}
-      {(appliedLimit !== 20 || appliedTeamId !== undefined || hasAppliedGameweekFilter) && (
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {appliedLimit !== 20 && (
-            <button
-              type="button"
-              className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs"
-              onClick={() => {
-                setLimit("20");
-                setAppliedLimit(20);
-                setAppliedPage(1);
-              }}
-            >
-              Limit: {appliedLimit} x
-            </button>
-          )}
-          {appliedTeamId !== undefined && (
-            <button
-              type="button"
-              className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs"
-              onClick={() => {
-                setSelectedTeamId("");
-                setAppliedTeamId(undefined);
-                setAppliedPage(1);
-              }}
-            >
-              Team: {teams.find((team) => team.id === appliedTeamId)?.short_name ?? appliedTeamId} x
-            </button>
-          )}
-          {hasAppliedGameweekFilter && (
-            <button
-              type="button"
-              className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs"
-              onClick={() => {
-                setSelectedGameweek("");
-                setAppliedGameweek(undefined);
-                setAppliedPage(1);
-              }}
-            >
-              GW: {appliedGameweek} x
-            </button>
-          )}
-          <button
-            type="button"
-            className="rounded-full border border-slate-300 px-3 py-1 text-xs hover:bg-slate-50"
-            onClick={() => {
-              setLimit("20");
-              setSelectedTeamId("");
-              setSelectedGameweek(defaultGameweek !== undefined ? String(defaultGameweek) : "");
-              setAppliedLimit(20);
-              setAppliedTeamId(undefined);
-              setAppliedGameweek(defaultGameweek);
-              setAppliedPage(1);
-            }}
-          >
-            Clear all
-          </button>
-        </div>
-      )}
+
       {teamsError && <p className="mb-3 text-sm text-amber-700">{teamsError}</p>}
       {gameweeksError && <p className="mb-3 text-sm text-amber-700">{gameweeksError}</p>}
-      {state.type === "loading" && <p className="text-sm text-slate-600">Loading fixtures...</p>}
-      {state.type === "error" && <p className="text-sm text-red-700">{state.message}</p>}
-      {state.type === "loaded" && state.items.length === 0 && (
-        <p className="text-sm text-slate-600">No upcoming fixtures found.</p>
+      {updateError && <p className="mb-3 text-sm text-red-700">{updateError}</p>}
+      {fixturesState.type === "error" && (
+        <p className="mb-3 text-sm text-red-700">{fixturesState.message}</p>
       )}
-      {state.type === "loaded" && state.items.length > 0 && (
+
+      {visibleGameweeks.length === 0 ? (
+        <p className="text-sm text-slate-600">No upcoming gameweeks found.</p>
+      ) : (
         <div className="overflow-x-auto">
-          {viewMode === "table" ? (
-            <table className="min-w-full border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                  <th className="px-3 py-2 font-medium">GW</th>
-                  <th className="px-3 py-2 font-medium">Fixture</th>
-                  <th className="px-3 py-2 font-medium">Kickoff (UTC)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {state.items.map((item) => (
-                  <tr key={item.fixture_id} className="border-b border-slate-100">
-                    <td className="px-3 py-2 text-slate-700">{item.gameweek_number ?? "-"}</td>
-                    <td className="px-3 py-2 font-medium text-slate-900">
-                      {item.home_team_short_name} vs {item.away_team_short_name}
-                    </td>
-                    <td className="px-3 py-2 text-slate-700">{formatKickoff(item.kickoff_time)}</td>
-                  </tr>
+          <table className="min-w-full border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                <th className="sticky left-0 bg-slate-50 px-3 py-2 font-medium">Team</th>
+                {visibleGameweeks.map((gameweek) => (
+                  <th key={gameweek.id} className="px-2 py-2 text-center font-medium">
+                    GW{gameweek.number}
+                  </th>
                 ))}
-              </tbody>
-            </table>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {state.items.map((item) => (
-                <article
-                  key={item.fixture_id}
-                  className="rounded-lg border border-slate-200 bg-slate-50 p-3"
-                >
-                  <p className="text-xs text-slate-500">GW {item.gameweek_number ?? "-"}</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">
-                    {item.home_team_short_name} vs {item.away_team_short_name}
-                  </p>
-                  <p className="mt-1 text-xs text-slate-600">Kickoff: {formatKickoff(item.kickoff_time)} UTC</p>
-                </article>
-              ))}
-            </div>
-          )}
-          <p className="mt-3 text-xs text-slate-600">
-            Showing {state.items.length} of {state.total} fixtures
-          </p>
-          <div className="mt-3 flex items-center justify-between">
-            <p className="text-xs text-slate-600">
-              Page {state.page} of {Math.max(1, Math.ceil(state.total / state.pageSize))}
-            </p>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                className="rounded-md border border-slate-300 px-3 py-1 text-xs disabled:opacity-40"
-                disabled={state.page <= 1}
-                onClick={() => setAppliedPage((value) => Math.max(1, value - 1))}
-              >
-                Previous
-              </button>
-              <button
-                type="button"
-                className="rounded-md border border-slate-300 px-3 py-1 text-xs disabled:opacity-40"
-                disabled={state.page >= Math.max(1, Math.ceil(state.total / state.pageSize))}
-                onClick={() => setAppliedPage((value) => value + 1)}
-              >
-                Next
-              </button>
-            </div>
-          </div>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleTeams.map((team) => {
+                const cellsByGameweek =
+                  fixturesState.type === "loaded"
+                    ? buildCells(team, visibleGameweeks, fixturesState.itemsByGameweek)
+                    : undefined;
+
+                return (
+                  <tr key={team.id} className="border-b border-slate-100">
+                    <td className="sticky left-0 bg-white px-3 py-2 font-medium text-slate-900">
+                      <div className="flex items-center gap-2">
+                        <span>{team.short_name}</span>
+                        <select
+                          aria-label={`${team.short_name} difficulty`}
+                          className={`rounded px-1 py-0.5 text-xs font-semibold disabled:opacity-50 ${difficultyStyle(
+                            team.difficulty
+                          )}`}
+                          value={team.difficulty}
+                          disabled={updatingTeamId === team.id}
+                          onChange={(event) =>
+                            void handleDifficultyChange(team, Number(event.target.value))
+                          }
+                        >
+                          {DIFFICULTY_OPTIONS.map((difficulty) => (
+                            <option key={difficulty} value={difficulty}>
+                              {difficulty}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </td>
+                    {visibleGameweeks.map((gameweek) => {
+                      if (!cellsByGameweek) {
+                        return (
+                          <td key={gameweek.id} className="px-2 py-2 text-center text-slate-400">
+                            …
+                          </td>
+                        );
+                      }
+
+                      const cells = cellsByGameweek.get(gameweek.number) ?? [];
+
+                      if (cells.length === 0) {
+                        return (
+                          <td key={gameweek.id} className="px-2 py-2 text-center text-slate-300">
+                            -
+                          </td>
+                        );
+                      }
+
+                      return (
+                        <td key={gameweek.id} className="px-1 py-1 text-center">
+                          <div className="flex flex-col items-center gap-1">
+                            {cells.map((cell, index) => (
+                              <span
+                                key={`${cell.gameweekNumber}-${index}`}
+                                className={`w-full rounded px-2 py-1 text-xs font-semibold ${difficultyStyle(
+                                  cell.difficulty
+                                )}`}
+                              >
+                                {cell.opponentShortName} ({cell.isHome ? "H" : "A"})
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+              {visibleTeams.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={visibleGameweeks.length + 1}
+                    className="px-3 py-4 text-center text-sm text-slate-600"
+                  >
+                    No teams found.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       )}
     </section>

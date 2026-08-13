@@ -23,6 +23,8 @@ export type FixtureTickerItem = {
   kickoff_time: string;
   home_team_short_name: string;
   away_team_short_name: string;
+  home_team_difficulty: number;
+  away_team_difficulty: number;
   finished: boolean;
 };
 
@@ -37,6 +39,7 @@ export type TeamItem = {
   id: number;
   name: string;
   short_name: string;
+  difficulty: number;
 };
 
 export type TeamListResponse = {
@@ -73,6 +76,16 @@ export type MyTeamPlayerItem = {
   is_captain: boolean;
   is_vice_captain: boolean;
   projection_totals: HorizonProjectionTotals | null;
+  fixture_projections: PlayerFixtureProjection[];
+};
+
+export type PlayerFixtureProjection = {
+  fixture_id: number | null;
+  gameweek_number: number;
+  projected_points: number;
+  kickoff_time: string;
+  opponent_team_short_name: string | null;
+  is_home: boolean | null;
 };
 
 export type HorizonProjectionTotals = {
@@ -89,6 +102,7 @@ export type MyTeamResponse = {
   projection_totals: HorizonProjectionTotals | null;
   bench_projection_totals: HorizonProjectionTotals | null;
   captain_adjusted_projection_totals: HorizonProjectionTotals | null;
+  gameweek_numbers: number[];
   players: MyTeamPlayerItem[];
 };
 
@@ -105,6 +119,99 @@ export type SaveMyTeamRequest = {
   free_transfers: number;
   players: SaveMyTeamPlayerSelection[];
 };
+
+export type ProjectionRefreshResponse = {
+  projections_generated: number;
+  fixtures_considered: number;
+  players_considered: number;
+  model_version: string;
+  generated_at: string;
+};
+
+export type PlanChip = "WILDCARD" | "FREE_HIT" | "BENCH_BOOST" | "TRIPLE_CAPTAIN";
+
+export type PlanSummary = {
+  plan_id: number;
+  name: string;
+  start_gameweek: number;
+  end_gameweek: number;
+};
+
+export type PlanListResponse = {
+  plans: PlanSummary[];
+};
+
+export type PlanFixture = {
+  fixture_id: number | null;
+  projected_points: number;
+  kickoff_time: string;
+  opponent_team_short_name: string | null;
+  is_home: boolean | null;
+};
+
+export type PlanPlayer = {
+  player_id: number;
+  web_name: string;
+  team_short_name: string;
+  position: "GK" | "DEF" | "MID" | "FWD";
+  current_price: number;
+  status: string;
+  is_starting: boolean;
+  bench_order: number | null;
+  is_captain: boolean;
+  is_vice_captain: boolean;
+  projected_points: number;
+  fixtures: PlanFixture[];
+};
+
+export type PlanTransfer = {
+  player_id: number;
+  web_name: string;
+};
+
+export type PlanGameweek = {
+  gameweek_number: number;
+  chip: PlanChip | null;
+  bank: number;
+  free_transfers_available: number;
+  unlimited_transfers: boolean;
+  transfers_made: number;
+  points_hit: number;
+  starting_points: number;
+  bench_points: number;
+  captain_bonus_points: number;
+  total_points: number;
+  players: PlanPlayer[];
+  transfers_in: PlanTransfer[];
+  transfers_out: PlanTransfer[];
+};
+
+export type PlanResponse = {
+  plan_id: number;
+  name: string;
+  start_gameweek: number;
+  end_gameweek: number;
+  initial_bank: number;
+  initial_free_transfers: number;
+  total_points: number;
+  total_points_hit: number;
+  gameweeks: PlanGameweek[];
+};
+
+export type SavePlanGameweekRequest = {
+  chip: PlanChip | null;
+  players: SaveMyTeamPlayerSelection[];
+};
+
+export class PlanRuleError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "PlanRuleError";
+    this.code = code;
+  }
+}
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -162,6 +269,21 @@ export async function fetchTeams(): Promise<TeamListResponse> {
   return (await response.json()) as TeamListResponse;
 }
 
+export async function updateTeamDifficulty(teamId: number, difficulty: number): Promise<TeamItem> {
+  const response = await fetch(`${API_BASE_URL}/teams/${teamId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ difficulty }),
+  });
+  if (!response.ok) {
+    throw new Error(`Update team difficulty request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as TeamItem;
+}
+
 export async function fetchGameweeks(): Promise<GameweekListResponse> {
   const response = await fetch(`${API_BASE_URL}/gameweeks`);
   if (!response.ok) {
@@ -196,4 +318,96 @@ export async function saveMyTeam(payload: SaveMyTeamRequest): Promise<MyTeamResp
   }
 
   return (await response.json()) as MyTeamResponse;
+}
+
+export async function refreshProjections(): Promise<ProjectionRefreshResponse> {
+  const response = await fetch(`${API_BASE_URL}/projections/run`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`Projection refresh request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as ProjectionRefreshResponse;
+}
+
+async function readPlanResponse(response: Response, action: string): Promise<PlanResponse> {
+  if (response.status === 422) {
+    const body = (await response.json()) as { detail?: { code?: string; message?: string } };
+    throw new PlanRuleError(
+      body.detail?.code ?? "invalid_plan",
+      body.detail?.message ?? "That change is not allowed",
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`${action} request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as PlanResponse;
+}
+
+export async function fetchPlans(): Promise<PlanListResponse> {
+  const response = await fetch(`${API_BASE_URL}/plans`);
+  if (!response.ok) {
+    throw new Error(`Plans request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as PlanListResponse;
+}
+
+export async function fetchPlan(planId: number): Promise<PlanResponse | null> {
+  const response = await fetch(`${API_BASE_URL}/plans/${planId}`);
+  if (response.status === 404) {
+    return null;
+  }
+
+  return readPlanResponse(response, "Plan");
+}
+
+export async function createPlan(payload: {
+  name: string;
+  start_gameweek: number;
+  end_gameweek: number;
+}): Promise<PlanResponse> {
+  const response = await fetch(`${API_BASE_URL}/plans`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  return readPlanResponse(response, "Create plan");
+}
+
+export async function updatePlan(
+  planId: number,
+  payload: { name?: string; start_gameweek?: number; end_gameweek?: number },
+): Promise<PlanResponse> {
+  const response = await fetch(`${API_BASE_URL}/plans/${planId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  return readPlanResponse(response, "Update plan");
+}
+
+export async function deletePlan(planId: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/plans/${planId}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`Delete plan request failed with status ${response.status}`);
+  }
+}
+
+export async function savePlanGameweek(
+  planId: number,
+  gameweekNumber: number,
+  payload: SavePlanGameweekRequest,
+): Promise<PlanResponse> {
+  const response = await fetch(`${API_BASE_URL}/plans/${planId}/gameweeks/${gameweekNumber}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  return readPlanResponse(response, "Save plan gameweek");
 }

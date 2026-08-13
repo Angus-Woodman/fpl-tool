@@ -46,6 +46,15 @@ _POSITION_MAP: dict[int, PlayerPosition] = {
     4: PlayerPosition.FORWARD,
 }
 
+_DEFAULT_DIFFICULTY = 3
+
+
+def _map_team_difficulty(strength: int | None) -> int:
+    if strength is None:
+        return _DEFAULT_DIFFICULTY
+
+    return max(1, min(5, strength))
+
 
 def map_bootstrap_static(payload: BootstrapStaticDto) -> BootstrapStaticMapped:
     teams = [
@@ -54,6 +63,7 @@ def map_bootstrap_static(payload: BootstrapStaticDto) -> BootstrapStaticMapped:
             external_fpl_id=team.id,
             name=team.name,
             short_name=team.short_name,
+            difficulty=_map_team_difficulty(team.strength),
         )
         for team in payload.teams
     ]

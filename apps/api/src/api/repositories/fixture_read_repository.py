@@ -15,6 +15,8 @@ class FixtureTickerItem:
     kickoff_time: str
     home_team_short_name: str
     away_team_short_name: str
+    home_team_difficulty: int
+    away_team_difficulty: int
     finished: bool
 
 
@@ -48,6 +50,8 @@ class FixtureReadRepository:
                 FixtureModel.kickoff_time,
                 home_team.short_name,
                 away_team.short_name,
+                home_team.difficulty,
+                away_team.difficulty,
                 FixtureModel.finished,
             )
             .join(home_team, home_team.id == FixtureModel.home_team_id)
@@ -94,7 +98,9 @@ class FixtureReadRepository:
                 kickoff_time=row[2].isoformat(),
                 home_team_short_name=row[3],
                 away_team_short_name=row[4],
-                finished=row[5],
+                home_team_difficulty=row[5],
+                away_team_difficulty=row[6],
+                finished=row[7],
             )
             for row in rows
         ]

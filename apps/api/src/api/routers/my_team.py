@@ -10,6 +10,7 @@ from api.schemas.my_team import (
     CurrentSquadPlayerResponse,
     CurrentSquadResponse,
     HorizonProjectionTotalsResponse,
+    PlayerFixtureProjectionResponse,
     UpsertCurrentSquadRequestBody,
 )
 from api.services.current_squad import (
@@ -72,7 +73,34 @@ def get_my_team(
             if result.captain_adjusted_projection_totals is not None
             else None
         ),
-        players=[CurrentSquadPlayerResponse.model_validate(player) for player in result.players],
+        gameweek_numbers=result.gameweek_numbers,
+        players=[
+            CurrentSquadPlayerResponse(
+                player_id=player.player_id,
+                web_name=player.web_name,
+                first_name=player.first_name,
+                second_name=player.second_name,
+                team_name=player.team_name,
+                team_short_name=player.team_short_name,
+                position=player.position,
+                current_price=player.current_price,
+                status=player.status,
+                is_starting=player.is_starting,
+                bench_order=player.bench_order,
+                is_captain=player.is_captain,
+                is_vice_captain=player.is_vice_captain,
+                projection_totals=(
+                    HorizonProjectionTotalsResponse.model_validate(player.projection_totals)
+                    if player.projection_totals is not None
+                    else None
+                ),
+                fixture_projections=[
+                    PlayerFixtureProjectionResponse.model_validate(fixture)
+                    for fixture in player.fixture_projections
+                ],
+            )
+            for player in result.players
+        ],
     )
 
 
@@ -115,5 +143,6 @@ def put_my_team(
         projection_totals=None,
         bench_projection_totals=None,
         captain_adjusted_projection_totals=None,
+        gameweek_numbers=[],
         players=[CurrentSquadPlayerResponse.model_validate(player) for player in result.players],
     )

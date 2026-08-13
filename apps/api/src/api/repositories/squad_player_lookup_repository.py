@@ -14,6 +14,7 @@ class SquadPlayerLookupItem:
     team_id: int
     web_name: str
     position: str
+    current_price: float
 
 
 class SquadPlayerLookupRepository:
@@ -30,6 +31,7 @@ class SquadPlayerLookupRepository:
                 PlayerModel.team_id,
                 PlayerModel.web_name,
                 PlayerModel.position,
+                PlayerModel.current_price,
             )
             .join(TeamModel, TeamModel.id == PlayerModel.team_id)
             .where(PlayerModel.id.in_(player_ids))
@@ -41,6 +43,7 @@ class SquadPlayerLookupRepository:
                 team_id=row[1],
                 web_name=row[2],
                 position=row[3].value if hasattr(row[3], "value") else str(row[3]),
+                current_price=float(row[4]),
             )
             for row in rows
         ]

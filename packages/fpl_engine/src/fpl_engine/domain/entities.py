@@ -18,6 +18,7 @@ class Team:
     name: str
     short_name: str
     external_fpl_id: int
+    difficulty: int
 
 
 @dataclass(frozen=True)

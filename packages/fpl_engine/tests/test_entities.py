@@ -18,6 +18,7 @@ def test_player_position_is_strongly_typed_enum() -> None:
 
 
 def test_team_entity_shape() -> None:
-    team = Team(id=1, name="Arsenal", short_name="ARS", external_fpl_id=1)
+    team = Team(id=1, name="Arsenal", short_name="ARS", external_fpl_id=1, difficulty=4)
 
     assert team.short_name == "ARS"
+    assert team.difficulty == 4

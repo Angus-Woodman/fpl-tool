@@ -16,6 +16,16 @@ class HorizonProjectionTotals:
 
 
 @dataclass(frozen=True)
+class PlayerFixtureProjectionViewRecord:
+    fixture_id: int | None
+    gameweek_number: int
+    projected_points: float
+    kickoff_time: str
+    opponent_team_short_name: str | None
+    is_home: bool | None
+
+
+@dataclass(frozen=True)
 class MyTeamPlayerViewRecord:
     player_id: int
     web_name: str
@@ -31,6 +41,7 @@ class MyTeamPlayerViewRecord:
     is_captain: bool
     is_vice_captain: bool
     projection_totals: HorizonProjectionTotals | None
+    fixture_projections: list[PlayerFixtureProjectionViewRecord]
 
 
 @dataclass(frozen=True)
@@ -43,6 +54,7 @@ class MyTeamViewRecord:
     projection_totals: HorizonProjectionTotals | None
     bench_projection_totals: HorizonProjectionTotals | None
     captain_adjusted_projection_totals: HorizonProjectionTotals | None
+    gameweek_numbers: list[int]
 
 
 class CurrentSquadRepositoryPort(Protocol):
@@ -74,6 +86,8 @@ class GetMyTeamViewService:
             player_ids
         )
         totals_by_player = self._build_totals_by_player(projection_rows)
+        fixtures_by_player = self._build_fixtures_by_player(projection_rows)
+        gameweek_numbers = sorted({row.gameweek_number for row in projection_rows})
 
         players = [
             MyTeamPlayerViewRecord(
@@ -91,6 +105,7 @@ class GetMyTeamViewService:
                 is_captain=player.is_captain,
                 is_vice_captain=player.is_vice_captain,
                 projection_totals=totals_by_player.get(player.player_id),
+                fixture_projections=fixtures_by_player.get(player.player_id, []),
             )
             for player in current_squad.players
         ]
@@ -115,7 +130,26 @@ class GetMyTeamViewService:
             projection_totals=projection_totals,
             bench_projection_totals=bench_projection_totals,
             captain_adjusted_projection_totals=captain_adjusted_projection_totals,
+            gameweek_numbers=gameweek_numbers,
         )
+
+    def _build_fixtures_by_player(
+        self, rows: list[PlayerProjectionFixtureRecord]
+    ) -> dict[int, list[PlayerFixtureProjectionViewRecord]]:
+        fixtures_by_player: dict[int, list[PlayerFixtureProjectionViewRecord]] = defaultdict(list)
+        for row in rows:
+            fixtures_by_player[row.player_id].append(
+                PlayerFixtureProjectionViewRecord(
+                    fixture_id=row.fixture_id,
+                    gameweek_number=row.gameweek_number,
+                    projected_points=row.projected_points,
+                    kickoff_time=row.kickoff_time,
+                    opponent_team_short_name=row.opponent_team_short_name,
+                    is_home=row.is_home,
+                )
+            )
+
+        return fixtures_by_player
 
     def _build_totals_by_player(
         self, rows: list[PlayerProjectionFixtureRecord]

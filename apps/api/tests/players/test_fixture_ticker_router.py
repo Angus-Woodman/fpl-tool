@@ -22,6 +22,8 @@ class _FakeFixtureTickerService:
                     kickoff_time="2026-08-21T18:30:00+00:00",
                     home_team_short_name="ARS",
                     away_team_short_name="AVL",
+                    home_team_difficulty=3,
+                    away_team_difficulty=4,
                     finished=False,
                 )
             ],

@@ -96,22 +96,32 @@ def _build_valid_request() -> UpsertCurrentSquadRequest:
 
 
 def _build_lookup_players() -> list[SquadPlayerLookupItem]:
+    specs = [
+        (1, 1, "GK1", "GK"),
+        (2, 2, "GK2", "GK"),
+        (3, 1, "DEF1", "DEF"),
+        (4, 2, "DEF2", "DEF"),
+        (5, 3, "DEF3", "DEF"),
+        (6, 4, "DEF4", "DEF"),
+        (7, 5, "DEF5", "DEF"),
+        (8, 6, "MID1", "MID"),
+        (9, 7, "MID2", "MID"),
+        (10, 8, "MID3", "MID"),
+        (11, 9, "MID4", "MID"),
+        (12, 10, "MID5", "MID"),
+        (13, 3, "FWD1", "FWD"),
+        (14, 4, "FWD2", "FWD"),
+        (15, 5, "FWD3", "FWD"),
+    ]
     return [
-        SquadPlayerLookupItem(player_id=1, team_id=1, web_name="GK1", position="GK"),
-        SquadPlayerLookupItem(player_id=2, team_id=2, web_name="GK2", position="GK"),
-        SquadPlayerLookupItem(player_id=3, team_id=1, web_name="DEF1", position="DEF"),
-        SquadPlayerLookupItem(player_id=4, team_id=2, web_name="DEF2", position="DEF"),
-        SquadPlayerLookupItem(player_id=5, team_id=3, web_name="DEF3", position="DEF"),
-        SquadPlayerLookupItem(player_id=6, team_id=4, web_name="DEF4", position="DEF"),
-        SquadPlayerLookupItem(player_id=7, team_id=5, web_name="DEF5", position="DEF"),
-        SquadPlayerLookupItem(player_id=8, team_id=6, web_name="MID1", position="MID"),
-        SquadPlayerLookupItem(player_id=9, team_id=7, web_name="MID2", position="MID"),
-        SquadPlayerLookupItem(player_id=10, team_id=8, web_name="MID3", position="MID"),
-        SquadPlayerLookupItem(player_id=11, team_id=9, web_name="MID4", position="MID"),
-        SquadPlayerLookupItem(player_id=12, team_id=10, web_name="MID5", position="MID"),
-        SquadPlayerLookupItem(player_id=13, team_id=3, web_name="FWD1", position="FWD"),
-        SquadPlayerLookupItem(player_id=14, team_id=4, web_name="FWD2", position="FWD"),
-        SquadPlayerLookupItem(player_id=15, team_id=5, web_name="FWD3", position="FWD"),
+        SquadPlayerLookupItem(
+            player_id=player_id,
+            team_id=team_id,
+            web_name=web_name,
+            position=position,
+            current_price=5.0,
+        )
+        for player_id, team_id, web_name, position in specs
     ]
 
 

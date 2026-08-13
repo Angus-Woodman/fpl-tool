@@ -12,6 +12,7 @@ from api.services.get_my_team_view import (
     HorizonProjectionTotals,
     MyTeamPlayerViewRecord,
     MyTeamViewRecord,
+    PlayerFixtureProjectionViewRecord,
 )
 from fastapi.testclient import TestClient
 
@@ -146,6 +147,16 @@ def test_get_my_team_returns_current_squad() -> None:
                     horizon_3=13.0,
                     horizon_5=18.0,
                 ),
+                fixture_projections=[
+                    PlayerFixtureProjectionViewRecord(
+                        fixture_id=10,
+                        gameweek_number=2,
+                        projected_points=5.0,
+                        kickoff_time="2026-08-15T15:00:00+00:00",
+                        opponent_team_short_name="CHE",
+                        is_home=True,
+                    )
+                ],
             )
         ],
         projection_totals=HorizonProjectionTotals(
@@ -159,6 +170,7 @@ def test_get_my_team_returns_current_squad() -> None:
             horizon_3=26.0,
             horizon_5=36.0,
         ),
+        gameweek_numbers=[2, 3, 4],
     )
     app.dependency_overrides[get_current_squad_service] = lambda: _FakeGetCurrentSquadService(
         record
@@ -172,8 +184,10 @@ def test_get_my_team_returns_current_squad() -> None:
         assert payload["name"] == "My Team"
         assert payload["projection_totals"]["horizon_1"] == 5.0
         assert payload["captain_adjusted_projection_totals"]["horizon_1"] == 10.0
+        assert payload["gameweek_numbers"] == [2, 3, 4]
         assert payload["players"][0]["web_name"] == "Saka"
         assert payload["players"][0]["projection_totals"]["horizon_3"] == 13.0
+        assert payload["players"][0]["fixture_projections"][0]["opponent_team_short_name"] == "CHE"
     finally:
         app.dependency_overrides.clear()
 

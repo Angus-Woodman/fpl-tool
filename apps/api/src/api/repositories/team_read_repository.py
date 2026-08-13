@@ -13,6 +13,7 @@ class TeamReadItem:
     id: int
     name: str
     short_name: str
+    difficulty: int
 
 
 class TeamReadRepository:
@@ -20,9 +21,9 @@ class TeamReadRepository:
         self._session = session
 
     def list_teams(self) -> list[TeamReadItem]:
-        stmt = select(TeamModel.id, TeamModel.name, TeamModel.short_name).order_by(
-            TeamModel.name.asc()
-        )
+        stmt = select(
+            TeamModel.id, TeamModel.name, TeamModel.short_name, TeamModel.difficulty
+        ).order_by(TeamModel.name.asc())
         rows = self._session.execute(stmt).all()
 
         return [
@@ -30,6 +31,7 @@ class TeamReadRepository:
                 id=row[0],
                 name=row[1],
                 short_name=row[2],
+                difficulty=row[3],
             )
             for row in rows
         ]

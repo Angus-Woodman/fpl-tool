@@ -32,6 +32,18 @@ class CurrentSquadPlayerResponse(BaseModel):
     is_captain: bool
     is_vice_captain: bool
     projection_totals: "HorizonProjectionTotalsResponse | None" = None
+    fixture_projections: list["PlayerFixtureProjectionResponse"] = Field(default_factory=list)
+
+
+class PlayerFixtureProjectionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    fixture_id: int | None
+    gameweek_number: int
+    projected_points: float
+    kickoff_time: str
+    opponent_team_short_name: str | None
+    is_home: bool | None
 
 
 class HorizonProjectionTotalsResponse(BaseModel):
@@ -50,4 +62,5 @@ class CurrentSquadResponse(BaseModel):
     projection_totals: HorizonProjectionTotalsResponse | None = None
     bench_projection_totals: HorizonProjectionTotalsResponse | None = None
     captain_adjusted_projection_totals: HorizonProjectionTotalsResponse | None = None
+    gameweek_numbers: list[int] = Field(default_factory=list)
     players: list[CurrentSquadPlayerResponse]

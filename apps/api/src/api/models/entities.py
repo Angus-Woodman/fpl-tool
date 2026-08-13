@@ -22,6 +22,7 @@ class TeamModel(Base):
     external_fpl_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     short_name: Mapped[str] = mapped_column(String(10), nullable=False)
+    difficulty: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
 
 
 class PlayerModel(Base):
@@ -163,6 +164,70 @@ class SquadPlayerModel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     squad_id: Mapped[int] = mapped_column(ForeignKey("squads.id"), index=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
+    is_starting: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    bench_order: Mapped[int | None] = mapped_column(Integer)
+    is_captain: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_vice_captain: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class PlanChip(str, Enum):
+    WILDCARD = "WILDCARD"
+    FREE_HIT = "FREE_HIT"
+    BENCH_BOOST = "BENCH_BOOST"
+    TRIPLE_CAPTAIN = "TRIPLE_CAPTAIN"
+
+
+class PlanModel(Base):
+    __tablename__ = "plans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    start_gameweek: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_gameweek: Mapped[int] = mapped_column(Integer, nullable=False)
+    initial_bank: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    initial_free_transfers: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+
+
+class PlanGameweekModel(Base):
+    __tablename__ = "plan_gameweeks"
+    __table_args__ = (UniqueConstraint("plan_id", "gameweek_number", name="uq_plan_gameweek"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(
+        ForeignKey("plans.id", ondelete="CASCADE"),
+        index=True,
+    )
+    gameweek_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    chip: Mapped[PlanChip | None] = mapped_column(SqlEnum(PlanChip))
+    bank: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    free_transfers_available: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    transfers_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    points_hit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class PlanGameweekPlayerModel(Base):
+    __tablename__ = "plan_gameweek_players"
+    __table_args__ = (
+        UniqueConstraint("plan_gameweek_id", "player_id", name="uq_plan_gameweek_player"),
+        UniqueConstraint("plan_gameweek_id", "bench_order", name="uq_plan_gameweek_bench_order"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_gameweek_id: Mapped[int] = mapped_column(
+        ForeignKey("plan_gameweeks.id", ondelete="CASCADE"),
+        index=True,
+    )
     player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
     is_starting: Mapped[bool] = mapped_column(Boolean, nullable=False)
     bench_order: Mapped[int | None] = mapped_column(Integer)
