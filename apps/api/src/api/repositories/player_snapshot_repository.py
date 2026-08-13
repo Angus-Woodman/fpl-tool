@@ -38,6 +38,19 @@ class PlayerSnapshotRepository:
                     "form": snapshot.form,
                     "expected_goals": snapshot.expected_goals,
                     "expected_assists": snapshot.expected_assists,
+                    "expected_goals_per_90": snapshot.expected_goals_per_90,
+                    "expected_assists_per_90": snapshot.expected_assists_per_90,
+                    "expected_goals_conceded_per_90": snapshot.expected_goals_conceded_per_90,
+                    "goals_conceded_per_90": snapshot.goals_conceded_per_90,
+                    "clean_sheets_per_90": snapshot.clean_sheets_per_90,
+                    "saves_per_90": snapshot.saves_per_90,
+                    "starts_per_90": snapshot.starts_per_90,
+                    "defensive_contribution_per_90": snapshot.defensive_contribution_per_90,
+                    "penalties_order": snapshot.penalties_order,
+                    "direct_freekicks_order": snapshot.direct_freekicks_order,
+                    "corners_order": snapshot.corners_order,
+                    "team_join_date": snapshot.team_join_date,
+                    "ep_next": snapshot.ep_next,
                 }
                 for snapshot in batch
             ]
@@ -62,6 +75,23 @@ class PlayerSnapshotRepository:
                     "form": statement.excluded.form,
                     "expected_goals": statement.excluded.expected_goals,
                     "expected_assists": statement.excluded.expected_assists,
+                    "expected_goals_per_90": statement.excluded.expected_goals_per_90,
+                    "expected_assists_per_90": statement.excluded.expected_assists_per_90,
+                    "expected_goals_conceded_per_90": (
+                        statement.excluded.expected_goals_conceded_per_90
+                    ),
+                    "goals_conceded_per_90": statement.excluded.goals_conceded_per_90,
+                    "clean_sheets_per_90": statement.excluded.clean_sheets_per_90,
+                    "saves_per_90": statement.excluded.saves_per_90,
+                    "starts_per_90": statement.excluded.starts_per_90,
+                    "defensive_contribution_per_90": (
+                        statement.excluded.defensive_contribution_per_90
+                    ),
+                    "penalties_order": statement.excluded.penalties_order,
+                    "direct_freekicks_order": statement.excluded.direct_freekicks_order,
+                    "corners_order": statement.excluded.corners_order,
+                    "team_join_date": statement.excluded.team_join_date,
+                    "ep_next": statement.excluded.ep_next,
                 },
             )
             self._session.execute(statement)

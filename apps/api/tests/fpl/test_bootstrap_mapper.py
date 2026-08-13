@@ -56,7 +56,7 @@ def test_bootstrap_mapper_derives_team_difficulty_from_strength() -> None:
 
     mapped = map_bootstrap_static(dto)
 
-    difficulty_by_short_name = {team.short_name: team.difficulty for team in mapped.teams}
+    difficulty_by_short_name = {team.short_name: team.source_difficulty for team in mapped.teams}
     assert difficulty_by_short_name["ARS"] == 5
     assert difficulty_by_short_name["SUN"] == 2
     assert difficulty_by_short_name["UNK"] == 3

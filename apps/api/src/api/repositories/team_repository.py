@@ -22,7 +22,9 @@ class TeamRepository:
                 "external_fpl_id": team.external_fpl_id,
                 "name": team.name,
                 "short_name": team.short_name,
-                "difficulty": team.difficulty,
+                "source_difficulty": team.source_difficulty,
+                "strength_overall_home": team.strength_overall_home,
+                "strength_overall_away": team.strength_overall_away,
             }
             for team in teams
         ]
@@ -33,7 +35,9 @@ class TeamRepository:
             set_={
                 "name": statement.excluded.name,
                 "short_name": statement.excluded.short_name,
-                "difficulty": statement.excluded.difficulty,
+                "source_difficulty": statement.excluded.source_difficulty,
+                "strength_overall_home": statement.excluded.strength_overall_home,
+                "strength_overall_away": statement.excluded.strength_overall_away,
             },
         )
         self._session.execute(statement)
@@ -48,15 +52,30 @@ class TeamRepository:
         rows = self._session.execute(statement).all()
         return {external_id: internal_id for external_id, internal_id in rows}
 
-    def update_difficulty(self, team_id: int, difficulty: int) -> TeamReadItem | None:
+    def update_difficulty(self, team_id: int, difficulty: int | None) -> TeamReadItem | None:
+        """Set or, when `difficulty` is None, clear the manual override."""
         statement = (
             update(TeamModel)
             .where(TeamModel.id == team_id)
-            .values(difficulty=difficulty)
-            .returning(TeamModel.id, TeamModel.name, TeamModel.short_name, TeamModel.difficulty)
+            .values(difficulty_override=difficulty)
+            .returning(
+                TeamModel.id,
+                TeamModel.name,
+                TeamModel.short_name,
+                TeamModel.source_difficulty,
+                TeamModel.difficulty_override,
+            )
         )
         row = self._session.execute(statement).first()
         if row is None:
             return None
 
-        return TeamReadItem(id=row[0], name=row[1], short_name=row[2], difficulty=row[3])
+        override = row[4]
+        return TeamReadItem(
+            id=row[0],
+            name=row[1],
+            short_name=row[2],
+            difficulty=override if override is not None else row[3],
+            source_difficulty=row[3],
+            difficulty_override=override,
+        )

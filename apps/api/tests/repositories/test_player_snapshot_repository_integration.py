@@ -19,7 +19,7 @@ def _seed_player(session: Session) -> int:
     session.execute(
         text("TRUNCATE TABLE player_snapshots, players, teams RESTART IDENTITY CASCADE")
     )
-    team = TeamModel(external_fpl_id=1, name="Arsenal", short_name="ARS", difficulty=4)
+    team = TeamModel(external_fpl_id=1, name="Arsenal", short_name="ARS", source_difficulty=4)
     session.add(team)
     session.flush()
 

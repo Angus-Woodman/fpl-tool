@@ -18,7 +18,9 @@ class Team:
     name: str
     short_name: str
     external_fpl_id: int
-    difficulty: int
+    source_difficulty: int
+    strength_overall_home: int | None = None
+    strength_overall_away: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,19 @@ class PlayerSnapshot:
     form: float = 0.0
     expected_goals: float | None = None
     expected_assists: float | None = None
+    expected_goals_per_90: float | None = None
+    expected_assists_per_90: float | None = None
+    expected_goals_conceded_per_90: float | None = None
+    goals_conceded_per_90: float | None = None
+    clean_sheets_per_90: float | None = None
+    saves_per_90: float | None = None
+    starts_per_90: float | None = None
+    defensive_contribution_per_90: float | None = None
+    penalties_order: int | None = None
+    direct_freekicks_order: int | None = None
+    corners_order: int | None = None
+    team_join_date: dt.date | None = None
+    ep_next: float | None = None
 
 
 @dataclass(frozen=True)

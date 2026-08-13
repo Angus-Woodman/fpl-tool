@@ -12,6 +12,8 @@ class FplTeamDto(BaseModel):
     name: str
     short_name: str
     strength: int | None = None
+    strength_overall_home: int | None = None
+    strength_overall_away: int | None = None
 
 
 class FplElementDto(BaseModel):
@@ -39,6 +41,25 @@ class FplElementDto(BaseModel):
     form: str | None = None
     expected_goals: str | None = None
     expected_assists: str | None = None
+
+    # Per-90 rates arrive as numbers rather than strings.
+    expected_goals_per_90: float | None = None
+    expected_assists_per_90: float | None = None
+    expected_goals_conceded_per_90: float | None = None
+    goals_conceded_per_90: float | None = None
+    clean_sheets_per_90: float | None = None
+    saves_per_90: float | None = None
+    starts_per_90: float | None = None
+    defensive_contribution_per_90: float | None = None
+
+    # Role signals; captured now, not yet modelled.
+    penalties_order: int | None = None
+    direct_freekicks_order: int | None = None
+    corners_and_indirect_freekicks_order: int | None = None
+    team_join_date: dt.date | None = None
+
+    # FPL's own forecast, stored as an external benchmark only. Never a model feature.
+    ep_next: str | None = None
 
 
 class FplEventDto(BaseModel):

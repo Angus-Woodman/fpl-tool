@@ -10,8 +10,22 @@ class _FakeListTeamsService:
     def execute(self) -> TeamListResult:
         return TeamListResult(
             items=[
-                TeamReadItem(id=1, name="Arsenal", short_name="ARS", difficulty=4),
-                TeamReadItem(id=2, name="Aston Villa", short_name="AVL", difficulty=2),
+                TeamReadItem(
+                    id=1,
+                    name="Arsenal",
+                    short_name="ARS",
+                    difficulty=4,
+                    source_difficulty=4,
+                    difficulty_override=None,
+                ),
+                TeamReadItem(
+                    id=2,
+                    name="Aston Villa",
+                    short_name="AVL",
+                    difficulty=2,
+                    source_difficulty=3,
+                    difficulty_override=2,
+                ),
             ],
             total=2,
         )
@@ -43,7 +57,14 @@ class _FakeUpdateTeamDifficultyService:
 
 def test_update_team_difficulty_route_returns_updated_team() -> None:
     service = _FakeUpdateTeamDifficultyService(
-        TeamReadItem(id=1, name="Arsenal", short_name="ARS", difficulty=5)
+        TeamReadItem(
+            id=1,
+            name="Arsenal",
+            short_name="ARS",
+            difficulty=5,
+            source_difficulty=3,
+            difficulty_override=5,
+        )
     )
     app.dependency_overrides[get_update_team_difficulty_service] = lambda: service
     try:
@@ -53,7 +74,34 @@ def test_update_team_difficulty_route_returns_updated_team() -> None:
         assert response.status_code == 200
         payload = response.json()
         assert payload["difficulty"] == 5
+        assert payload["source_difficulty"] == 3
+        assert payload["difficulty_override"] == 5
         assert service.last_request == UpdateTeamDifficultyRequest(team_id=1, difficulty=5)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_update_team_difficulty_route_clears_the_override() -> None:
+    service = _FakeUpdateTeamDifficultyService(
+        TeamReadItem(
+            id=1,
+            name="Arsenal",
+            short_name="ARS",
+            difficulty=3,
+            source_difficulty=3,
+            difficulty_override=None,
+        )
+    )
+    app.dependency_overrides[get_update_team_difficulty_service] = lambda: service
+    try:
+        client = TestClient(app)
+        response = client.patch("/teams/1", json={"difficulty": None})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["difficulty"] == 3
+        assert payload["difficulty_override"] is None
+        assert service.last_request == UpdateTeamDifficultyRequest(team_id=1, difficulty=None)
     finally:
         app.dependency_overrides.clear()
 
@@ -72,7 +120,14 @@ def test_update_team_difficulty_route_returns_404_when_missing() -> None:
 
 def test_update_team_difficulty_route_validates_range() -> None:
     service = _FakeUpdateTeamDifficultyService(
-        TeamReadItem(id=1, name="Arsenal", short_name="ARS", difficulty=1)
+        TeamReadItem(
+            id=1,
+            name="Arsenal",
+            short_name="ARS",
+            difficulty=1,
+            source_difficulty=3,
+            difficulty_override=1,
+        )
     )
     app.dependency_overrides[get_update_team_difficulty_service] = lambda: service
     try:

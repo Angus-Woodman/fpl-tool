@@ -20,7 +20,7 @@ def _seed(session: Session) -> tuple[int, int]:
             "RESTART IDENTITY CASCADE"
         )
     )
-    team = TeamModel(external_fpl_id=1, name="Arsenal", short_name="ARS", difficulty=4)
+    team = TeamModel(external_fpl_id=1, name="Arsenal", short_name="ARS", source_difficulty=4)
     gameweek = GameweekModel(
         number=1,
         name="Gameweek 1",

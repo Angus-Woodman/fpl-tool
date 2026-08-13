@@ -7,13 +7,13 @@ from api.repositories.team_read_repository import TeamReadItem
 
 
 class TeamWriteRepositoryPort(Protocol):
-    def update_difficulty(self, team_id: int, difficulty: int) -> TeamReadItem | None: ...
+    def update_difficulty(self, team_id: int, difficulty: int | None) -> TeamReadItem | None: ...
 
 
 @dataclass(frozen=True)
 class UpdateTeamDifficultyRequest:
     team_id: int
-    difficulty: int
+    difficulty: int | None
 
 
 class UpdateTeamDifficultyService:

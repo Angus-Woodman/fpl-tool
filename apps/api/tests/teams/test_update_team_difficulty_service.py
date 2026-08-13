@@ -19,7 +19,14 @@ class _FakeTeamWriteRepository:
 
 def test_update_team_difficulty_service_returns_updated_team() -> None:
     repository = _FakeTeamWriteRepository(
-        TeamReadItem(id=1, name="Arsenal", short_name="ARS", difficulty=5)
+        TeamReadItem(
+            id=1,
+            name="Arsenal",
+            short_name="ARS",
+            difficulty=5,
+            source_difficulty=3,
+            difficulty_override=5,
+        )
     )
     service = UpdateTeamDifficultyService(repository)
 

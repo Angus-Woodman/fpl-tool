@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import dataclass
 
-from api.adapters.fpl.schemas import BootstrapStaticDto, EventLiveDto, FplFixtureDto
+from api.adapters.fpl.schemas import BootstrapStaticDto, EventLiveDto, FplFixtureDto, FplTeamDto
 from api.core.exceptions import DataMappingError
 from fpl_engine.domain import Gameweek, PlayerPosition, Team
 
@@ -57,6 +58,19 @@ class PlayerSnapshotSeed:
     form: float
     expected_goals: float | None
     expected_assists: float | None
+    expected_goals_per_90: float | None
+    expected_assists_per_90: float | None
+    expected_goals_conceded_per_90: float | None
+    goals_conceded_per_90: float | None
+    clean_sheets_per_90: float | None
+    saves_per_90: float | None
+    starts_per_90: float | None
+    defensive_contribution_per_90: float | None
+    penalties_order: int | None
+    direct_freekicks_order: int | None
+    corners_order: int | None
+    team_join_date: dt.date | None
+    ep_next: float | None
 
 
 @dataclass(frozen=True)
@@ -81,13 +95,31 @@ _POSITION_MAP: dict[int, PlayerPosition] = {
 }
 
 _DEFAULT_DIFFICULTY = 3
+_MIN_DIFFICULTY = 1
+_MAX_DIFFICULTY = 5
 
 
-def _map_team_difficulty(strength: int | None) -> int:
-    if strength is None:
+def _map_team_difficulty(team: FplTeamDto) -> int:
+    """Derive a 1-5 opponent rating from FPL's strength fields.
+
+    `strength` is null pre-season, so the populated overall home/away ratings are
+    preferred. Their exact venue semantics are unconfirmed, so both raw values are
+    stored alongside this average and can be reinterpreted without re-importing.
+    """
+    venue_strengths = [
+        value
+        for value in (team.strength_overall_home, team.strength_overall_away)
+        if value is not None and value > 0
+    ]
+    if venue_strengths:
+        # Half-up rather than banker's rounding, so a 4/5 split reads as 5.
+        raw = math.floor(sum(venue_strengths) / len(venue_strengths) + 0.5)
+    elif team.strength is not None and team.strength > 0:
+        raw = team.strength
+    else:
         return _DEFAULT_DIFFICULTY
 
-    return max(1, min(5, strength))
+    return max(_MIN_DIFFICULTY, min(_MAX_DIFFICULTY, raw))
 
 
 def map_bootstrap_static(payload: BootstrapStaticDto) -> BootstrapStaticMapped:
@@ -97,7 +129,9 @@ def map_bootstrap_static(payload: BootstrapStaticDto) -> BootstrapStaticMapped:
             external_fpl_id=team.id,
             name=team.name,
             short_name=team.short_name,
-            difficulty=_map_team_difficulty(team.strength),
+            source_difficulty=_map_team_difficulty(team),
+            strength_overall_home=team.strength_overall_home,
+            strength_overall_away=team.strength_overall_away,
         )
         for team in payload.teams
     ]
@@ -182,6 +216,19 @@ def map_player_snapshots(
             form=_parse_float(element.form) or 0.0,
             expected_goals=_parse_float(element.expected_goals),
             expected_assists=_parse_float(element.expected_assists),
+            expected_goals_per_90=element.expected_goals_per_90,
+            expected_assists_per_90=element.expected_assists_per_90,
+            expected_goals_conceded_per_90=element.expected_goals_conceded_per_90,
+            goals_conceded_per_90=element.goals_conceded_per_90,
+            clean_sheets_per_90=element.clean_sheets_per_90,
+            saves_per_90=element.saves_per_90,
+            starts_per_90=element.starts_per_90,
+            defensive_contribution_per_90=element.defensive_contribution_per_90,
+            penalties_order=element.penalties_order,
+            direct_freekicks_order=element.direct_freekicks_order,
+            corners_order=element.corners_and_indirect_freekicks_order,
+            team_join_date=element.team_join_date,
+            ep_next=_parse_float(element.ep_next),
         )
         for element in payload.elements
     ]

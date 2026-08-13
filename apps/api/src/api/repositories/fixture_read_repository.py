@@ -50,8 +50,8 @@ class FixtureReadRepository:
                 FixtureModel.kickoff_time,
                 home_team.short_name,
                 away_team.short_name,
-                home_team.difficulty,
-                away_team.difficulty,
+                func.coalesce(home_team.difficulty_override, home_team.source_difficulty),
+                func.coalesce(away_team.difficulty_override, away_team.source_difficulty),
                 FixtureModel.finished,
             )
             .join(home_team, home_team.id == FixtureModel.home_team_id)

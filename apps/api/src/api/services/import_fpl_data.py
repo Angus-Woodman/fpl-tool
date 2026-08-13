@@ -223,6 +223,19 @@ class ImportFplDataService:
                     form=seed.form,
                     expected_goals=seed.expected_goals,
                     expected_assists=seed.expected_assists,
+                    expected_goals_per_90=seed.expected_goals_per_90,
+                    expected_assists_per_90=seed.expected_assists_per_90,
+                    expected_goals_conceded_per_90=seed.expected_goals_conceded_per_90,
+                    goals_conceded_per_90=seed.goals_conceded_per_90,
+                    clean_sheets_per_90=seed.clean_sheets_per_90,
+                    saves_per_90=seed.saves_per_90,
+                    starts_per_90=seed.starts_per_90,
+                    defensive_contribution_per_90=seed.defensive_contribution_per_90,
+                    penalties_order=seed.penalties_order,
+                    direct_freekicks_order=seed.direct_freekicks_order,
+                    corners_order=seed.corners_order,
+                    team_join_date=seed.team_join_date,
+                    ep_next=seed.ep_next,
                 )
             )
 

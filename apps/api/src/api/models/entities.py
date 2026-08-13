@@ -1,7 +1,16 @@
 import datetime as dt
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,7 +31,18 @@ class TeamModel(Base):
     external_fpl_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     short_name: Mapped[str] = mapped_column(String(10), nullable=False)
-    difficulty: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
+    source_difficulty: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
+    difficulty_override: Mapped[int | None] = mapped_column(Integer)
+    strength_overall_home: Mapped[int | None] = mapped_column(Integer)
+    strength_overall_away: Mapped[int | None] = mapped_column(Integer)
+
+    @property
+    def effective_difficulty(self) -> int:
+        return (
+            self.difficulty_override
+            if self.difficulty_override is not None
+            else self.source_difficulty
+        )
 
 
 class PlayerModel(Base):
@@ -108,6 +128,19 @@ class PlayerSnapshotModel(Base):
     form: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     expected_goals: Mapped[float | None] = mapped_column(Float)
     expected_assists: Mapped[float | None] = mapped_column(Float)
+    expected_goals_per_90: Mapped[float | None] = mapped_column(Float)
+    expected_assists_per_90: Mapped[float | None] = mapped_column(Float)
+    expected_goals_conceded_per_90: Mapped[float | None] = mapped_column(Float)
+    goals_conceded_per_90: Mapped[float | None] = mapped_column(Float)
+    clean_sheets_per_90: Mapped[float | None] = mapped_column(Float)
+    saves_per_90: Mapped[float | None] = mapped_column(Float)
+    starts_per_90: Mapped[float | None] = mapped_column(Float)
+    defensive_contribution_per_90: Mapped[float | None] = mapped_column(Float)
+    penalties_order: Mapped[int | None] = mapped_column(Integer)
+    direct_freekicks_order: Mapped[int | None] = mapped_column(Integer)
+    corners_order: Mapped[int | None] = mapped_column(Integer)
+    team_join_date: Mapped[dt.date | None] = mapped_column(Date)
+    ep_next: Mapped[float | None] = mapped_column(Float)
 
 
 class ProjectionModel(Base):

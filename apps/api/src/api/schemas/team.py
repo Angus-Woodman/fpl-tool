@@ -8,6 +8,8 @@ class TeamResponse(BaseModel):
     name: str
     short_name: str
     difficulty: int
+    source_difficulty: int
+    difficulty_override: int | None = None
 
 
 class TeamListResponse(BaseModel):
@@ -16,4 +18,6 @@ class TeamListResponse(BaseModel):
 
 
 class UpdateTeamDifficultyPayload(BaseModel):
-    difficulty: int = Field(ge=1, le=5)
+    """A null difficulty clears the override and restores the imported rating."""
+
+    difficulty: int | None = Field(default=None, ge=1, le=5)
