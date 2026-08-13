@@ -129,6 +129,7 @@ class ProjectionComponentBreakdown:
     bonus_points: float
     defensive_contribution_points: float
     other_points: float
+    save_points: float = 0.0
 
     @property
     def total_points(self) -> float:
@@ -140,6 +141,7 @@ class ProjectionComponentBreakdown:
             + self.bonus_points
             + self.defensive_contribution_points
             + self.other_points
+            + self.save_points
         )
 
 

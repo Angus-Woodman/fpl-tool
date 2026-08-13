@@ -15,6 +15,23 @@ from fpl_engine.projections.baseline_v2_priors import (
     PriorComputationParameters,
     compute_baseline_v2_priors,
 )
+from fpl_engine.projections.component_v3 import (
+    DEFAULT_COMPONENT_V3_PARAMETERS,
+    ComponentV3Explanation,
+    ComponentV3Input,
+    ComponentV3Parameters,
+    ComponentV3PositionPriors,
+    ComponentV3ProjectionModel,
+)
+from fpl_engine.projections.component_v3_priors import (
+    DEFAULT_TEAM_DEFENSE_PRIOR_PARAMETERS,
+    GoalkeeperSavesHistory,
+    PlayerHistoryForTeamDefense,
+    ResolvedTeamDefense,
+    TeamDefensePriorParameters,
+    compute_saves_prior,
+    compute_team_defense_priors,
+)
 from fpl_engine.projections.models import BaselineProjectionModel, ProjectionInput, ProjectionModel
 from fpl_engine.projections.shrinkage import (
     ShrinkageResult,
@@ -25,7 +42,9 @@ from fpl_engine.projections.shrinkage import (
 
 __all__ = [
     "DEFAULT_BASELINE_V2_PARAMETERS",
+    "DEFAULT_COMPONENT_V3_PARAMETERS",
     "DEFAULT_PRIOR_COMPUTATION_PARAMETERS",
+    "DEFAULT_TEAM_DEFENSE_PRIOR_PARAMETERS",
     "BaselineProjectionModel",
     "BaselineV2Explanation",
     "BaselineV2Input",
@@ -34,14 +53,25 @@ __all__ = [
     "BaselineV2PositionPriorsResolved",
     "BaselineV2Priors",
     "BaselineV2ProjectionModel",
+    "ComponentV3Explanation",
+    "ComponentV3Input",
+    "ComponentV3Parameters",
+    "ComponentV3PositionPriors",
+    "ComponentV3ProjectionModel",
     "ConfiguredPositionAssumptions",
+    "GoalkeeperSavesHistory",
     "PlayerHistoryForPriors",
+    "PlayerHistoryForTeamDefense",
     "PriorComputationParameters",
     "ProjectionInput",
     "ProjectionModel",
+    "ResolvedTeamDefense",
     "ShrinkageResult",
+    "TeamDefensePriorParameters",
     "WeightedComponent",
     "compute_baseline_v2_priors",
+    "compute_saves_prior",
+    "compute_team_defense_priors",
     "shrink_rate",
     "weighted_mean",
 ]
