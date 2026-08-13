@@ -52,6 +52,8 @@ def main() -> None:
             "v2_players_considered": summary.v2_players_considered,
             "v2_players_skipped_missing_snapshot": summary.v2_players_skipped_missing_snapshot,
             "v2_missing_snapshot_fraction": summary.v2_missing_snapshot_fraction,
+            "v3_run_id": summary.v3_run_id,
+            "v3_projections_generated": summary.v3_projections_generated,
         },
     )
 
@@ -77,10 +79,11 @@ def main() -> None:
                 f"Run generated at:     {summary.generated_at.isoformat()}",
                 f"Gameweeks covered:    {gameweeks_range}",
                 f"Model versions:       baseline_v1 (run {summary.v1_run_id}), "
-                f"baseline_v2 (run {summary.v2_run_id})",
+                f"baseline_v2 (run {summary.v2_run_id}), "
+                f"component_v3 (run {summary.v3_run_id})",
                 f"Players projected:    v1={summary.v1.projections_generated}, "
-                f"v2={summary.v2_projections_generated}",
-                f"Missing players (v2): {summary.v2_players_skipped_missing_snapshot} "
+                f"v2={summary.v2_projections_generated}, v3={summary.v3_projections_generated}",
+                f"Missing players (v2/v3): {summary.v2_players_skipped_missing_snapshot} "
                 f"({summary.v2_missing_snapshot_fraction:.2%})"
                 + (
                     f" -- ids={list(summary.v2_missing_snapshot_player_ids)}"

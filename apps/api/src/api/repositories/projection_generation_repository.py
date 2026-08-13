@@ -167,6 +167,8 @@ class ProjectionGenerationRepository:
                 PlayerSnapshotModel.expected_goals_per_90,
                 PlayerSnapshotModel.expected_assists_per_90,
                 PlayerSnapshotModel.team_join_date,
+                PlayerSnapshotModel.clean_sheets_per_90,
+                PlayerSnapshotModel.saves_per_90,
             ).where(
                 PlayerSnapshotModel.player_id.in_(player_ids),
                 PlayerSnapshotModel.captured_at == generated_at,
@@ -191,6 +193,8 @@ class ProjectionGenerationRepository:
                 expected_goals_per_90=row[13],
                 expected_assists_per_90=row[14],
                 team_join_date=row[15],
+                clean_sheets_per_90=row[16],
+                saves_per_90=row[17],
             )
             for row in rows
         ]

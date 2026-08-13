@@ -15,15 +15,27 @@ from fpl_engine.minutes import (
 )
 from fpl_engine.projections import (
     DEFAULT_BASELINE_V2_PARAMETERS,
+    DEFAULT_COMPONENT_V3_PARAMETERS,
     DEFAULT_PRIOR_COMPUTATION_PARAMETERS,
+    DEFAULT_TEAM_DEFENSE_PRIOR_PARAMETERS,
     BaselineV2Input,
     BaselineV2Parameters,
     BaselineV2Priors,
     BaselineV2ProjectionModel,
+    ComponentV3Input,
+    ComponentV3Parameters,
+    ComponentV3PositionPriors,
+    ComponentV3ProjectionModel,
     ConfiguredPositionAssumptions,
+    GoalkeeperSavesHistory,
     PlayerHistoryForPriors,
+    PlayerHistoryForTeamDefense,
     PriorComputationParameters,
+    ResolvedTeamDefense,
+    TeamDefensePriorParameters,
     compute_baseline_v2_priors,
+    compute_saves_prior,
+    compute_team_defense_priors,
 )
 
 from api.services.generate_projections import (
@@ -94,6 +106,20 @@ DEFAULT_PROBABILITY_60_PLUS_BY_ROLE: dict[RoleLabel, float] = {
 }
 DEFAULT_PROBABILITY_60_PLUS_DEFAULT = 0.15
 
+# Prior clean-sheet rate by a team's SOURCE strength (1-5, never the manual
+# override), used only when a team has too little of its own goalkeeper
+# history to trust (see fpl_engine.projections.component_v3_priors --
+# shrink_rate degrades to this automatically as sample_weight -> 0, so a
+# newly promoted club needs no separate fallback branch). Coarse and
+# unvalidated, like DIFFICULTY_MULTIPLIERS_DEFAULT -- backtest before trusting.
+DEFAULT_CLEAN_SHEET_PRIOR_BY_STRENGTH: dict[int, float] = {
+    1: 0.12,
+    2: 0.18,
+    3: 0.25,
+    4: 0.32,
+    5: 0.42,
+}
+
 # A normal, complete snapshot generation should cover essentially every
 # fixture-relevant player. Missing coverage beyond a couple of players is a
 # fetch/import problem, not something to tolerate quietly:
@@ -131,16 +157,23 @@ class DualWriteSummary:
     # was acceptable but not complete, and callers should surface this rather
     # than silently treat the run as fully clean.
     v2_missing_snapshot_warning: str | None
+    # component_v3 needs an identical snapshot to v2 (same coverage
+    # requirement), so it shares v2_players_considered/missing_* above rather
+    # than duplicating them.
+    v3_run_id: int
+    v3_projections_generated: int
 
 
 class DualWriteProjectionsService:
-    """Runs baseline_v1 and baseline_v2 from one shared fetch.
+    """Runs baseline_v1, baseline_v2 and component_v3 from one shared fetch.
 
-    Both models consume the same snapshot generation, the same fixture/team
-    load, the same resolved BaselineV2Priors, and the same `generated_at` --
-    they cannot silently diverge on any of these. baseline_v1's own calculation
-    logic is untouched; this orchestrator only supplies it a pre-fetched
-    context instead of letting it fetch independently.
+    All three models consume the same snapshot generation, the same
+    fixture/team load, and the same `generated_at` -- they cannot silently
+    diverge on any of these. baseline_v1's calculation logic is untouched;
+    this orchestrator only supplies it a pre-fetched context instead of
+    letting it fetch independently. baseline_v2 and component_v3 additionally
+    share the same resolved BaselineV2Priors (xG/xA, start-rate) and the same
+    per-player ExpectedMinutesResult, computed once per player/fixture.
     """
 
     def __init__(
@@ -161,6 +194,11 @@ class DualWriteProjectionsService:
         ),
         expected_minutes_parameters: PreSeasonMinutesParameters = DEFAULT_PRE_SEASON_PARAMETERS,
         max_missing_snapshot_fraction: float = MAX_MISSING_SNAPSHOT_FRACTION_DEFAULT,
+        component_v3_parameters: ComponentV3Parameters = DEFAULT_COMPONENT_V3_PARAMETERS,
+        clean_sheet_prior_by_strength: Mapping[int, float] | None = None,
+        team_defense_prior_parameters: TeamDefensePriorParameters = (
+            DEFAULT_TEAM_DEFENSE_PRIOR_PARAMETERS
+        ),
     ) -> None:
         self._source_repository = source_repository
         self._projection_repository = projection_repository
@@ -178,6 +216,11 @@ class DualWriteProjectionsService:
         self._prior_computation_parameters = prior_computation_parameters
         self._expected_minutes_parameters = expected_minutes_parameters
         self._max_missing_snapshot_fraction = max_missing_snapshot_fraction
+        self._component_v3_parameters = component_v3_parameters
+        self._clean_sheet_prior_by_strength = dict(
+            clean_sheet_prior_by_strength or DEFAULT_CLEAN_SHEET_PRIOR_BY_STRENGTH
+        )
+        self._team_defense_prior_parameters = team_defense_prior_parameters
 
     def execute(self) -> DualWriteSummary:
         context = fetch_projection_generation_context(
@@ -235,6 +278,49 @@ class DualWriteProjectionsService:
             parameters=self._prior_computation_parameters,
         )
 
+        team_defense_histories = [
+            PlayerHistoryForTeamDefense(
+                team_id=player.team_id,
+                position=player.position,
+                clean_sheets_per_90=context.snapshots_by_player[player.id].clean_sheets_per_90
+                or 0.0,
+                total_minutes=float(context.snapshots_by_player[player.id].total_minutes),
+            )
+            for player in players_with_snapshot
+        ]
+        # Every team currently in the team-strength snapshot, not just
+        # fixture-relevant ones -- harmless if a team has no fixture this run,
+        # and keeps this resolution independent of which teams happen to play.
+        team_source_difficulty = {
+            int(team_id): cast(int, cast(Mapping[str, object], entry)["source_difficulty"])
+            for team_id, entry in context.team_strength_snapshot.items()
+        }
+        team_defense = compute_team_defense_priors(
+            team_defense_histories,
+            team_source_difficulty=team_source_difficulty,
+            cs_prior_by_strength=self._clean_sheet_prior_by_strength,
+            parameters=self._team_defense_prior_parameters,
+        )
+
+        goalkeeper_saves_histories = [
+            GoalkeeperSavesHistory(
+                saves_per_90=context.snapshots_by_player[player.id].saves_per_90 or 0.0,
+                total_minutes=float(context.snapshots_by_player[player.id].total_minutes),
+            )
+            for player in players_with_snapshot
+            if player.position == PlayerPosition.GOALKEEPER
+        ]
+        saves_prior = compute_saves_prior(goalkeeper_saves_histories)
+
+        component_v3_position_priors = {
+            position: ComponentV3PositionPriors(
+                expected_goals_per_90=resolved.expected_goals_per_90,
+                expected_assists_per_90=resolved.expected_assists_per_90,
+                saves_per_90=saves_prior if position == PlayerPosition.GOALKEEPER else 0.0,
+            )
+            for position, resolved in priors.by_position.items()
+        }
+
         v1_summary = self._v1_service.execute(context)
         assert v1_summary.run_id is not None
 
@@ -246,6 +332,10 @@ class DualWriteProjectionsService:
                 for position in priors.by_position
             },
             parameters=self._v2_parameters,
+        )
+        v3_model = ComponentV3ProjectionModel(
+            priors=component_v3_position_priors,
+            parameters=self._component_v3_parameters,
         )
 
         v2_run_id = self._run_repository.create(
@@ -261,9 +351,24 @@ class DualWriteProjectionsService:
             team_strength_snapshot=context.team_strength_snapshot,
             player_snapshot_generated_at=context.snapshot_generation,
         )
+        v3_run_id = self._run_repository.create(
+            model_version=v3_model.model_version,
+            generated_at=context.generated_at,
+            gameweeks_covered=run_gameweeks_covered,
+            parameters=self._build_v3_parameters(
+                team_defense,
+                saves_prior=saves_prior,
+                missing_count=missing_count,
+                missing_fraction=missing_fraction,
+                missing_player_ids=missing_player_ids,
+            ),
+            team_strength_snapshot=context.team_strength_snapshot,
+            player_snapshot_generated_at=context.snapshot_generation,
+        )
 
         players_by_team = group_players_by_team(context.players)
         v2_projections: list[Projection] = []
+        v3_projections: list[Projection] = []
         for fixture in context.fixtures:
             fixture_players = players_by_team.get(fixture.home_team_id, []) + players_by_team.get(
                 fixture.away_team_id, []
@@ -279,7 +384,8 @@ class DualWriteProjectionsService:
                     "dict[str, object]",
                     context.team_strength_snapshot[str(opponent_team_id)],
                 )
-                opponent_difficulty = cast(int, opponent_strength["effective_difficulty"])
+                opponent_effective_difficulty = cast(int, opponent_strength["effective_difficulty"])
+                opponent_source_difficulty = cast(int, opponent_strength["source_difficulty"])
 
                 expected_minutes = estimate_pre_season_expected_minutes(
                     starts=snapshot.starts,
@@ -300,7 +406,7 @@ class DualWriteProjectionsService:
                     expected_goals_per_90=snapshot.expected_goals_per_90 or 0.0,
                     expected_assists_per_90=snapshot.expected_assists_per_90 or 0.0,
                     total_minutes=float(snapshot.total_minutes),
-                    opponent_effective_difficulty=opponent_difficulty,
+                    opponent_effective_difficulty=opponent_effective_difficulty,
                     is_home=is_home,
                     generated_at=context.generated_at,
                 )
@@ -308,7 +414,27 @@ class DualWriteProjectionsService:
                     dataclasses.replace(v2_model.project(v2_input), run_id=v2_run_id)
                 )
 
+                v3_input = ComponentV3Input(
+                    player_id=player.id,
+                    fixture_id=fixture.id,
+                    gameweek_id=fixture.gameweek_id,
+                    position=player.position,
+                    expected_minutes=expected_minutes,
+                    expected_goals_per_90=snapshot.expected_goals_per_90 or 0.0,
+                    expected_assists_per_90=snapshot.expected_assists_per_90 or 0.0,
+                    total_minutes=float(snapshot.total_minutes),
+                    saves_per_90=snapshot.saves_per_90 or 0.0,
+                    own_team_clean_sheet_rate=team_defense[player.team_id].clean_sheet_rate,
+                    opponent_source_difficulty=opponent_source_difficulty,
+                    is_home=is_home,
+                    generated_at=context.generated_at,
+                )
+                v3_projections.append(
+                    dataclasses.replace(v3_model.project(v3_input), run_id=v3_run_id)
+                )
+
         self._projection_repository.upsert_many(v2_projections)
+        self._projection_repository.upsert_many(v3_projections)
 
         return DualWriteSummary(
             generated_at=context.generated_at,
@@ -323,6 +449,8 @@ class DualWriteProjectionsService:
             v2_missing_snapshot_fraction=missing_fraction,
             v2_missing_snapshot_player_ids=missing_player_ids,
             v2_missing_snapshot_warning=missing_snapshot_warning,
+            v3_run_id=v3_run_id,
+            v3_projections_generated=len(v3_projections),
         )
 
     def _build_v2_parameters(
@@ -392,6 +520,68 @@ class DualWriteProjectionsService:
                 role.value: value for role, value in self._probability_60_plus_by_role.items()
             },
             "probability_60_plus_default": self._probability_60_plus_default,
+            "missing_snapshot_players": missing_count,
+            "missing_snapshot_fraction": missing_fraction,
+            "missing_snapshot_player_ids": list(missing_player_ids),
+            "max_missing_snapshot_fraction": self._max_missing_snapshot_fraction,
+        }
+
+    def _build_v3_parameters(
+        self,
+        team_defense: Mapping[int, ResolvedTeamDefense],
+        *,
+        saves_prior: float,
+        missing_count: int,
+        missing_fraction: float,
+        missing_player_ids: tuple[int, ...],
+    ) -> dict[str, object]:
+        return {
+            "model_version": "component_v3",
+            "component_v3_parameters": {
+                "xg90_m0": self._component_v3_parameters.xg90_m0,
+                "xa90_m0": self._component_v3_parameters.xa90_m0,
+                "goal_points": {
+                    position.value: value
+                    for position, value in self._component_v3_parameters.goal_points.items()
+                },
+                "assist_points": self._component_v3_parameters.assist_points,
+                "difficulty_multipliers": dict(
+                    self._component_v3_parameters.difficulty_multipliers
+                ),
+                "home_venue_multiplier": self._component_v3_parameters.home_venue_multiplier,
+                "away_venue_multiplier": self._component_v3_parameters.away_venue_multiplier,
+                "saves_m0": self._component_v3_parameters.saves_m0,
+                "clean_sheet_points": {
+                    position.value: value
+                    for position, value in self._component_v3_parameters.clean_sheet_points.items()
+                },
+                "opponent_attack_multipliers_for_clean_sheets": dict(
+                    self._component_v3_parameters.opponent_attack_multipliers_for_clean_sheets
+                ),
+                "home_clean_sheet_multiplier": (
+                    self._component_v3_parameters.home_clean_sheet_multiplier
+                ),
+                "away_clean_sheet_multiplier": (
+                    self._component_v3_parameters.away_clean_sheet_multiplier
+                ),
+            },
+            "team_defense_prior_parameters": {
+                "team_cs_m0": self._team_defense_prior_parameters.team_cs_m0,
+                "defense_history_positions": sorted(
+                    position.value
+                    for position in self._team_defense_prior_parameters.defense_history_positions
+                ),
+            },
+            "clean_sheet_prior_by_strength": dict(self._clean_sheet_prior_by_strength),
+            "resolved_team_defense": {
+                str(team_id): {
+                    "clean_sheet_rate": resolved.clean_sheet_rate,
+                    "observed_history_weight": resolved.observed_history_weight,
+                    "source_difficulty_used": resolved.source_difficulty_used,
+                }
+                for team_id, resolved in team_defense.items()
+            },
+            "saves_per_90_prior": saves_prior,
             "missing_snapshot_players": missing_count,
             "missing_snapshot_fraction": missing_fraction,
             "missing_snapshot_player_ids": list(missing_player_ids),

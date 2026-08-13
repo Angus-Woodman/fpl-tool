@@ -158,3 +158,22 @@ def test_list_snapshots_for_generation_includes_baseline_v2_fields(db_session: S
     assert result.expected_goals_per_90 == 0.4
     assert result.expected_assists_per_90 == 0.28
     assert result.team_join_date == dt.date(2019, 7, 1)
+
+
+def test_list_snapshots_for_generation_includes_component_v3_fields(db_session: Session) -> None:
+    """component_v3's team-defense and goalkeeper-saves priors both read these
+    fields -- they must round-trip, not silently default to 0/None."""
+    saka_id, _ = _seed(db_session)
+    snapshot = _snapshot(saka_id, GENERATION_ONE, price=10.0)
+    snapshot.clean_sheets_per_90 = 0.35
+    snapshot.saves_per_90 = 2.4
+    db_session.add(snapshot)
+    db_session.commit()
+    repository = ProjectionGenerationRepository(db_session)
+
+    snapshots = repository.list_snapshots_for_generation({saka_id}, GENERATION_ONE)
+
+    assert len(snapshots) == 1
+    result = snapshots[0]
+    assert result.clean_sheets_per_90 == 0.35
+    assert result.saves_per_90 == 2.4
