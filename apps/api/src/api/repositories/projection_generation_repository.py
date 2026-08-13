@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 from fpl_engine.domain import (
     Fixture,
     Player,
@@ -131,19 +133,21 @@ class ProjectionGenerationRepository:
             for row in rows
         ]
 
-    def list_latest_snapshots(self, player_ids: set[int]) -> list[PlayerSnapshot]:
+    def get_latest_snapshot_generation(self) -> dt.datetime | None:
+        return self._session.execute(select(func.max(PlayerSnapshotModel.captured_at))).scalar()
+
+    def list_snapshots_for_generation(
+        self, player_ids: set[int], generated_at: dt.datetime
+    ) -> list[PlayerSnapshot]:
+        """Every row returned shares the same `captured_at`, by construction.
+
+        Selecting each player's own independently-latest snapshot (as an earlier
+        version of this method did) could silently mix generations if only some
+        players had been re-captured -- the run must consume one clearly
+        identified, internally consistent generation instead.
+        """
         if not player_ids:
             return []
-
-        latest_snapshot_subquery = (
-            select(
-                PlayerSnapshotModel.player_id.label("player_id"),
-                func.max(PlayerSnapshotModel.captured_at).label("captured_at"),
-            )
-            .where(PlayerSnapshotModel.player_id.in_(player_ids))
-            .group_by(PlayerSnapshotModel.player_id)
-            .subquery()
-        )
 
         rows = self._session.execute(
             select(
@@ -156,10 +160,9 @@ class ProjectionGenerationRepository:
                 PlayerSnapshotModel.transfers_out,
                 PlayerSnapshotModel.status,
                 PlayerSnapshotModel.chance_of_playing_next_round,
-            ).join(
-                latest_snapshot_subquery,
-                (PlayerSnapshotModel.player_id == latest_snapshot_subquery.c.player_id)
-                & (PlayerSnapshotModel.captured_at == latest_snapshot_subquery.c.captured_at),
+            ).where(
+                PlayerSnapshotModel.player_id.in_(player_ids),
+                PlayerSnapshotModel.captured_at == generated_at,
             )
         ).all()
 

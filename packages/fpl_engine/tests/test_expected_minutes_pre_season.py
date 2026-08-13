@@ -18,12 +18,14 @@ AS_OF = dt.date(2026, 8, 13)
 FORWARD_PRIORS = PreSeasonRolePriors(
     minutes_if_start=72.0,
     start_rate=0.4,
+    sub_appearance_probability=0.15,
+    minutes_if_sub=20.0,
     probability_60_plus={
-        RoleLabel.NAILED: 0.85,
-        RoleLabel.REGULAR: 0.65,
-        RoleLabel.ROTATION_RISK: 0.35,
+        RoleLabel.NAILED: 0.6,
+        RoleLabel.REGULAR: 0.35,
+        RoleLabel.ROTATION_RISK: 0.1,
     },
-    probability_60_plus_default=0.2,
+    probability_60_plus_default=0.05,
 )
 
 PARAMETERS = PreSeasonMinutesParameters()
@@ -169,6 +171,110 @@ class TestValidation:
     def test_negative_starts_is_rejected(self) -> None:
         with pytest.raises(ValueError):
             _estimate(starts=-1, team_join_date=dt.date(2020, 1, 1))
+
+
+class TestSubstituteContributionToExpectedMinutes:
+    """The fix for the P(play)/expected-minutes inconsistency: a player who does not
+    start can still contribute expected minutes (and hence attacking productivity)
+    via a coarse, explicit, cohort-level substitute-appearance assumption."""
+
+    def test_role_expected_minutes_includes_the_substitute_term(self) -> None:
+        # Zero starts on an established player: start_probability is exactly the
+        # cohort prior (0.4), so the formula is fully hand-verifiable.
+        result = _estimate(starts=0, team_join_date=dt.date(2020, 1, 1))
+
+        expected = 0.4 * 72.0 + 0.6 * 0.15 * 20.0
+        assert result.expected_minutes == pytest.approx(expected)
+
+    def test_a_higher_minutes_if_sub_prior_increases_expected_minutes(self) -> None:
+        low_sub_minutes = PreSeasonRolePriors(
+            minutes_if_start=72.0,
+            start_rate=0.2,
+            sub_appearance_probability=0.3,
+            minutes_if_sub=0.0,
+            probability_60_plus={},
+            probability_60_plus_default=0.05,
+        )
+        high_sub_minutes = PreSeasonRolePriors(
+            minutes_if_start=72.0,
+            start_rate=0.2,
+            sub_appearance_probability=0.3,
+            minutes_if_sub=40.0,
+            probability_60_plus={},
+            probability_60_plus_default=0.05,
+        )
+
+        low = estimate_pre_season_expected_minutes(
+            starts=30,
+            team_join_date=dt.date(2026, 7, 1),
+            as_of=AS_OF,
+            status="a",
+            chance_of_playing_next_round=None,
+            priors=low_sub_minutes,
+        )
+        high = estimate_pre_season_expected_minutes(
+            starts=30,
+            team_join_date=dt.date(2026, 7, 1),
+            as_of=AS_OF,
+            status="a",
+            chance_of_playing_next_round=None,
+            priors=high_sub_minutes,
+        )
+
+        assert high.expected_minutes > low.expected_minutes
+
+    def test_availability_scales_the_full_role_based_minutes_including_the_sub_term(
+        self,
+    ) -> None:
+        full_health = _estimate(starts=0, team_join_date=dt.date(2020, 1, 1))
+        doubtful = _estimate(
+            starts=0,
+            team_join_date=dt.date(2020, 1, 1),
+            status="d",
+            chance_of_playing_next_round=50,
+        )
+
+        assert doubtful.expected_minutes == pytest.approx(full_health.expected_minutes * 0.5)
+
+
+class TestProbabilityOfPlayingConsistency:
+    """P(play) and expected_minutes must come from the same start/substitute
+    assumptions -- there must not be two different models of getting onto the
+    pitch."""
+
+    def test_probability_of_playing_matches_the_documented_formula(self) -> None:
+        result = _estimate(starts=0, team_join_date=dt.date(2020, 1, 1))
+
+        expected = 0.4 + 0.6 * 0.15
+        assert result.probability_of_playing == pytest.approx(expected)
+
+    def test_probability_of_playing_uses_the_same_start_probability_as_expected_minutes(
+        self,
+    ) -> None:
+        result = _estimate(starts=34, team_join_date=dt.date(2018, 1, 1))
+
+        expected = result.start_probability + (1 - result.start_probability) * 0.15
+        assert result.probability_of_playing == pytest.approx(expected)
+
+    def test_rejects_priors_where_p60_exceeds_probability_of_playing(self) -> None:
+        inconsistent_priors = PreSeasonRolePriors(
+            minutes_if_start=72.0,
+            start_rate=0.1,
+            sub_appearance_probability=0.0,
+            minutes_if_sub=0.0,
+            probability_60_plus={},
+            probability_60_plus_default=0.99,
+        )
+
+        with pytest.raises(ValueError, match="P.60"):
+            estimate_pre_season_expected_minutes(
+                starts=0,
+                team_join_date=dt.date(2026, 7, 1),
+                as_of=AS_OF,
+                status="a",
+                chance_of_playing_next_round=None,
+                priors=inconsistent_priors,
+            )
 
 
 class TestDeterminism:

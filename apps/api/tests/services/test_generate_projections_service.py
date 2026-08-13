@@ -85,8 +85,14 @@ class _FakeProjectionGenerationRepository:
             ),
         ]
 
-    def list_latest_snapshots(self, player_ids: set[int]) -> list[PlayerSnapshot]:
+    def get_latest_snapshot_generation(self) -> dt.datetime | None:
+        return dt.datetime(2026, 8, 19, 12, 0, tzinfo=dt.UTC)
+
+    def list_snapshots_for_generation(
+        self, player_ids: set[int], generated_at: dt.datetime
+    ) -> list[PlayerSnapshot]:
         assert player_ids == {1, 2}
+        assert generated_at == dt.datetime(2026, 8, 19, 12, 0, tzinfo=dt.UTC)
         return [
             PlayerSnapshot(
                 player_id=1,
@@ -254,6 +260,42 @@ def test_generate_projections_service_records_the_effective_team_strength() -> N
     assert snapshot["2"] == {"source_difficulty": 3, "override": 2, "effective_difficulty": 2}
 
 
+def test_generate_projections_service_filters_snapshots_to_one_chosen_generation() -> None:
+    """The invariant: the same generation timestamp used to select snapshots is the
+    one recorded as provenance -- they cannot silently diverge."""
+    chosen_generation = dt.datetime(2026, 8, 20, 9, 0, tzinfo=dt.UTC)
+
+    class _ExplicitGenerationRepository(_FakeProjectionGenerationRepository):
+        def get_latest_snapshot_generation(self) -> dt.datetime | None:
+            return chosen_generation
+
+        def list_snapshots_for_generation(
+            self, player_ids: set[int], generated_at: dt.datetime
+        ) -> list[PlayerSnapshot]:
+            assert generated_at == chosen_generation
+            return [
+                PlayerSnapshot(
+                    player_id=1,
+                    captured_at=generated_at,
+                    gameweek_id=5,
+                    price=10.5,
+                    ownership_percent=22.0,
+                    transfers_in=0,
+                    transfers_out=0,
+                    status="a",
+                    chance_of_playing_next_round=None,
+                )
+            ]
+
+    sink = _FakeProjectionRepository()
+    runs = _FakeRunRepository()
+    service = _service(_ExplicitGenerationRepository(), sink, run_repository=runs)
+
+    service.execute()
+
+    assert runs.created_runs[0]["player_snapshot_generated_at"] == chosen_generation
+
+
 def test_generate_projections_service_records_the_freshest_snapshot_generation() -> None:
     sink = _FakeProjectionRepository()
     runs = _FakeRunRepository()
@@ -268,8 +310,13 @@ def test_generate_projections_service_records_the_freshest_snapshot_generation()
 
 def test_generate_projections_service_none_snapshot_generation_without_snapshots() -> None:
     class _NoSnapshotsRepository(_FakeProjectionGenerationRepository):
-        def list_latest_snapshots(self, player_ids: set[int]) -> list[PlayerSnapshot]:
-            return []
+        def get_latest_snapshot_generation(self) -> dt.datetime | None:
+            return None
+
+        def list_snapshots_for_generation(
+            self, player_ids: set[int], generated_at: dt.datetime
+        ) -> list[PlayerSnapshot]:
+            raise AssertionError("must not be called when there is no snapshot generation")
 
     sink = _FakeProjectionRepository()
     runs = _FakeRunRepository()

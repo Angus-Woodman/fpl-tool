@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 APPEARANCE_POINT_VALUE = 1.0
 SIXTY_MINUTE_POINT_VALUE = 1.0
-P60_TOLERANCE = 1e-9
 
 GOAL_POINTS_DEFAULT: dict[PlayerPosition, float] = {
     PlayerPosition.GOALKEEPER: 6.0,
@@ -32,17 +31,16 @@ AWAY_VENUE_MULTIPLIER_DEFAULT = 0.95
 
 @dataclass(frozen=True)
 class BaselineV2PositionPriors:
-    """Cohort/position-level priors, supplied by the caller from real data.
+    """Cohort/position-level productivity priors, supplied by the caller from real data.
 
-    `sub_appearance_probability` is a coarse, pre-season, position-level assumption
-    -- P(comes on as a substitute | did not start) -- used only because no
-    player-specific version of it is identifiable before in-season (started,
-    minutes) observations exist (see fpl_engine.minutes, Slice 1.5c).
+    Role/availability assumptions (start probability, substitute appearance,
+    P(60+)) live entirely in fpl_engine.minutes.ExpectedMinutesResult -- baseline_v2
+    consumes that result rather than modelling getting onto the pitch a second,
+    potentially inconsistent, way.
     """
 
     expected_goals_per_90: float
     expected_assists_per_90: float
-    sub_appearance_probability: float
 
 
 @dataclass(frozen=True)
@@ -126,18 +124,8 @@ class BaselineV2ProjectionModel:
             prior_weight=self.parameters.xa90_m0,
         )
 
-        start_probability = data.expected_minutes.start_probability
-        probability_of_playing = (
-            start_probability + (1 - start_probability) * priors.sub_appearance_probability
-        )
+        probability_of_playing = data.expected_minutes.probability_of_playing
         probability_60_plus = data.expected_minutes.probability_60_plus
-
-        if probability_60_plus > probability_of_playing + P60_TOLERANCE:
-            raise ValueError(
-                "P(60+) exceeds P(play): "
-                f"{probability_60_plus} > {probability_of_playing}. "
-                "The supplied priors are inconsistent."
-            )
 
         venue_multiplier = (
             self.parameters.home_venue_multiplier

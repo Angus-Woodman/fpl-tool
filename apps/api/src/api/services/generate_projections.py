@@ -37,7 +37,11 @@ class ProjectionGenerationRepositoryPort(Protocol):
 
     def list_recent_stats(self, player_ids: set[int]) -> list[PlayerGameweekStat]: ...
 
-    def list_latest_snapshots(self, player_ids: set[int]) -> list[PlayerSnapshot]: ...
+    def get_latest_snapshot_generation(self) -> dt.datetime | None: ...
+
+    def list_snapshots_for_generation(
+        self, player_ids: set[int], generated_at: dt.datetime
+    ) -> list[PlayerSnapshot]: ...
 
 
 class ProjectionRepositoryPort(Protocol):
@@ -100,7 +104,12 @@ class GenerateProjectionsService:
         recent_stats_by_player = self._group_recent_stats(
             self._source_repository.list_recent_stats(player_ids)
         )
-        snapshots = self._source_repository.list_latest_snapshots(player_ids)
+        snapshot_generation = self._source_repository.get_latest_snapshot_generation()
+        snapshots = (
+            self._source_repository.list_snapshots_for_generation(player_ids, snapshot_generation)
+            if snapshot_generation is not None
+            else []
+        )
         snapshots_by_player = {snapshot.player_id: snapshot for snapshot in snapshots}
 
         run_id = self._run_repository.create(
@@ -111,9 +120,7 @@ class GenerateProjectionsService:
             ),
             parameters=self._build_parameters(),
             team_strength_snapshot=self._build_team_strength_snapshot(),
-            player_snapshot_generated_at=(
-                max(snapshot.captured_at for snapshot in snapshots) if snapshots else None
-            ),
+            player_snapshot_generated_at=snapshot_generation,
         )
 
         projections: list[Projection] = []

@@ -17,12 +17,10 @@ GENERATED_AT = dt.datetime(2026, 8, 13, tzinfo=dt.UTC)
 FORWARD_PRIORS = BaselineV2PositionPriors(
     expected_goals_per_90=0.35,
     expected_assists_per_90=0.15,
-    sub_appearance_probability=0.15,
 )
 MIDFIELDER_PRIORS = BaselineV2PositionPriors(
     expected_goals_per_90=0.2,
     expected_assists_per_90=0.2,
-    sub_appearance_probability=0.15,
 )
 
 PRIORS_BY_POSITION = {
@@ -38,6 +36,7 @@ def _expected_minutes(
     probability_60_plus: float,
     availability_multiplier: float = 1.0,
     role_label: RoleLabel = RoleLabel.REGULAR,
+    probability_of_playing: float | None = None,
 ) -> ExpectedMinutesResult:
     return ExpectedMinutesResult(
         expected_minutes=expected_minutes,
@@ -45,6 +44,9 @@ def _expected_minutes(
         role_confidence=RoleConfidence.HIGH,
         start_probability=start_probability,
         minutes_if_start=75.0,
+        probability_of_playing=(
+            probability_of_playing if probability_of_playing is not None else start_probability
+        ),
         probability_60_plus=probability_60_plus,
         availability_multiplier=availability_multiplier,
         observed_history_weight=0.7,
@@ -86,14 +88,18 @@ def _model(parameters: BaselineV2Parameters | None = None) -> BaselineV2Projecti
 
 
 class TestProbabilityOfPlaying:
-    def test_combines_start_and_substitute_probability(self) -> None:
+    def test_reads_probability_of_playing_straight_from_expected_minutes(self) -> None:
+        # P(play) is computed once, in fpl_engine.minutes, from P(start) and the
+        # substitute-appearance prior -- baseline_v2 must not recompute it.
         expected_minutes = _expected_minutes(
-            expected_minutes=80.0, start_probability=0.8, probability_60_plus=0.75
+            expected_minutes=80.0,
+            start_probability=0.8,
+            probability_60_plus=0.75,
+            probability_of_playing=0.83,
         )
         explanation = _model().explain(_input(expected_minutes=expected_minutes))
 
-        # P(play) = 0.8 + (1-0.8)*0.15 = 0.83, using the position's sub-appearance prior.
-        assert explanation.probability_of_playing == pytest.approx(0.8 + 0.2 * 0.15)
+        assert explanation.probability_of_playing == 0.83
 
     def test_first_appearance_point_never_exceeds_probability_of_playing(self) -> None:
         explanation = _model().explain(_input())
@@ -102,14 +108,8 @@ class TestProbabilityOfPlaying:
         assert first_appearance_component == pytest.approx(explanation.probability_of_playing)
         assert first_appearance_component <= explanation.probability_of_playing + 1e-9
 
-    def test_rejects_inconsistent_priors_where_p60_exceeds_p_play(self) -> None:
-        # A rotation-risk player (low start probability) with an implausibly high P60 prior.
-        expected_minutes = _expected_minutes(
-            expected_minutes=20.0, start_probability=0.1, probability_60_plus=0.9
-        )
-
-        with pytest.raises(ValueError, match="P.60"):
-            _model().explain(_input(expected_minutes=expected_minutes))
+    # P(60+) <= P(play) is validated once, in fpl_engine.minutes.expected_minutes,
+    # since both quantities are produced there -- see test_expected_minutes_pre_season.py.
 
     def test_appearance_points_cap_at_two(self) -> None:
         expected_minutes = _expected_minutes(
