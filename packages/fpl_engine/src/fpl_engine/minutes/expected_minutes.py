@@ -109,9 +109,11 @@ def estimate_pre_season_expected_minutes(
     `start_probability` uses player-specific data, and only when a genuine
     opportunity denominator (38 games) is defensible.
 
-    `expected_minutes` and `probability_of_playing` are both built from the same
-    `start_probability` and substitute assumptions, so a player's chance of
-    getting onto the pitch is never modelled two different ways.
+    `expected_minutes`, `probability_of_playing` and `probability_60_plus` are all
+    built from the same `start_probability`/substitute assumptions and the same
+    `availability_multiplier` (current injury/suspension status) -- a player who
+    is ruled out this gameweek gets near-zero appearance points as well as
+    near-zero expected minutes, not just the latter.
     """
     if starts < 0:
         raise ValueError(f"starts cannot be negative: {starts}")
@@ -141,23 +143,29 @@ def estimate_pre_season_expected_minutes(
         role_confidence = RoleConfidence.LOW
         role_label = RoleLabel.NEW_TO_CLUB if team_join_date is not None else RoleLabel.UNKNOWN
 
-    probability_60_plus = priors.probability_60_plus.get(
+    role_probability_60_plus = priors.probability_60_plus.get(
         role_label, priors.probability_60_plus_default
     )
-    probability_of_playing = (
+    role_probability_of_playing = (
         start_probability + (1 - start_probability) * priors.sub_appearance_probability
     )
 
-    if probability_60_plus > probability_of_playing + P60_TOLERANCE:
+    if role_probability_60_plus > role_probability_of_playing + P60_TOLERANCE:
         raise ValueError(
             "P(60+) exceeds P(play): "
-            f"{probability_60_plus} > {probability_of_playing}. "
+            f"{role_probability_60_plus} > {role_probability_of_playing}. "
             "The supplied priors are inconsistent."
         )
 
     availability = availability_multiplier(
         status=status, chance_of_playing_next_round=chance_of_playing_next_round
     )
+    # Applying availability to P(play)/P(60+) here (not just to expected_minutes
+    # below) keeps a ruled-out player's appearance points consistent with their
+    # near-zero expected minutes. Multiplying both sides of the invariant check
+    # above by the same non-negative availability preserves it.
+    probability_of_playing = role_probability_of_playing * availability
+    probability_60_plus = role_probability_60_plus * availability
     role_expected_minutes = (
         start_probability * priors.minutes_if_start
         + (1 - start_probability) * priors.sub_appearance_probability * priors.minutes_if_sub

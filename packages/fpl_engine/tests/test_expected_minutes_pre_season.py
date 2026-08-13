@@ -283,3 +283,36 @@ class TestDeterminism:
         second = _estimate(starts=20, team_join_date=dt.date(2021, 1, 1))
 
         assert first == second
+
+
+class TestAvailabilityScalesProbabilityOfPlaying:
+    """A discovered-and-fixed bug: a player ruled out this gameweek must not keep
+    full role-based appearance-points credit while simultaneously showing
+    near-zero expected_minutes -- probability_of_playing/probability_60_plus must
+    reflect current availability too, not just expected_minutes."""
+
+    def test_a_ruled_out_player_has_zero_probability_of_playing_and_p60(self) -> None:
+        result = _estimate(
+            starts=34,
+            team_join_date=dt.date(2018, 1, 1),
+            status="i",
+            chance_of_playing_next_round=0,
+        )
+
+        assert result.probability_of_playing == 0.0
+        assert result.probability_60_plus == 0.0
+        assert result.expected_minutes == 0.0
+
+    def test_a_doubtful_player_scales_probability_of_playing_by_availability(self) -> None:
+        full_health = _estimate(starts=34, team_join_date=dt.date(2018, 1, 1))
+        doubtful = _estimate(
+            starts=34,
+            team_join_date=dt.date(2018, 1, 1),
+            status="d",
+            chance_of_playing_next_round=75,
+        )
+
+        assert doubtful.probability_of_playing == pytest.approx(
+            full_health.probability_of_playing * 0.75
+        )
+        assert doubtful.probability_60_plus == pytest.approx(full_health.probability_60_plus * 0.75)
