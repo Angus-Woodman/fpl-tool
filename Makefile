@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs db-test-up test test-integration lint typecheck format db-migrate db-revision data-refresh results-refresh projections-refresh dual-write-refresh clean
+.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs db-test-up test test-integration lint typecheck format db-migrate db-revision data-refresh results-refresh projections-refresh dual-write-refresh predeadline-snapshot clean
 
 TEST_DATABASE_URL ?= postgresql+psycopg://fpl:fpl@localhost:5432/fpl_test
 
@@ -73,6 +73,13 @@ projections-refresh:
 
 dual-write-refresh:
 	cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src uv run --package api python -m api.scripts.dual_write_projections
+
+# Operational pre-deadline record: import current FPL data (captures one
+# complete player-snapshot generation in the same pass), then generate and
+# validate provenance-backed projections for every operational model from
+# that shared generation. Deliberately excludes results ingestion (that's a
+# post-gameweek evaluation concern, not a pre-deadline one).
+predeadline-snapshot: data-refresh dual-write-refresh
 
 clean:
 	rm -rf .venv

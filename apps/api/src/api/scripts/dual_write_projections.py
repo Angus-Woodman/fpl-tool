@@ -58,6 +58,39 @@ def main() -> None:
     if summary.v2_missing_snapshot_warning is not None:
         logger.warning(summary.v2_missing_snapshot_warning)
 
+    # extra={} fields above aren't rendered by the default log format, so the
+    # pre-deadline workflow's required fields are also printed directly here.
+    gameweeks = summary.gameweeks_covered
+    gameweeks_range = (
+        f"{gameweeks[0]}-{gameweeks[-1]} ({len(gameweeks)} gameweeks)" if gameweeks else "none"
+    )
+    print(
+        "\n".join(
+            [
+                "=== Dual-write projection refresh summary ===",
+                "Snapshot generation:  "
+                + (
+                    summary.snapshot_generation.isoformat()
+                    if summary.snapshot_generation
+                    else "none"
+                ),
+                f"Run generated at:     {summary.generated_at.isoformat()}",
+                f"Gameweeks covered:    {gameweeks_range}",
+                f"Model versions:       baseline_v1 (run {summary.v1_run_id}), "
+                f"baseline_v2 (run {summary.v2_run_id})",
+                f"Players projected:    v1={summary.v1.projections_generated}, "
+                f"v2={summary.v2_projections_generated}",
+                f"Missing players (v2): {summary.v2_players_skipped_missing_snapshot} "
+                f"({summary.v2_missing_snapshot_fraction:.2%})"
+                + (
+                    f" -- ids={list(summary.v2_missing_snapshot_player_ids)}"
+                    if summary.v2_missing_snapshot_player_ids
+                    else ""
+                ),
+            ]
+        )
+    )
+
 
 if __name__ == "__main__":
     main()

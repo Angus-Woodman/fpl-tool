@@ -115,6 +115,7 @@ class MissingSnapshotCoverageError(RuntimeError):
 class DualWriteSummary:
     generated_at: dt.datetime
     snapshot_generation: dt.datetime | None
+    gameweeks_covered: list[int]
     v1: GenerateProjectionsSummary
     v1_run_id: int
     v2_run_id: int
@@ -237,6 +238,8 @@ class DualWriteProjectionsService:
         v1_summary = self._v1_service.execute(context)
         assert v1_summary.run_id is not None
 
+        run_gameweeks_covered = gameweeks_covered(context.fixtures)
+
         v2_model = BaselineV2ProjectionModel(
             priors={
                 position: priors.to_baseline_v2_position_priors(position)
@@ -248,7 +251,7 @@ class DualWriteProjectionsService:
         v2_run_id = self._run_repository.create(
             model_version=v2_model.model_version,
             generated_at=context.generated_at,
-            gameweeks_covered=gameweeks_covered(context.fixtures),
+            gameweeks_covered=run_gameweeks_covered,
             parameters=self._build_v2_parameters(
                 priors,
                 missing_count=missing_count,
@@ -310,6 +313,7 @@ class DualWriteProjectionsService:
         return DualWriteSummary(
             generated_at=context.generated_at,
             snapshot_generation=context.snapshot_generation,
+            gameweeks_covered=run_gameweeks_covered,
             v1=v1_summary,
             v1_run_id=v1_summary.run_id,
             v2_run_id=v2_run_id,

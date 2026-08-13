@@ -223,6 +223,7 @@ def test_dual_write_creates_two_runs_with_shared_provenance() -> None:
     assert v1_run["gameweeks_covered"] == v2_run["gameweeks_covered"] == [5]
     assert summary.v1_run_id == v1_run["id"]
     assert summary.v2_run_id == v2_run["id"]
+    assert summary.gameweeks_covered == [5]
 
 
 def test_dual_write_persists_distinct_projections_for_both_models() -> None:
