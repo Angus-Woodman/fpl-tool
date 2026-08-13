@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://fpl:fpl@localhost:5432/fpl",
         alias="DATABASE_URL",
     )
+    test_database_url: str | None = Field(default=None, alias="TEST_DATABASE_URL")
     fpl_api_base_url: str = Field(
         default="https://fantasy.premierleague.com/api",
         alias="FPL_API_BASE_URL",

@@ -1,6 +1,8 @@
 SHELL := /bin/bash
 
-.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs test lint typecheck format db-migrate db-revision data-refresh projections-refresh clean
+.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs db-test-up test test-integration lint typecheck format db-migrate db-revision data-refresh projections-refresh clean
+
+TEST_DATABASE_URL ?= postgresql+psycopg://fpl:fpl@localhost:5432/fpl_test
 
 setup:
 	mise install
@@ -26,10 +28,20 @@ db-down:
 db-logs:
 	docker compose logs -f postgres
 
+db-test-up: db-up
+	@docker compose exec -T postgres sh -c 'until pg_isready -U fpl -d fpl -q; do sleep 1; done'
+	@docker compose exec -T postgres psql -U fpl -d fpl -tAc "SELECT 1 FROM pg_database WHERE datname='fpl_test'" | grep -q 1 \
+		|| docker compose exec -T postgres createdb -U fpl -O fpl fpl_test
+	cd apps/api && DATABASE_URL="$(TEST_DATABASE_URL)" uv run --package api alembic upgrade head
+
 test:
 	uv run --package fpl-engine pytest -q packages/fpl_engine/tests
 	PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q apps/api/tests
 	pnpm --filter web test:run
+
+test-integration: db-test-up
+	RUN_DB_TESTS=1 TEST_DATABASE_URL="$(TEST_DATABASE_URL)" PYTHONPATH=packages/fpl_engine/src \
+		uv run --package api pytest -q apps/api/tests
 
 lint:
 	uv run ruff check apps/api/src apps/api/tests packages/fpl_engine/src packages/fpl_engine/tests
