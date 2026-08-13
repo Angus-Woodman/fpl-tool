@@ -35,6 +35,7 @@ class ProjectionRepository:
                         projection.components.defensive_contribution_points
                     ),
                     "other_points": projection.components.other_points,
+                    "save_points": projection.components.save_points,
                     "generated_at": projection.generated_at,
                     "model_version": projection.model_version,
                     "run_id": projection.run_id,
@@ -58,6 +59,7 @@ class ProjectionRepository:
                         statement.excluded.defensive_contribution_points
                     ),
                     "other_points": statement.excluded.other_points,
+                    "save_points": statement.excluded.save_points,
                     "run_id": statement.excluded.run_id,
                 },
             )

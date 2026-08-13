@@ -170,6 +170,7 @@ class ProjectionModel(Base):
     bonus_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     defensive_contribution_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     other_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    save_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     generated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
