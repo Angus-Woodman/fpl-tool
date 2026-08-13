@@ -2,6 +2,7 @@ import pytest
 from api.adapters.fpl.schemas import BootstrapStaticDto, FplFixtureDto
 from api.core.exceptions import DataMappingError
 from api.services.import_fpl_data import ImportFplDataService
+from fpl_engine.domain import PlayerSnapshot
 
 
 class _FakeProvider:
@@ -33,11 +34,27 @@ class _FakeTeamRepository:
 
 
 class _FakePlayerRepository:
-    def __init__(self) -> None:
+    def __init__(self, player_map: dict[int, int] | None = None) -> None:
         self.upserted_players = 0
+        self._player_map = player_map if player_map is not None else {}
 
     def upsert_many(self, players: list[object]) -> None:
         self.upserted_players = len(players)
+
+    def get_internal_ids_by_external_ids(self, external_ids: set[int]) -> dict[int, int]:
+        return {
+            external_id: self._player_map[external_id]
+            for external_id in external_ids
+            if external_id in self._player_map
+        }
+
+
+class _FakePlayerSnapshotRepository:
+    def __init__(self) -> None:
+        self.snapshots: list[PlayerSnapshot] = []
+
+    def upsert_many(self, snapshots: list[PlayerSnapshot]) -> None:
+        self.snapshots = list(snapshots)
 
 
 class _FakeGameweekRepository:
@@ -50,9 +67,7 @@ class _FakeGameweekRepository:
 
     def get_internal_ids_by_numbers(self, numbers: set[int]) -> dict[int, int]:
         return {
-            number: self._gameweek_map[number]
-            for number in numbers
-            if number in self._gameweek_map
+            number: self._gameweek_map[number] for number in numbers if number in self._gameweek_map
         }
 
 
@@ -116,9 +131,10 @@ def test_import_service_returns_summary(
     fixture_payload: list[dict[str, object]],
 ) -> None:
     team_repo = _FakeTeamRepository({1: 101})
-    player_repo = _FakePlayerRepository()
+    player_repo = _FakePlayerRepository({7: 301})
     gameweek_repo = _FakeGameweekRepository({1: 201})
     fixture_repo = _FakeFixtureRepository()
+    snapshot_repo = _FakePlayerSnapshotRepository()
 
     service = ImportFplDataService(
         provider=_FakeProvider(bootstrap_payload, fixture_payload),
@@ -126,6 +142,7 @@ def test_import_service_returns_summary(
         player_repository=player_repo,
         gameweek_repository=gameweek_repo,
         fixture_repository=fixture_repo,
+        player_snapshot_repository=snapshot_repo,
     )
 
     summary = service.import_bootstrap_static()
@@ -134,10 +151,57 @@ def test_import_service_returns_summary(
     assert summary.players_imported == 1
     assert summary.gameweeks_imported == 1
     assert summary.fixtures_imported == 1
+    assert summary.player_snapshots_captured == 1
     assert team_repo.upserted_teams == 1
     assert player_repo.upserted_players == 1
     assert gameweek_repo.upserted_gameweeks == 1
     assert fixture_repo.upserted_fixtures == 1
+
+
+def test_import_service_captures_a_player_snapshot(
+    bootstrap_payload: BootstrapStaticDto,
+    fixture_payload: list[dict[str, object]],
+) -> None:
+    snapshot_repo = _FakePlayerSnapshotRepository()
+
+    service = ImportFplDataService(
+        provider=_FakeProvider(bootstrap_payload, fixture_payload),
+        team_repository=_FakeTeamRepository({1: 101}),
+        player_repository=_FakePlayerRepository({7: 301}),
+        gameweek_repository=_FakeGameweekRepository({1: 201}),
+        fixture_repository=_FakeFixtureRepository(),
+        player_snapshot_repository=snapshot_repo,
+    )
+
+    service.import_bootstrap_static()
+
+    assert len(snapshot_repo.snapshots) == 1
+    snapshot = snapshot_repo.snapshots[0]
+    assert snapshot.player_id == 301
+    assert snapshot.gameweek_id == 201
+    assert snapshot.price == 9.0
+    assert snapshot.captured_at.tzinfo is not None
+
+
+def test_import_service_skips_snapshots_for_unmapped_players(
+    bootstrap_payload: BootstrapStaticDto,
+    fixture_payload: list[dict[str, object]],
+) -> None:
+    snapshot_repo = _FakePlayerSnapshotRepository()
+
+    service = ImportFplDataService(
+        provider=_FakeProvider(bootstrap_payload, fixture_payload),
+        team_repository=_FakeTeamRepository({1: 101}),
+        player_repository=_FakePlayerRepository({}),
+        gameweek_repository=_FakeGameweekRepository({1: 201}),
+        fixture_repository=_FakeFixtureRepository(),
+        player_snapshot_repository=snapshot_repo,
+    )
+
+    summary = service.import_bootstrap_static()
+
+    assert snapshot_repo.snapshots == []
+    assert summary.player_snapshots_captured == 0
 
 
 def test_import_service_fails_when_team_mapping_missing(
@@ -150,6 +214,7 @@ def test_import_service_fails_when_team_mapping_missing(
         player_repository=_FakePlayerRepository(),
         gameweek_repository=_FakeGameweekRepository({1: 201}),
         fixture_repository=_FakeFixtureRepository(),
+        player_snapshot_repository=_FakePlayerSnapshotRepository(),
     )
 
     with pytest.raises(DataMappingError):

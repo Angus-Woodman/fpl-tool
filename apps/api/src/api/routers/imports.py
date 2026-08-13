@@ -6,7 +6,13 @@ from typing import Annotated
 from api.adapters.fpl import FplApiClient
 from api.core.settings import get_settings
 from api.db.session import get_db_session
-from api.repositories import FixtureRepository, GameweekRepository, PlayerRepository, TeamRepository
+from api.repositories import (
+    FixtureRepository,
+    GameweekRepository,
+    PlayerRepository,
+    PlayerSnapshotRepository,
+    TeamRepository,
+)
 from api.services import IMPORT_STATUS_STORE, ImportFplDataService, ImportState, ImportStatusStore
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -20,6 +26,7 @@ class ImportSummaryResponse(BaseModel):
     players_imported: int
     gameweeks_imported: int
     fixtures_imported: int
+    player_snapshots_captured: int = 0
 
 
 class ImportStatusResponse(BaseModel):
@@ -46,6 +53,7 @@ def get_import_service(
         player_repository=PlayerRepository(db_session),
         gameweek_repository=GameweekRepository(db_session),
         fixture_repository=FixtureRepository(db_session),
+        player_snapshot_repository=PlayerSnapshotRepository(db_session),
     )
 
 
@@ -86,6 +94,7 @@ def run_import(
         players_imported=summary.players_imported,
         gameweeks_imported=summary.gameweeks_imported,
         fixtures_imported=summary.fixtures_imported,
+        player_snapshots_captured=summary.player_snapshots_captured,
     )
 
 
@@ -101,6 +110,7 @@ def get_import_status(
             players_imported=summary.players_imported,
             gameweeks_imported=summary.gameweeks_imported,
             fixtures_imported=summary.fixtures_imported,
+            player_snapshots_captured=summary.player_snapshots_captured,
         )
 
     return ImportStatusResponse(

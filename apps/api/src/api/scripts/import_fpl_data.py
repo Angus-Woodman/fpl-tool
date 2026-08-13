@@ -6,7 +6,13 @@ from api.adapters.fpl import FplApiClient
 from api.core.logging import configure_logging
 from api.core.settings import get_settings
 from api.db.session import SessionLocal
-from api.repositories import FixtureRepository, GameweekRepository, PlayerRepository, TeamRepository
+from api.repositories import (
+    FixtureRepository,
+    GameweekRepository,
+    PlayerRepository,
+    PlayerSnapshotRepository,
+    TeamRepository,
+)
 from api.services import ImportFplDataService
 
 
@@ -24,6 +30,7 @@ def main() -> None:
             player_repository=PlayerRepository(session),
             gameweek_repository=GameweekRepository(session),
             fixture_repository=FixtureRepository(session),
+            player_snapshot_repository=PlayerSnapshotRepository(session),
         )
 
         summary = service.import_bootstrap_static()
@@ -36,6 +43,7 @@ def main() -> None:
             "players_imported": summary.players_imported,
             "gameweeks_imported": summary.gameweeks_imported,
             "fixtures_imported": summary.fixtures_imported,
+            "player_snapshots_captured": summary.player_snapshots_captured,
             "fpl_api_base_url": base_url,
         },
     )

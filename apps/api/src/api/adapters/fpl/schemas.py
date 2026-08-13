@@ -26,6 +26,20 @@ class FplElementDto(BaseModel):
     now_cost: int
     status: str
 
+    # Mutable state captured into player_snapshots. Before a season starts the
+    # reported totals still describe the player's previous season.
+    selected_by_percent: str | None = None
+    transfers_in_event: int = 0
+    transfers_out_event: int = 0
+    chance_of_playing_next_round: int | None = None
+    minutes: int = 0
+    total_points: int = 0
+    starts: int = 0
+    points_per_game: str | None = None
+    form: str | None = None
+    expected_goals: str | None = None
+    expected_assists: str | None = None
+
 
 class FplEventDto(BaseModel):
     model_config = ConfigDict(extra="ignore")

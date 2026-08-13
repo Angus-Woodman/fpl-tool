@@ -75,6 +75,11 @@ class PlayerGameweekStat:
 
 @dataclass(frozen=True)
 class PlayerSnapshot:
+    """Mutable player state as reported at `captured_at`.
+
+    The reported totals describe the previous season until the new one begins.
+    """
+
     player_id: int
     captured_at: dt.datetime
     gameweek_id: int | None
@@ -84,6 +89,13 @@ class PlayerSnapshot:
     transfers_out: int
     status: str
     chance_of_playing_next_round: int | None
+    total_minutes: int = 0
+    total_points: int = 0
+    starts: int = 0
+    points_per_game: float = 0.0
+    form: float = 0.0
+    expected_goals: float | None = None
+    expected_assists: float | None = None
 
 
 @dataclass(frozen=True)

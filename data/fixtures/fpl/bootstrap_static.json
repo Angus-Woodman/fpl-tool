@@ -20,7 +20,18 @@
       "team": 1,
       "element_type": 3,
       "now_cost": 105,
-      "status": "a"
+      "status": "a",
+      "selected_by_percent": "31.4",
+      "transfers_in_event": 120345,
+      "transfers_out_event": 45678,
+      "chance_of_playing_next_round": null,
+      "minutes": 2810,
+      "total_points": 206,
+      "starts": 32,
+      "points_per_game": "5.9",
+      "form": "0.0",
+      "expected_goals": "9.42",
+      "expected_assists": "11.08"
     },
     {
       "id": 102,
@@ -30,7 +41,18 @@
       "team": 2,
       "element_type": 4,
       "now_cost": 90,
-      "status": "a"
+      "status": "a",
+      "selected_by_percent": "8.2",
+      "transfers_in_event": 4321,
+      "transfers_out_event": 9876,
+      "chance_of_playing_next_round": 75,
+      "minutes": 2400,
+      "total_points": 178,
+      "starts": 28,
+      "points_per_game": "5.1",
+      "form": "0.0",
+      "expected_goals": "16.30",
+      "expected_assists": "4.11"
     }
   ],
   "events": [

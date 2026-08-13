@@ -101,6 +101,13 @@ class PlayerSnapshotModel(Base):
     transfers_out: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     chance_of_playing_next_round: Mapped[int | None] = mapped_column(Integer)
+    total_minutes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total_points: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    starts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    points_per_game: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    form: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    expected_goals: Mapped[float | None] = mapped_column(Float)
+    expected_assists: Mapped[float | None] = mapped_column(Float)
 
 
 class ProjectionModel(Base):

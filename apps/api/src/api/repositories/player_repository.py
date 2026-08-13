@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fpl_engine.domain import Player
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,18 @@ from api.models.entities import PlayerPosition as DbPlayerPosition
 class PlayerRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    def get_internal_ids_by_external_ids(self, external_ids: set[int]) -> dict[int, int]:
+        if not external_ids:
+            return {}
+
+        rows = self._session.execute(
+            select(PlayerModel.external_fpl_id, PlayerModel.id).where(
+                PlayerModel.external_fpl_id.in_(external_ids)
+            )
+        ).all()
+
+        return {row[0]: row[1] for row in rows}
 
     def upsert_many(self, players: list[Player]) -> None:
         if not players:

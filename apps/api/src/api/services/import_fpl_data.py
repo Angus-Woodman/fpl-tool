@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 from typing import Protocol
 
-from fpl_engine.domain import Fixture, Gameweek, Player, Team
+from fpl_engine.domain import Fixture, Gameweek, Player, PlayerSnapshot, Team
 
 from api.adapters.fpl import BootstrapStaticDto, FplFixtureDto, map_bootstrap_static, map_fixtures
+from api.adapters.fpl.mappers import map_player_snapshots
 from api.core.exceptions import DataMappingError
 
 
@@ -24,6 +26,12 @@ class TeamRepositoryPort(Protocol):
 class PlayerRepositoryPort(Protocol):
     def upsert_many(self, players: list[Player]) -> None: ...
 
+    def get_internal_ids_by_external_ids(self, external_ids: set[int]) -> dict[int, int]: ...
+
+
+class PlayerSnapshotRepositoryPort(Protocol):
+    def upsert_many(self, snapshots: list[PlayerSnapshot]) -> None: ...
+
 
 class GameweekRepositoryPort(Protocol):
     def upsert_many(self, gameweeks: list[Gameweek]) -> None: ...
@@ -41,6 +49,7 @@ class ImportSummary:
     players_imported: int
     gameweeks_imported: int
     fixtures_imported: int
+    player_snapshots_captured: int = 0
 
 
 class ImportFplDataService:
@@ -51,12 +60,14 @@ class ImportFplDataService:
         player_repository: PlayerRepositoryPort,
         gameweek_repository: GameweekRepositoryPort,
         fixture_repository: FixtureRepositoryPort,
+        player_snapshot_repository: PlayerSnapshotRepositoryPort,
     ) -> None:
         self._provider = provider
         self._team_repository = team_repository
         self._player_repository = player_repository
         self._gameweek_repository = gameweek_repository
         self._fixture_repository = fixture_repository
+        self._player_snapshot_repository = player_snapshot_repository
 
     def import_bootstrap_static(self) -> ImportSummary:
         payload = self._provider.fetch_bootstrap_static()
@@ -152,9 +163,67 @@ class ImportFplDataService:
 
         self._fixture_repository.upsert_many(fixtures)
 
+        snapshots = self._build_snapshots(payload, fixture_gameweek_map)
+        self._player_snapshot_repository.upsert_many(snapshots)
+
         return ImportSummary(
             teams_imported=len(mapped.teams),
             players_imported=len(players),
             gameweeks_imported=len(mapped.gameweeks),
             fixtures_imported=len(fixtures),
+            player_snapshots_captured=len(snapshots),
         )
+
+    def _build_snapshots(
+        self, payload: BootstrapStaticDto, gameweek_map: dict[int, int]
+    ) -> list[PlayerSnapshot]:
+        seeds = map_player_snapshots(payload, captured_at=dt.datetime.now(dt.UTC))
+        if not seeds:
+            return []
+
+        player_map = self._player_repository.get_internal_ids_by_external_ids(
+            {seed.player_external_fpl_id for seed in seeds}
+        )
+
+        gameweek_numbers = {
+            seed.gameweek_number for seed in seeds if seed.gameweek_number is not None
+        }
+        missing_numbers = gameweek_numbers - gameweek_map.keys()
+        if missing_numbers:
+            gameweek_map = {
+                **gameweek_map,
+                **self._gameweek_repository.get_internal_ids_by_numbers(missing_numbers),
+            }
+
+        snapshots: list[PlayerSnapshot] = []
+        for seed in seeds:
+            player_id = player_map.get(seed.player_external_fpl_id)
+            if player_id is None:
+                continue
+
+            snapshots.append(
+                PlayerSnapshot(
+                    player_id=player_id,
+                    captured_at=seed.captured_at,
+                    gameweek_id=(
+                        gameweek_map.get(seed.gameweek_number)
+                        if seed.gameweek_number is not None
+                        else None
+                    ),
+                    price=seed.price,
+                    ownership_percent=seed.ownership_percent,
+                    transfers_in=seed.transfers_in,
+                    transfers_out=seed.transfers_out,
+                    status=seed.status,
+                    chance_of_playing_next_round=seed.chance_of_playing_next_round,
+                    total_minutes=seed.total_minutes,
+                    total_points=seed.total_points,
+                    starts=seed.starts,
+                    points_per_game=seed.points_per_game,
+                    form=seed.form,
+                    expected_goals=seed.expected_goals,
+                    expected_assists=seed.expected_assists,
+                )
+            )
+
+        return snapshots

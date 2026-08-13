@@ -39,6 +39,26 @@ class FixtureSeed:
     finished: bool
 
 
+@dataclass(frozen=True)
+class PlayerSnapshotSeed:
+    player_external_fpl_id: int
+    captured_at: dt.datetime
+    gameweek_number: int | None
+    price: float
+    ownership_percent: float
+    transfers_in: int
+    transfers_out: int
+    status: str
+    chance_of_playing_next_round: int | None
+    total_minutes: int
+    total_points: int
+    starts: int
+    points_per_game: float
+    form: float
+    expected_goals: float | None
+    expected_assists: float | None
+
+
 _POSITION_MAP: dict[int, PlayerPosition] = {
     1: PlayerPosition.GOALKEEPER,
     2: PlayerPosition.DEFENDER,
@@ -102,6 +122,55 @@ def map_bootstrap_static(payload: BootstrapStaticDto) -> BootstrapStaticMapped:
     ]
 
     return BootstrapStaticMapped(teams=teams, players=players, gameweeks=gameweeks)
+
+
+def _parse_float(value: str | None) -> float | None:
+    """FPL reports several numeric fields as strings, occasionally empty."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _snapshot_gameweek_number(payload: BootstrapStaticDto) -> int | None:
+    for event in payload.events:
+        if event.is_next:
+            return event.id
+    for event in payload.events:
+        if event.is_current:
+            return event.id
+    return None
+
+
+def map_player_snapshots(
+    payload: BootstrapStaticDto, *, captured_at: dt.datetime
+) -> list[PlayerSnapshotSeed]:
+    """Capture the mutable player state that bootstrap-static overwrites in place."""
+    gameweek_number = _snapshot_gameweek_number(payload)
+
+    return [
+        PlayerSnapshotSeed(
+            player_external_fpl_id=element.id,
+            captured_at=captured_at,
+            gameweek_number=gameweek_number,
+            price=element.now_cost / 10.0,
+            ownership_percent=_parse_float(element.selected_by_percent) or 0.0,
+            transfers_in=element.transfers_in_event,
+            transfers_out=element.transfers_out_event,
+            status=element.status,
+            chance_of_playing_next_round=element.chance_of_playing_next_round,
+            total_minutes=element.minutes,
+            total_points=element.total_points,
+            starts=element.starts,
+            points_per_game=_parse_float(element.points_per_game) or 0.0,
+            form=_parse_float(element.form) or 0.0,
+            expected_goals=_parse_float(element.expected_goals),
+            expected_assists=_parse_float(element.expected_assists),
+        )
+        for element in payload.elements
+    ]
 
 
 def map_fixtures(payload: list[FplFixtureDto]) -> list[FixtureSeed]:
