@@ -67,8 +67,17 @@ class _FakeStatRepository:
         self.stats.extend(stats)
 
 
-def _payload(player_id: int, *, minutes: int, points: int) -> dict[str, object]:
-    return {"elements": [{"id": player_id, "stats": {"minutes": minutes, "total_points": points}}]}
+def _payload(
+    player_id: int, *, minutes: int, points: int, started: bool = True
+) -> dict[str, object]:
+    return {
+        "elements": [
+            {
+                "id": player_id,
+                "stats": {"minutes": minutes, "total_points": points, "starts": int(started)},
+            }
+        ]
+    }
 
 
 @pytest.fixture
@@ -94,6 +103,23 @@ def test_imports_actuals_for_finished_gameweeks(stat_repository: _FakeStatReposi
     assert stat_repository.stats[0].gameweek_id == 201
     assert stat_repository.stats[0].minutes == 90
     assert stat_repository.stats[0].fixture_id is None
+    assert stat_repository.stats[0].started is True
+
+
+def test_records_a_substitute_appearance_as_not_started(
+    stat_repository: _FakeStatRepository,
+) -> None:
+    provider = _FakeProvider({1: _payload(101, minutes=20, points=2, started=False)})
+    service = ImportPlayerStatsService(
+        provider=provider,
+        gameweek_repository=_FakeGameweekRepository([_gameweek(1, finished=True)]),
+        player_repository=_FakePlayerRepository({101: 501}),
+        stat_repository=stat_repository,
+    )
+
+    service.import_finished_gameweeks()
+
+    assert stat_repository.stats[0].started is False
 
 
 def test_ignores_unfinished_gameweeks(stat_repository: _FakeStatRepository) -> None:

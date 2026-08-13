@@ -17,6 +17,8 @@ def test_event_live_fixture_validates_against_schema() -> None:
     assert dto.elements[0].id == 101
     assert dto.elements[0].stats.minutes == 90
     assert dto.elements[0].stats.total_points == 8
+    assert dto.elements[0].stats.starts == 1
+    assert dto.elements[1].stats.starts == 0
 
 
 def test_event_live_schema_accepts_unknown_keys() -> None:
@@ -41,6 +43,7 @@ def test_event_live_schema_defaults_absent_stats_to_zero() -> None:
     assert stats.minutes == 0
     assert stats.total_points == 0
     assert stats.bps == 0
+    assert stats.starts == 0
 
 
 def test_event_live_schema_rejects_an_element_without_an_id() -> None:

@@ -98,6 +98,7 @@ class ImportPlayerStatsService:
                     goals_conceded=seed.goals_conceded,
                     bonus=seed.bonus,
                     bps=seed.bps,
+                    started=seed.started,
                 )
                 for seed in seeds
                 if seed.player_external_fpl_id in player_map

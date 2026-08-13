@@ -78,6 +78,7 @@ class PlayerGameweekStat:
     goals_conceded: int
     bonus: int
     bps: int
+    started: bool = False
     fixture_id: int | None = None
 
 

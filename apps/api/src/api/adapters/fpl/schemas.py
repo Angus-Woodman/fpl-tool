@@ -112,6 +112,7 @@ class FplLiveStatsDto(BaseModel):
     goals_conceded: int = 0
     bonus: int = 0
     bps: int = 0
+    starts: int = 0
 
 
 class FplLiveElementDto(BaseModel):

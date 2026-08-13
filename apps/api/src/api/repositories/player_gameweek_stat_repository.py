@@ -33,6 +33,7 @@ class PlayerGameweekStatRepository:
                     "goals_conceded": stat.goals_conceded,
                     "bonus": stat.bonus,
                     "bps": stat.bps,
+                    "started": stat.started,
                 }
                 for stat in batch
             ]
@@ -50,6 +51,7 @@ class PlayerGameweekStatRepository:
                     "goals_conceded": statement.excluded.goals_conceded,
                     "bonus": statement.excluded.bonus,
                     "bps": statement.excluded.bps,
+                    "started": statement.excluded.started,
                 },
             )
             self._session.execute(statement)

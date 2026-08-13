@@ -22,6 +22,7 @@ def test_maps_a_players_gameweek_return() -> None:
                     "goals_conceded": 1,
                     "bonus": 2,
                     "bps": 34,
+                    "starts": 1,
                 },
             }
         ),
@@ -38,6 +39,17 @@ def test_maps_a_players_gameweek_return() -> None:
     assert seed.goals_conceded == 1
     assert seed.bonus == 2
     assert seed.bps == 34
+    assert seed.started is True
+
+
+def test_distinguishes_a_substitute_appearance_from_a_start() -> None:
+    seeds = map_event_live_stats(
+        _payload({"id": 104, "stats": {"minutes": 23, "starts": 0}}),
+        gameweek_number=1,
+    )
+
+    assert seeds[0].started is False
+    assert seeds[0].minutes == 23
 
 
 def test_returns_nothing_for_an_empty_pre_season_response() -> None:
@@ -62,3 +74,4 @@ def test_defaults_absent_stats_to_zero() -> None:
     assert seed.minutes == 0
     assert seed.goals_scored == 0
     assert seed.bps == 0
+    assert seed.started is False

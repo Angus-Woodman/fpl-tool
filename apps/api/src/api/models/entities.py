@@ -101,6 +101,7 @@ class PlayerGameweekStatModel(Base):
     goals_conceded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     bonus: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     bps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
 
 class PlayerSnapshotModel(Base):

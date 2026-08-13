@@ -85,6 +85,7 @@ class PlayerGameweekStatSeed:
     goals_conceded: int
     bonus: int
     bps: int
+    started: bool
 
 
 _POSITION_MAP: dict[int, PlayerPosition] = {
@@ -250,6 +251,7 @@ def map_event_live_stats(
             goals_conceded=element.stats.goals_conceded,
             bonus=element.stats.bonus,
             bps=element.stats.bps,
+            started=element.stats.starts > 0,
         )
         for element in payload.elements
     ]
