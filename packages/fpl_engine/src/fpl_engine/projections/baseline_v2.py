@@ -8,6 +8,15 @@ from typing import TYPE_CHECKING
 from fpl_engine.domain import PlayerPosition, Projection, ProjectionComponentBreakdown
 from fpl_engine.projections.shrinkage import shrink_rate
 
+# FROZEN for prospective evaluation (see model_version="baseline_v2" below): do
+# not materially change this model's formula, scope, or default parameters
+# under this version. Genuine bug fixes -- behaviour contrary to what this
+# module documents -- are still allowed, and must be called out as such, not
+# blended in with modelling changes. Any material improvement (new scoring
+# components, changed shrinkage/priors logic, etc.) belongs in a new
+# model_version (e.g. "baseline_v2_1" or "component_v3"), so v2's prospective
+# track record stays comparable against a fixed target.
+
 if TYPE_CHECKING:
     # Deferred: fpl_engine.minutes imports fpl_engine.projections.shrinkage, so a
     # runtime import here would be circular. Only used as a type annotation.

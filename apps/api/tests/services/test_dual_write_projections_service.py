@@ -4,6 +4,7 @@ import datetime as dt
 
 import pytest
 from api.services.dual_write_projections import (
+    MAX_MISSING_SNAPSHOT_FRACTION_DEFAULT,
     DualWriteProjectionsService,
     MissingSnapshotCoverageError,
 )
@@ -180,7 +181,7 @@ def _build_service(
     projection_repository: _FakeProjectionRepository,
     run_repository: _FakeRunRepository,
     *,
-    max_missing_snapshot_fraction: float = 0.5,
+    max_missing_snapshot_fraction: float = MAX_MISSING_SNAPSHOT_FRACTION_DEFAULT,
 ) -> DualWriteProjectionsService:
     team_repository = _FakeTeamRepository()
     v1_service = GenerateProjectionsService(
@@ -246,12 +247,22 @@ def test_dual_write_skips_missing_snapshot_players_for_v2_only() -> None:
     fallback-to-player.status behaviour, unchanged."""
     projection_repository = _FakeProjectionRepository()
     run_repository = _FakeRunRepository()
-    service = _build_service(_OnePlayerMissingSnapshot(), projection_repository, run_repository)
+    service = _build_service(
+        _OnePlayerMissingSnapshot(),
+        projection_repository,
+        run_repository,
+        # Isolate the skip behaviour from the coverage-threshold policy, which
+        # has its own dedicated tests below.
+        max_missing_snapshot_fraction=1.0,
+    )
 
     summary = service.execute()
 
     assert summary.v2_players_skipped_missing_snapshot == 1
     assert summary.v2_missing_snapshot_fraction == pytest.approx(1 / 6)
+    assert summary.v2_missing_snapshot_player_ids == (TEAM2_PLAYER_ID,)
+    assert summary.v2_missing_snapshot_warning is not None
+    assert str(TEAM2_PLAYER_ID) in summary.v2_missing_snapshot_warning
     v1_players = {
         p.player_id for p in projection_repository.saved if p.model_version == "baseline_v1"
     }
@@ -274,11 +285,52 @@ def test_dual_write_raises_and_persists_nothing_when_missing_fraction_exceeds_th
         max_missing_snapshot_fraction=0.5,
     )
 
-    with pytest.raises(MissingSnapshotCoverageError):
+    with pytest.raises(MissingSnapshotCoverageError, match=r"player_ids=\(3, 4, 5, 6\)"):
         service.execute()
 
     assert run_repository.created_runs == []
     assert projection_repository.saved == []
+
+
+def test_dual_write_default_threshold_is_strict() -> None:
+    """A normal, complete snapshot generation should cover essentially every
+    player -- the default tolerance is small (2%), not the old 50%."""
+    projection_repository = _FakeProjectionRepository()
+    run_repository = _FakeRunRepository()
+    # 1 missing out of 6 is ~16.7%, comfortably over the real 2% default.
+    service = _build_service(_OnePlayerMissingSnapshot(), projection_repository, run_repository)
+
+    with pytest.raises(MissingSnapshotCoverageError):
+        service.execute()
+
+    assert run_repository.created_runs == []
+
+
+def test_dual_write_no_warning_on_complete_coverage() -> None:
+    run_repository = _FakeRunRepository()
+    service = _build_service(_FakeRepository(), _FakeProjectionRepository(), run_repository)
+
+    summary = service.execute()
+
+    assert summary.v2_missing_snapshot_warning is None
+    assert summary.v2_missing_snapshot_player_ids == ()
+
+
+def test_dual_write_records_missing_player_ids_in_run_parameters() -> None:
+    """So future v1-vs-v2 evaluation can restrict both models to their exact
+    common player universe, not just a count."""
+    run_repository = _FakeRunRepository()
+    service = _build_service(
+        _OnePlayerMissingSnapshot(),
+        _FakeProjectionRepository(),
+        run_repository,
+        max_missing_snapshot_fraction=1.0,
+    )
+
+    service.execute()
+
+    v2_parameters = run_repository.created_runs[1]["parameters"]
+    assert v2_parameters["missing_snapshot_player_ids"] == [TEAM2_PLAYER_ID]  # type: ignore[index]
 
 
 def test_dual_write_resolves_exposure_weighted_priors_from_the_shared_snapshots() -> None:

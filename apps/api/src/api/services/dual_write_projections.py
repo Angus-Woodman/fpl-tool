@@ -40,6 +40,11 @@ from api.services.projection_context import (
     group_players_by_team,
 )
 
+# These defaults are part of what "baseline_v2" means operationally and are
+# frozen alongside the model formula itself (see fpl_engine.projections.baseline_v2):
+# changing them changes v2's real-world output just as much as changing the
+# formula would. A material change here belongs in a new model_version.
+#
 # Configuration-derived assumptions the available data cannot separate out (see
 # fpl_engine.projections.baseline_v2_priors): never computed from aggregates,
 # always a judgment call pending backtesting.
@@ -89,10 +94,15 @@ DEFAULT_PROBABILITY_60_PLUS_BY_ROLE: dict[RoleLabel, float] = {
 }
 DEFAULT_PROBABILITY_60_PLUS_DEFAULT = 0.15
 
-# If more than this fraction of the fixture-relevant player pool has no
-# player_snapshots row in the selected generation, baseline_v2 refuses to run
-# rather than produce a materially incomplete comparison against baseline_v1.
-MAX_MISSING_SNAPSHOT_FRACTION_DEFAULT = 0.5
+# A normal, complete snapshot generation should cover essentially every
+# fixture-relevant player. Missing coverage beyond a couple of players is a
+# fetch/import problem, not something to tolerate quietly:
+#   - 0% missing            -> proceed, no warning.
+#   - 0% < missing <= this  -> proceed, but DualWriteSummary carries an
+#                              explicit warning (never silently absorbed).
+#   - missing > this        -> refuse to run at all, before persisting either
+#                              model's output.
+MAX_MISSING_SNAPSHOT_FRACTION_DEFAULT = 0.02
 
 
 class MissingSnapshotCoverageError(RuntimeError):
@@ -112,6 +122,14 @@ class DualWriteSummary:
     v2_players_considered: int
     v2_players_skipped_missing_snapshot: int
     v2_missing_snapshot_fraction: float
+    # The exact player_ids v2 skipped, so future v1-vs-v2 evaluation can
+    # restrict both models to their common player universe deterministically,
+    # rather than inferring it from a set difference after the fact.
+    v2_missing_snapshot_player_ids: tuple[int, ...]
+    # Set only when 0 < missing_fraction <= max_missing_snapshot_fraction: coverage
+    # was acceptable but not complete, and callers should surface this rather
+    # than silently treat the run as fully clean.
+    v2_missing_snapshot_warning: str | None
 
 
 class DualWriteProjectionsService:
@@ -165,20 +183,35 @@ class DualWriteProjectionsService:
             self._source_repository, self._team_repository
         )
 
+        missing_players = [
+            player for player in context.players if player.id not in context.snapshots_by_player
+        ]
         players_with_snapshot = [
             player for player in context.players if player.id in context.snapshots_by_player
         ]
-        missing_count = len(context.players) - len(players_with_snapshot)
+        missing_count = len(missing_players)
         missing_fraction = missing_count / len(context.players) if context.players else 0.0
+        missing_player_ids = tuple(sorted(player.id for player in missing_players))
 
         if missing_fraction > self._max_missing_snapshot_fraction:
             raise MissingSnapshotCoverageError(
                 f"baseline_v2 refuses to run: {missing_count}/{len(context.players)} "
-                f"fixture-relevant players ({missing_fraction:.1%}) have no "
-                f"player_snapshots row in generation {context.snapshot_generation!r}. "
-                "Never falling back to an older generation for the missing players; "
-                f"the allowed threshold is {self._max_missing_snapshot_fraction:.1%}."
+                f"fixture-relevant players ({missing_fraction:.2%}) have no "
+                f"player_snapshots row in generation {context.snapshot_generation!r}: "
+                f"player_ids={missing_player_ids}. Never falling back to an older "
+                f"generation for the missing players; the allowed threshold is "
+                f"{self._max_missing_snapshot_fraction:.2%}."
             )
+
+        missing_snapshot_warning = (
+            f"{missing_count}/{len(context.players)} fixture-relevant players "
+            f"({missing_fraction:.2%}) have no player_snapshots row in generation "
+            f"{context.snapshot_generation!r} and were skipped for baseline_v2 only "
+            f"(baseline_v1 keeps its existing player.status fallback for them): "
+            f"player_ids={missing_player_ids}."
+            if missing_count > 0
+            else None
+        )
 
         as_of = context.generated_at.date()
         histories = [
@@ -217,7 +250,10 @@ class DualWriteProjectionsService:
             generated_at=context.generated_at,
             gameweeks_covered=gameweeks_covered(context.fixtures),
             parameters=self._build_v2_parameters(
-                priors, missing_count=missing_count, missing_fraction=missing_fraction
+                priors,
+                missing_count=missing_count,
+                missing_fraction=missing_fraction,
+                missing_player_ids=missing_player_ids,
             ),
             team_strength_snapshot=context.team_strength_snapshot,
             player_snapshot_generated_at=context.snapshot_generation,
@@ -281,10 +317,17 @@ class DualWriteProjectionsService:
             v2_players_considered=len(players_with_snapshot),
             v2_players_skipped_missing_snapshot=missing_count,
             v2_missing_snapshot_fraction=missing_fraction,
+            v2_missing_snapshot_player_ids=missing_player_ids,
+            v2_missing_snapshot_warning=missing_snapshot_warning,
         )
 
     def _build_v2_parameters(
-        self, priors: BaselineV2Priors, *, missing_count: int, missing_fraction: float
+        self,
+        priors: BaselineV2Priors,
+        *,
+        missing_count: int,
+        missing_fraction: float,
+        missing_player_ids: tuple[int, ...],
     ) -> dict[str, object]:
         return {
             "model_version": "baseline_v2",
@@ -347,5 +390,6 @@ class DualWriteProjectionsService:
             "probability_60_plus_default": self._probability_60_plus_default,
             "missing_snapshot_players": missing_count,
             "missing_snapshot_fraction": missing_fraction,
+            "missing_snapshot_player_ids": list(missing_player_ids),
             "max_missing_snapshot_fraction": self._max_missing_snapshot_fraction,
         }

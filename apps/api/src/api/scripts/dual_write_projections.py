@@ -55,6 +55,9 @@ def main() -> None:
         },
     )
 
+    if summary.v2_missing_snapshot_warning is not None:
+        logger.warning(summary.v2_missing_snapshot_warning)
+
 
 if __name__ == "__main__":
     main()
