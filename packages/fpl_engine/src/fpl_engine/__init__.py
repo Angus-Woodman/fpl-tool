@@ -1,3 +1,3 @@
-from fpl_engine.optimisation import optimise_squad
+from fpl_engine.optimisation import LineupCandidate, LineupSelection, optimise_lineup
 
-__all__ = ["optimise_squad"]
+__all__ = ["LineupCandidate", "LineupSelection", "optimise_lineup"]

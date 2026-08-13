@@ -1,3 +1,3 @@
-def optimise_squad() -> None:
-    """Placeholder for future optimisation implementation."""
-    return None
+from fpl_engine.optimisation.lineup import LineupCandidate, LineupSelection, optimise_lineup
+
+__all__ = ["LineupCandidate", "LineupSelection", "optimise_lineup"]
