@@ -325,3 +325,53 @@ def test_generate_projections_service_none_snapshot_generation_without_snapshots
     service.execute()
 
     assert runs.created_runs[0]["player_snapshot_generated_at"] is None
+
+
+def test_generate_projections_service_default_execute_matches_shared_context_execute() -> None:
+    """Regression for the shared-context refactor: baseline_v1 must produce
+    identical projections whether it fetches its own context (the original,
+    standalone behaviour) or is handed a pre-fetched context (the path a
+    dual-write orchestrator will use to share one fetch with baseline_v2)."""
+    source_repository = _FakeProjectionGenerationRepository()
+    teams = _FakeTeamRepository()
+
+    sink_default = _FakeProjectionRepository()
+    runs_default = _FakeRunRepository()
+    service_default = _service(
+        source_repository, sink_default, team_repository=teams, run_repository=runs_default
+    )
+
+    sink_shared = _FakeProjectionRepository()
+    runs_shared = _FakeRunRepository()
+    service_shared = _service(
+        source_repository, sink_shared, team_repository=teams, run_repository=runs_shared
+    )
+    context = service_shared.fetch_context()
+
+    summary_default = service_default.execute()
+    summary_shared = service_shared.execute(context)
+
+    assert summary_default.projections_generated == summary_shared.projections_generated
+    assert summary_default.fixtures_considered == summary_shared.fixtures_considered
+    assert summary_default.players_considered == summary_shared.players_considered
+    assert summary_default.model_version == summary_shared.model_version
+
+    assert (
+        runs_default.created_runs[0]["team_strength_snapshot"]
+        == (runs_shared.created_runs[0]["team_strength_snapshot"])
+    )
+    assert (
+        runs_default.created_runs[0]["player_snapshot_generated_at"]
+        == (runs_shared.created_runs[0]["player_snapshot_generated_at"])
+    )
+
+    # generated_at is intentionally excluded from the comparison: each fetch
+    # stamps its own "now", by design.
+    for default_projection, shared_projection in zip(
+        sink_default.saved, sink_shared.saved, strict=True
+    ):
+        assert default_projection.player_id == shared_projection.player_id
+        assert default_projection.fixture_id == shared_projection.fixture_id
+        assert default_projection.projected_points == shared_projection.projected_points
+        assert default_projection.expected_minutes == shared_projection.expected_minutes
+        assert default_projection.components == shared_projection.components

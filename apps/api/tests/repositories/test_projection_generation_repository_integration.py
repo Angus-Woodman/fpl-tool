@@ -129,3 +129,32 @@ def test_list_snapshots_for_generation_returns_empty_for_no_players(db_session: 
     repository = ProjectionGenerationRepository(db_session)
 
     assert repository.list_snapshots_for_generation(set(), GENERATION_ONE) == []
+
+
+def test_list_snapshots_for_generation_includes_baseline_v2_fields(db_session: Session) -> None:
+    """baseline_v2's prior engine and per-player inputs both read these fields --
+    they must round-trip, not silently default to 0/None."""
+    saka_id, _ = _seed(db_session)
+    snapshot = _snapshot(saka_id, GENERATION_ONE, price=10.0)
+    snapshot.total_minutes = 2850
+    snapshot.starts = 32
+    snapshot.expected_goals = 12.5
+    snapshot.expected_assists = 9.0
+    snapshot.expected_goals_per_90 = 0.4
+    snapshot.expected_assists_per_90 = 0.28
+    snapshot.team_join_date = dt.date(2019, 7, 1)
+    db_session.add(snapshot)
+    db_session.commit()
+    repository = ProjectionGenerationRepository(db_session)
+
+    snapshots = repository.list_snapshots_for_generation({saka_id}, GENERATION_ONE)
+
+    assert len(snapshots) == 1
+    result = snapshots[0]
+    assert result.total_minutes == 2850
+    assert result.starts == 32
+    assert result.expected_goals == 12.5
+    assert result.expected_assists == 9.0
+    assert result.expected_goals_per_90 == 0.4
+    assert result.expected_assists_per_90 == 0.28
+    assert result.team_join_date == dt.date(2019, 7, 1)

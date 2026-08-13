@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Protocol
 
 from fpl_engine.domain import (
-    Fixture,
-    Player,
-    PlayerGameweekStat,
     PlayerPosition,
-    PlayerSnapshot,
     Projection,
 )
 from fpl_engine.projections import BaselineProjectionModel, ProjectionInput
 
-from api.repositories.team_read_repository import TeamReadItem
+from api.services.projection_context import (
+    RECENT_STATS_LIMIT,
+    ProjectionGenerationContext,
+    ProjectionSourceRepositoryPort,
+    TeamStrengthRepositoryPort,
+    fetch_projection_generation_context,
+    gameweeks_covered,
+    group_players_by_team,
+)
 
 DEFAULT_POINTS_PER_MINUTE: dict[PlayerPosition, float] = {
     PlayerPosition.GOALKEEPER: 0.045,
@@ -27,29 +30,10 @@ DEFAULT_POINTS_PER_MINUTE: dict[PlayerPosition, float] = {
 
 HOME_FIXTURE_MULTIPLIER = 1.05
 AWAY_FIXTURE_MULTIPLIER = 0.95
-RECENT_STATS_LIMIT = 3
-
-
-class ProjectionGenerationRepositoryPort(Protocol):
-    def list_upcoming_fixtures(self) -> list[Fixture]: ...
-
-    def list_players_for_team_ids(self, team_ids: set[int]) -> list[Player]: ...
-
-    def list_recent_stats(self, player_ids: set[int]) -> list[PlayerGameweekStat]: ...
-
-    def get_latest_snapshot_generation(self) -> dt.datetime | None: ...
-
-    def list_snapshots_for_generation(
-        self, player_ids: set[int], generated_at: dt.datetime
-    ) -> list[PlayerSnapshot]: ...
 
 
 class ProjectionRepositoryPort(Protocol):
     def upsert_many(self, projections: list[Projection]) -> None: ...
-
-
-class TeamStrengthRepositoryPort(Protocol):
-    def list_teams(self) -> list[TeamReadItem]: ...
 
 
 class ProjectionRunRepositoryPort(Protocol):
@@ -72,12 +56,13 @@ class GenerateProjectionsSummary:
     players_considered: int
     model_version: str
     generated_at: dt.datetime
+    run_id: int | None = None
 
 
 class GenerateProjectionsService:
     def __init__(
         self,
-        source_repository: ProjectionGenerationRepositoryPort,
+        source_repository: ProjectionSourceRepositoryPort,
         projection_repository: ProjectionRepositoryPort,
         team_repository: TeamStrengthRepositoryPort,
         run_repository: ProjectionRunRepositoryPort,
@@ -89,38 +74,34 @@ class GenerateProjectionsService:
         self._run_repository = run_repository
         self._model = model or BaselineProjectionModel()
 
-    def execute(self) -> GenerateProjectionsSummary:
-        generated_at = dt.datetime.now(dt.UTC)
-        fixtures = self._source_repository.list_upcoming_fixtures()
-        team_ids = {
-            team_id
-            for fixture in fixtures
-            for team_id in (fixture.home_team_id, fixture.away_team_id)
-        }
-        players = self._source_repository.list_players_for_team_ids(team_ids)
-        players_by_team = self._group_players_by_team(players)
+    def fetch_context(self) -> ProjectionGenerationContext:
+        """Fetches everything this model needs in one pass, so a dual-write caller
+        can fetch once and feed the identical context to both baseline_v1 and
+        baseline_v2."""
+        return fetch_projection_generation_context(self._source_repository, self._team_repository)
 
-        player_ids = {player.id for player in players}
-        recent_stats_by_player = self._group_recent_stats(
-            self._source_repository.list_recent_stats(player_ids)
-        )
-        snapshot_generation = self._source_repository.get_latest_snapshot_generation()
-        snapshots = (
-            self._source_repository.list_snapshots_for_generation(player_ids, snapshot_generation)
-            if snapshot_generation is not None
-            else []
-        )
-        snapshots_by_player = {snapshot.player_id: snapshot for snapshot in snapshots}
+    def execute(
+        self, context: ProjectionGenerationContext | None = None
+    ) -> GenerateProjectionsSummary:
+        """Passing no context preserves this model's original, standalone
+        behaviour exactly: fetch fresh, generate, persist. Passing a context
+        (built via fetch_context(), typically shared with baseline_v2) skips the
+        fetch and uses the supplied data instead."""
+        if context is None:
+            context = self.fetch_context()
+
+        generated_at = context.generated_at
+        fixtures = context.fixtures
+        players = context.players
+        players_by_team = group_players_by_team(players)
 
         run_id = self._run_repository.create(
             model_version=self._model.model_version,
             generated_at=generated_at,
-            gameweeks_covered=sorted(
-                {fixture.gameweek_id for fixture in fixtures if fixture.gameweek_id is not None}
-            ),
+            gameweeks_covered=gameweeks_covered(fixtures),
             parameters=self._build_parameters(),
-            team_strength_snapshot=self._build_team_strength_snapshot(),
-            player_snapshot_generated_at=snapshot_generation,
+            team_strength_snapshot=context.team_strength_snapshot,
+            player_snapshot_generated_at=context.snapshot_generation,
         )
 
         projections: list[Projection] = []
@@ -129,7 +110,7 @@ class GenerateProjectionsService:
                 fixture.away_team_id, []
             )
             for player in fixture_players:
-                player_stats = recent_stats_by_player.get(player.id, [])
+                player_stats = context.recent_stats_by_player.get(player.id, [])
                 recent_minutes = tuple(stat.minutes for stat in player_stats[:RECENT_STATS_LIMIT])
                 total_minutes = sum(stat.minutes for stat in player_stats[:RECENT_STATS_LIMIT])
                 total_points = sum(stat.total_points for stat in player_stats[:RECENT_STATS_LIMIT])
@@ -138,7 +119,7 @@ class GenerateProjectionsService:
                     if total_minutes > 0
                     else DEFAULT_POINTS_PER_MINUTE[player.position]
                 )
-                snapshot = snapshots_by_player.get(player.id)
+                snapshot = context.snapshots_by_player.get(player.id)
                 availability_status = snapshot.status if snapshot is not None else player.status
                 chance = snapshot.chance_of_playing_next_round if snapshot is not None else None
                 fixture_multiplier = (
@@ -175,22 +156,8 @@ class GenerateProjectionsService:
             players_considered=len(players),
             model_version=self._model.model_version,
             generated_at=generated_at,
+            run_id=run_id,
         )
-
-    def _group_players_by_team(self, players: list[Player]) -> dict[int, list[Player]]:
-        grouped: dict[int, list[Player]] = defaultdict(list)
-        for player in players:
-            grouped[player.team_id].append(player)
-        return grouped
-
-    def _group_recent_stats(
-        self, stats: list[PlayerGameweekStat]
-    ) -> dict[int, list[PlayerGameweekStat]]:
-        grouped: dict[int, list[PlayerGameweekStat]] = defaultdict(list)
-        for stat in stats:
-            if len(grouped[stat.player_id]) < RECENT_STATS_LIMIT:
-                grouped[stat.player_id].append(stat)
-        return grouped
 
     def _build_parameters(self) -> dict[str, object]:
         return {
@@ -201,14 +168,4 @@ class GenerateProjectionsService:
             "recent_stats_limit": RECENT_STATS_LIMIT,
             "home_fixture_multiplier": HOME_FIXTURE_MULTIPLIER,
             "away_fixture_multiplier": AWAY_FIXTURE_MULTIPLIER,
-        }
-
-    def _build_team_strength_snapshot(self) -> dict[str, object]:
-        return {
-            str(team.id): {
-                "source_difficulty": team.source_difficulty,
-                "override": team.difficulty_override,
-                "effective_difficulty": team.difficulty,
-            }
-            for team in self._team_repository.list_teams()
         }

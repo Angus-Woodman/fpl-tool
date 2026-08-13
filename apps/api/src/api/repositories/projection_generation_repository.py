@@ -160,6 +160,13 @@ class ProjectionGenerationRepository:
                 PlayerSnapshotModel.transfers_out,
                 PlayerSnapshotModel.status,
                 PlayerSnapshotModel.chance_of_playing_next_round,
+                PlayerSnapshotModel.total_minutes,
+                PlayerSnapshotModel.starts,
+                PlayerSnapshotModel.expected_goals,
+                PlayerSnapshotModel.expected_assists,
+                PlayerSnapshotModel.expected_goals_per_90,
+                PlayerSnapshotModel.expected_assists_per_90,
+                PlayerSnapshotModel.team_join_date,
             ).where(
                 PlayerSnapshotModel.player_id.in_(player_ids),
                 PlayerSnapshotModel.captured_at == generated_at,
@@ -177,6 +184,13 @@ class ProjectionGenerationRepository:
                 transfers_out=row[6],
                 status=row[7],
                 chance_of_playing_next_round=row[8],
+                total_minutes=row[9],
+                starts=row[10],
+                expected_goals=row[11],
+                expected_assists=row[12],
+                expected_goals_per_90=row[13],
+                expected_assists_per_90=row[14],
+                team_join_date=row[15],
             )
             for row in rows
         ]
