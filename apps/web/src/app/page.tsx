@@ -1,17 +1,14 @@
 import { HealthCard } from "@/components/health-card";
+import { PageHeader } from "@/components/layout/page-header";
 import Link from "next/link";
 
 export default function HomePage(): JSX.Element {
   return (
-    <main className="mx-auto min-h-screen max-w-5xl p-6 sm:p-10">
-      <header className="mb-10">
-        <h1 className="text-4xl font-bold tracking-tight">
-          FPL Decision Support
-        </h1>
-        <p className="mt-2 max-w-2xl text-slate-700">
-          Phase 0 foundation: a local-first stack with typed API, isolated
-          domain engine, and test-first engineering.
-        </p>
+    <>
+      <PageHeader
+        title="FPL Decision Support"
+        description="Phase 0 foundation: a local-first stack with typed API, isolated domain engine, and test-first engineering."
+      >
         <div className="mt-4 flex flex-wrap gap-3">
           <Link
             href="/my-team"
@@ -32,8 +29,8 @@ export default function HomePage(): JSX.Element {
             Open Fixture Ticker
           </Link>
         </div>
-      </header>
+      </PageHeader>
       <HealthCard />
-    </main>
+    </>
   );
 }

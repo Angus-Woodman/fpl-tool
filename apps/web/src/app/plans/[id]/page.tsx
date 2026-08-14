@@ -10,13 +10,14 @@ export default async function PlanDetailPage({
   const { id } = await params;
 
   return (
-    <main className="mx-auto min-h-screen max-w-6xl p-6 sm:p-10">
+    <>
       <header className="mb-6">
         <Link href="/plans" className="text-sm text-slate-700 underline">
           Back to plans
         </Link>
       </header>
       <PlanBoard planId={Number(id)} />
-    </main>
+    </>
   );
 }
+
