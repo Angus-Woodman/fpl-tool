@@ -200,4 +200,5 @@ def get_my_team_recommendation(
         captain=result.captain,
         vice_captain=result.vice_captain,
         player_projected_points=result.player_projected_points,
+        current_captain_adjusted_points=result.current_captain_adjusted_points,
     )

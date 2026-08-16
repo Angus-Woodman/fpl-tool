@@ -1,7 +1,29 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { MyTeamRecommendationResponse } from "@/lib/api";
 import { MyTeamBoard } from "@/components/team/my-team-board";
+
+function buildRecommendationResponse(): MyTeamRecommendationResponse {
+  return {
+    model_version: "component_v3",
+    projection_run_id: 42,
+    generated_at: "2026-08-16T08:10:00+00:00",
+    target_gameweek_number: 2,
+    starting_xi_points: 40.0,
+    captain_adjusted_points: 44.5,
+    starting_xi: [1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14],
+    bench_goalkeeper: 2,
+    bench_outfield: [7, 12, 15],
+    captain: 13,
+    vice_captain: 14,
+    player_projected_points: {
+      "1": 4.0, "3": 4.0, "4": 4.0, "5": 4.0, "6": 4.0, "8": 4.0, "9": 4.0,
+      "10": 4.0, "11": 4.0, "13": 4.5, "14": 4.0, "2": 2.0, "7": 2.0, "12": 2.0, "15": 2.0,
+    },
+    current_captain_adjusted_points: 39.5,
+  };
+}
 
 function buildFullSquadResponse() {
   const players = [
@@ -72,6 +94,9 @@ describe("MyTeamBoard", () => {
       if (url.endsWith("/teams")) {
         return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
       }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
+      }
       return { ok: true, json: async () => buildFullSquadResponse() } as Response;
     });
 
@@ -90,6 +115,9 @@ describe("MyTeamBoard", () => {
       const url = String(input);
       if (url.endsWith("/teams")) {
         return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
+      }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
       }
       return { ok: true, json: async () => buildFullSquadResponse() } as Response;
     });
@@ -120,6 +148,9 @@ describe("MyTeamBoard", () => {
       }
       if (url.endsWith("/my-team") && init?.method === "PUT") {
         return { ok: true, json: async () => squadResponse } as Response;
+      }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
       }
       throw new Error(`Unexpected fetch call: ${url}`);
     });
@@ -191,6 +222,9 @@ describe("MyTeamBoard", () => {
             : [];
         return { ok: true, json: async () => ({ items, total: items.length, page: 1, page_size: 60 }) } as Response;
       }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
+      }
       throw new Error(`Unexpected fetch call: ${url}`);
     });
 
@@ -248,6 +282,9 @@ describe("MyTeamBoard", () => {
             total: 2,
           }),
         } as Response;
+      }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
       }
       return { ok: true, json: async () => squadResponse } as Response;
     });
@@ -307,6 +344,9 @@ describe("MyTeamBoard", () => {
           }),
         } as Response;
       }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
+      }
       throw new Error(`Unexpected fetch call: ${url}`);
     });
 
@@ -345,6 +385,10 @@ describe("MyTeamBoard", () => {
       } as Response;
     });
 
+    // recommendation intentionally left unmocked; the empty-squad view never
+    // triggers a recommendation fetch since it renders before any player data
+    // is available.
+
     render(<MyTeamBoard />);
 
     await waitFor(() => {
@@ -352,4 +396,112 @@ describe("MyTeamBoard", () => {
       expect(screen.getByRole("button", { name: "Create Starter Squad" })).toBeInTheDocument();
     });
   });
+
+  it("renders the recommendation summary and lets the user switch between Current and Recommended", async () => {
+    const squadResponse = buildFullSquadResponse();
+    const recommendationResponse = buildRecommendationResponse();
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
+      }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: true, json: async () => recommendationResponse } as Response;
+      }
+      return { ok: true, json: async () => squadResponse } as Response;
+    });
+
+    render(<MyTeamBoard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("GW 2")).toBeInTheDocument();
+      expect(screen.getByText(/component_v3 · generated/)).toBeInTheDocument();
+    });
+
+    // Current view is shown by default, with the existing Starting XI/Bench headings.
+    expect(screen.getByText("Starting XI")).toBeInTheDocument();
+    expect(screen.getByText("Bench")).toBeInTheDocument();
+    expect(screen.queryByText("Recommended Starting XI")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Recommended" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Recommended Starting XI")).toBeInTheDocument();
+      expect(screen.getByText("Recommended Bench")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Starting XI")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Current" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Starting XI")).toBeInTheDocument();
+    });
+  });
+
+  it("never issues a PUT to persist the squad merely from loading a recommendation", async () => {
+    const squadResponse = buildFullSquadResponse();
+    const recommendationResponse = buildRecommendationResponse();
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
+      }
+      if (url.endsWith("/my-team/recommendation")) {
+        return { ok: true, json: async () => recommendationResponse } as Response;
+      }
+      return { ok: true, json: async () => squadResponse } as Response;
+    });
+
+    render(<MyTeamBoard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("GW 2")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Recommended" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Recommended Starting XI")).toBeInTheDocument();
+    });
+
+    const putCalls = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(putCalls).toHaveLength(0);
+  });
+
+  it("shows the structured 422 failure when squad players are missing projections", async () => {
+    const squadResponse = buildFullSquadResponse();
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/teams")) {
+        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
+      }
+      if (url.endsWith("/my-team/recommendation")) {
+        return {
+          ok: false,
+          status: 422,
+          json: async () => ({
+            detail: {
+              code: "missing_player_projections",
+              message: "1 squad player(s) have no component_v3 projection in run 42",
+              missing_player_ids: [9],
+            },
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => squadResponse } as Response;
+    });
+
+    render(<MyTeamBoard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("1 squad player(s) have no component_v3 projection in run 42"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("Missing projections for: MID Two.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Recommended" })).toBeDisabled();
+  });
 });
+

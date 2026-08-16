@@ -271,6 +271,19 @@ class TestOptimiserWiring:
         assert result is not None
         assert result.captain_adjusted_points == result.starting_xi_points + 4.5
 
+    def test_current_captain_adjusted_points_scores_the_currently_saved_selection(self) -> None:
+        # The currently saved squad (from _squad()) starts {1,3,4,5,8,9,10,12,
+        # 13,14,15} captained by 8 (3.5 xPts): starting total 34.0 + captain
+        # bonus 3.5 == 37.5. This must come from fpl_engine's own scoring,
+        # not a value recomputed by this test independently of the service.
+        service, _, _ = _service(squad=_squad(), run=_run(1), rows_by_run={1: _rows_for_run(1)})
+
+        result = service.execute()
+
+        assert not isinstance(result, MyTeamRecommendationFailure)
+        assert result is not None
+        assert result.current_captain_adjusted_points == 37.5
+
 
 class TestMissingProjections:
     def test_a_squad_player_missing_from_the_target_gameweek_is_an_explicit_failure(self) -> None:

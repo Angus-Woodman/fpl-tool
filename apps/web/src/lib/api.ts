@@ -128,6 +128,36 @@ export type ProjectionRefreshResponse = {
   generated_at: string;
 };
 
+export type MyTeamRecommendationResponse = {
+  model_version: string;
+  projection_run_id: number;
+  generated_at: string;
+  target_gameweek_number: number;
+  starting_xi_points: number;
+  captain_adjusted_points: number;
+  starting_xi: number[];
+  bench_goalkeeper: number;
+  bench_outfield: number[];
+  captain: number;
+  vice_captain: number;
+  // JSON object keys are always strings, even though the backend's
+  // dict[int, float] logically keys by player id.
+  player_projected_points: Record<string, number>;
+  current_captain_adjusted_points: number;
+};
+
+export class MyTeamRecommendationUnavailableError extends Error {
+  readonly code: string;
+  readonly missingPlayerIds: number[];
+
+  constructor(code: string, message: string, missingPlayerIds: number[]) {
+    super(message);
+    this.name = "MyTeamRecommendationUnavailableError";
+    this.code = code;
+    this.missingPlayerIds = missingPlayerIds;
+  }
+}
+
 export type PlanChip = "WILDCARD" | "FREE_HIT" | "BENCH_BOOST" | "TRIPLE_CAPTAIN";
 
 export type PlanSummary = {
@@ -329,6 +359,28 @@ export async function refreshProjections(): Promise<ProjectionRefreshResponse> {
   }
 
   return (await response.json()) as ProjectionRefreshResponse;
+}
+
+export async function fetchMyTeamRecommendation(): Promise<MyTeamRecommendationResponse | null> {
+  const response = await fetch(`${API_BASE_URL}/my-team/recommendation`);
+  if (response.status === 404) {
+    return null;
+  }
+  if (response.status === 422) {
+    const body = (await response.json()) as {
+      detail?: { code?: string; message?: string; missing_player_ids?: number[] };
+    };
+    throw new MyTeamRecommendationUnavailableError(
+      body.detail?.code ?? "recommendation_unavailable",
+      body.detail?.message ?? "The recommendation could not be computed",
+      body.detail?.missing_player_ids ?? [],
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`My team recommendation request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as MyTeamRecommendationResponse;
 }
 
 async function readPlanResponse(response: Response, action: string): Promise<PlanResponse> {

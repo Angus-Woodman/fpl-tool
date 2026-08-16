@@ -4,17 +4,27 @@ import { useEffect, useState } from "react";
 
 import {
   MyTeamPlayerItem,
+  MyTeamRecommendationResponse,
+  MyTeamRecommendationUnavailableError,
   MyTeamResponse,
   PlayerItem,
   SaveMyTeamRequest,
   SaveMyTeamPlayerSelection,
   TeamItem,
   fetchMyTeam,
+  fetchMyTeamRecommendation,
   fetchPlayers,
   fetchTeams,
   refreshProjections,
   saveMyTeam,
 } from "@/lib/api";
+import { Bench } from "@/components/team/bench";
+import { opponentLabelForGameweek, pointsForGameweek } from "@/components/team/projection-helpers";
+import { RecommendationSummary, RecommendationState, ViewMode } from "@/components/team/recommendation-summary";
+import { RecommendedSquadView } from "@/components/team/recommended-squad-view";
+import { SquadPitch } from "@/components/team/squad-pitch";
+import { SquadPlayerCard } from "@/components/team/squad-player-card";
+import { POSITION_ORDER, type Position } from "@/components/team/types";
 
 type LoadState =
   | { type: "loading" }
@@ -39,11 +49,9 @@ type RefreshState =
   | { type: "success"; message: string }
   | { type: "error"; message: string };
 
-type Position = "GK" | "DEF" | "MID" | "FWD";
 type OptimiseMode = "none" | "xpts" | "difficulty";
 
 const BUDGET_CAP = 100;
-const POSITION_ORDER: Position[] = ["GK", "DEF", "MID", "FWD"];
 const VALID_FORMATIONS = [
   { DEF: 3, MID: 4, FWD: 3 },
   { DEF: 3, MID: 5, FWD: 2 },
@@ -54,6 +62,7 @@ const VALID_FORMATIONS = [
   { DEF: 5, MID: 3, FWD: 2 },
   { DEF: 5, MID: 4, FWD: 1 },
 ];
+
 
 const POSITION_COUNTS = {
   GK: 2,
@@ -142,7 +151,7 @@ function buildStarterSquad(playersByPosition: Record<Position, PlayerItem[]>): S
   };
 }
 
-function badgeLabel(isCaptain: boolean, isViceCaptain: boolean): string | null {
+function badgeLabel(isCaptain: boolean, isViceCaptain: boolean): "C" | "VC" | null {
   if (isCaptain) {
     return "C";
   }
@@ -168,35 +177,6 @@ function draftFromTeam(team: MyTeamResponse): SaveMyTeamRequest {
 
 function selectionMap(players: SaveMyTeamPlayerSelection[]): Map<number, SaveMyTeamPlayerSelection> {
   return new Map(players.map((player) => [player.player_id, player]));
-}
-
-function pointsForGameweek(player: MyTeamPlayerItem, gameweek: number): number {
-  return player.fixture_projections
-    .filter((fixture) => fixture.gameweek_number === gameweek)
-    .reduce((sum, fixture) => sum + fixture.projected_points, 0);
-}
-
-function opponentLabelForGameweek(player: MyTeamPlayerItem, gameweek: number): string {
-  const fixtures = player.fixture_projections
-    .filter((fixture) => fixture.gameweek_number === gameweek)
-    .map((fixture) => {
-      if (fixture.opponent_team_short_name === null) {
-        return "TBD";
-      }
-      if (fixture.is_home === true) {
-        return `${fixture.opponent_team_short_name} (H)`;
-      }
-      if (fixture.is_home === false) {
-        return `${fixture.opponent_team_short_name} (A)`;
-      }
-      return fixture.opponent_team_short_name;
-    });
-
-  if (fixtures.length === 0) {
-    return "-";
-  }
-
-  return fixtures.join(", ");
 }
 
 function validateStartingLineup(
@@ -454,6 +434,32 @@ export function MyTeamBoard(): JSX.Element {
   const [transferChoicePlayerId, setTransferChoicePlayerId] = useState<number | null>(null);
   const [transferSavingPlayerId, setTransferSavingPlayerId] = useState<number | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
+  const [recommendation, setRecommendation] = useState<RecommendationState>({ type: "loading" });
+  const [viewMode, setViewMode] = useState<ViewMode>("current");
+
+  async function loadRecommendation(): Promise<void> {
+    setRecommendation({ type: "loading" });
+    try {
+      const data = await fetchMyTeamRecommendation();
+      if (data === null) {
+        setRecommendation({ type: "no_squad" });
+        return;
+      }
+      setRecommendation({ type: "ready", data });
+    } catch (error) {
+      if (error instanceof MyTeamRecommendationUnavailableError) {
+        setRecommendation({
+          type: "unavailable",
+          code: error.code,
+          message: error.message,
+          missingPlayerIds: error.missingPlayerIds,
+        });
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Failed to load recommendation";
+      setRecommendation({ type: "error", message });
+    }
+  }
 
   async function loadMyTeam(): Promise<MyTeamResponse | null> {
     try {
@@ -531,6 +537,10 @@ export function MyTeamBoard(): JSX.Element {
     };
   }, []);
 
+  useEffect(() => {
+    void loadRecommendation();
+  }, []);
+
   async function handleCreateStarterSquad(): Promise<void> {
     setCreateState({ type: "saving" });
     try {
@@ -562,6 +572,7 @@ export function MyTeamBoard(): JSX.Element {
     try {
       const summary = await refreshProjections();
       await loadMyTeam();
+      await loadRecommendation();
       setRefreshState({
         type: "success",
         message: `Refreshed xPts (${summary.projections_generated} projections).`,
@@ -759,6 +770,17 @@ export function MyTeamBoard(): JSX.Element {
   const playersById = new Map(loadedTeam.players.map((player) => [player.player_id, player]));
   const difficultyByShortName = new Map(teams.map((team) => [team.short_name, team.difficulty]));
 
+  const recommendationMissingPlayerNames =
+    recommendation.type === "unavailable"
+      ? recommendation.missingPlayerIds.map((id) => playersById.get(id)?.web_name ?? `#${id}`)
+      : [];
+  const recommendationCaptainName =
+    recommendation.type === "ready" ? playersById.get(recommendation.data.captain)?.web_name : undefined;
+  const recommendationViceCaptainName =
+    recommendation.type === "ready"
+      ? playersById.get(recommendation.data.vice_captain)?.web_name
+      : undefined;
+
   const gameweekNumbers = loadedTeam.gameweek_numbers;
   const currentGameweek = gameweekNumbers[selectedGameweekIndex] ?? null;
 
@@ -919,6 +941,110 @@ export function MyTeamBoard(): JSX.Element {
     }
   }
 
+  function renderEditControls(
+    row: { player: MyTeamPlayerItem; selection: SaveMyTeamPlayerSelection },
+    options: { showSwap: boolean }
+  ): React.ReactNode {
+    if (!(activeDraft && optimiseMode === "none")) {
+      return null;
+    }
+
+    return (
+      <div className="mt-3 space-y-2 text-xs text-slate-700">
+        <div className="flex flex-wrap gap-2">
+          {options.showSwap && (
+            <button
+              type="button"
+              aria-label={`Swap ${row.player.web_name} with bench`}
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
+              onClick={() => {
+                const isOpen = swapTargetStarterId === row.player.player_id;
+                setSwapTargetStarterId(isOpen ? null : row.player.player_id);
+                setSwapChoiceBenchId(null);
+              }}
+            >
+              Swap With Bench
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label={`Transfer ${row.player.web_name}`}
+            className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
+            onClick={() => handleOpenTransfer(row.player.player_id)}
+          >
+            Transfer
+          </button>
+        </div>
+
+        {options.showSwap && swapTargetStarterId === row.player.player_id && (
+          <div className="space-y-2">
+            <label className="block">
+              Bench Player
+              <select
+                aria-label={`Bench Player for ${row.player.web_name}`}
+                className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1"
+                value={swapChoiceBenchId ?? ""}
+                onChange={(event) => setSwapChoiceBenchId(Number(event.target.value))}
+              >
+                <option value="">Select bench player</option>
+                {eligibleBenchOptionsForStarter(row.player.player_id).map((benchPlayer) => (
+                  <option key={benchPlayer.player_id} value={benchPlayer.player_id}>
+                    {benchPlayer.web_name} ({benchPlayer.position})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-white hover:bg-emerald-500 disabled:opacity-50"
+              disabled={swapChoiceBenchId === null}
+              onClick={() => {
+                if (swapChoiceBenchId !== null) {
+                  applyStarterBenchSwap(row.player.player_id, swapChoiceBenchId);
+                }
+              }}
+            >
+              Confirm Swap
+            </button>
+          </div>
+        )}
+
+        {transferTargetPlayerId === row.player.player_id && (
+          <div className="space-y-2">
+            <label className="block">
+              Replacement Player
+              <select
+                aria-label={`Replacement Player for ${row.player.web_name}`}
+                className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1"
+                value={transferChoicePlayerId ?? ""}
+                disabled={transferPlayerPool === null}
+                onChange={(event) => setTransferChoicePlayerId(Number(event.target.value))}
+              >
+                <option value="">
+                  {transferPlayerPool === null ? "Loading players..." : "Select replacement"}
+                </option>
+                {eligibleTransferOptions(row.player).map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.web_name} ({candidate.team_short_name}) £{candidate.current_price.toFixed(1)}m
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-white hover:bg-emerald-500 disabled:opacity-50"
+              disabled={transferChoicePlayerId === null || transferSavingPlayerId === row.player.player_id}
+              onClick={() => void handleConfirmTransfer(row.player.player_id)}
+            >
+              {transferSavingPlayerId === row.player.player_id ? "Saving..." : "Confirm Transfer"}
+            </button>
+            {transferError && <p className="text-red-700">{transferError}</p>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
@@ -968,317 +1094,144 @@ export function MyTeamBoard(): JSX.Element {
         </div>
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
-          disabled={selectedGameweekIndex <= 0}
-          onClick={() => setSelectedGameweekIndex((value) => Math.max(0, value - 1))}
-        >
-          Previous Game
-        </button>
-        <span className="text-sm font-medium text-slate-700">
-          {currentGameweek !== null ? `Gameweek ${currentGameweek}` : "No gameweek data"}
-        </span>
-        <button
-          type="button"
-          className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
-          disabled={selectedGameweekIndex >= gameweekNumbers.length - 1}
-          onClick={() =>
-            setSelectedGameweekIndex((value) => Math.min(gameweekNumbers.length - 1, value + 1))
-          }
-        >
-          Next Game
-        </button>
+      <RecommendationSummary
+        state={recommendation}
+        captainName={recommendationCaptainName}
+        viceCaptainName={recommendationViceCaptainName}
+        missingPlayerNames={recommendationMissingPlayerNames}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        onRefreshProjections={() => void handleRefreshPoints()}
+        refreshing={refreshState.type === "running"}
+      />
 
-        <label className="ml-auto flex items-center gap-2 text-sm text-slate-700">
-          Optimise starting 11 by
-          <select
-            aria-label="Optimise starting 11 by"
-            className="rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
-            value={optimiseMode}
-            onChange={(event) => {
-              setOptimiseMode(event.target.value as OptimiseMode);
-              setSwapTargetStarterId(null);
-              setSwapChoiceBenchId(null);
-            }}
-          >
-            <option value="none">None</option>
-            <option value="xpts">xPts</option>
-            <option value="difficulty">Fixture difficulty</option>
-          </select>
-        </label>
-      </div>
-
-      {refreshState.type === "success" && <p className="mb-4 text-sm text-emerald-700">{refreshState.message}</p>}
-      {refreshState.type === "error" && <p className="mb-4 text-sm text-red-700">{refreshState.message}</p>}
-      {editState.type === "error" && <p className="mb-4 text-sm text-red-700">{editState.message}</p>}
-
-      <div className="mb-5 grid gap-3 sm:grid-cols-3">
-        {projectionCards.map((card) => (
-          <article key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              {card.label}
-            </p>
-            <p className="mt-2 text-2xl font-semibold text-slate-900">
-              {card.value?.toFixed(1) ?? "-"}
-            </p>
-          </article>
-        ))}
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
-        <div>
-          <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
-            Starting XI
-          </h3>
-          <div className="space-y-5">
-            {POSITION_ORDER.map((position) => {
-              const rows = startersByPosition.get(position) ?? [];
-              if (rows.length === 0) {
-                return null;
+      {viewMode === "recommended" ? (
+        recommendation.type === "ready" ? (
+          <RecommendedSquadView recommendation={recommendation.data} players={loadedTeam.players} />
+        ) : (
+          <p className="text-sm text-slate-600">
+            The recommended team will appear here once a recommendation is available.
+          </p>
+        )
+      ) : (
+        <>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+              disabled={selectedGameweekIndex <= 0}
+              onClick={() => setSelectedGameweekIndex((value) => Math.max(0, value - 1))}
+            >
+              Previous Game
+            </button>
+            <span className="text-sm font-medium text-slate-700">
+              {currentGameweek !== null ? `Gameweek ${currentGameweek}` : "No gameweek data"}
+            </span>
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+              disabled={selectedGameweekIndex >= gameweekNumbers.length - 1}
+              onClick={() =>
+                setSelectedGameweekIndex((value) => Math.min(gameweekNumbers.length - 1, value + 1))
               }
+            >
+              Next Game
+            </button>
 
-              return (
-                <section key={`starters-${position}`}>
-                  <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    {position}
-                  </h4>
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {rows.map((row) => {
-                      const badge = badgeLabel(row.selection.is_captain, row.selection.is_vice_captain);
-                      const gwPoints =
-                        currentGameweek !== null ? pointsForGameweek(row.player, currentGameweek) : null;
-                      const opposition =
-                        currentGameweek !== null
-                          ? opponentLabelForGameweek(row.player, currentGameweek)
-                          : "-";
-
-                      return (
-                        <article key={row.player.player_id} className="rounded-lg border border-slate-200 p-3">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-semibold text-slate-900">{row.player.web_name}</p>
-                              <p className="text-xs text-slate-600">
-                                {row.player.team_short_name} · {row.player.position}
-                              </p>
-                            </div>
-                            {badge && (
-                              <span className="rounded-full bg-slate-900 px-2 py-1 text-[10px] font-semibold text-white">
-                                {badge}
-                              </span>
-                            )}
-                          </div>
-                          <p className="mt-2 text-xs text-slate-600">Opponent: {opposition}</p>
-                          <p className="mt-1 text-xs text-slate-600">
-                            GW xPts: {gwPoints?.toFixed(1) ?? "-"}
-                          </p>
-                          {activeDraft && optimiseMode === "none" && (
-                            <div className="mt-3 space-y-2 text-xs text-slate-700">
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  aria-label={`Swap ${row.player.web_name} with bench`}
-                                  className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                  onClick={() => {
-                                    const isOpen = swapTargetStarterId === row.player.player_id;
-                                    setSwapTargetStarterId(isOpen ? null : row.player.player_id);
-                                    setSwapChoiceBenchId(null);
-                                  }}
-                                >
-                                  Swap With Bench
-                                </button>
-                                <button
-                                  type="button"
-                                  aria-label={`Transfer ${row.player.web_name}`}
-                                  className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                  onClick={() => handleOpenTransfer(row.player.player_id)}
-                                >
-                                  Transfer
-                                </button>
-                              </div>
-
-                              {swapTargetStarterId === row.player.player_id && (
-                                <div className="space-y-2">
-                                  <label className="block">
-                                    Bench Player
-                                    <select
-                                      aria-label={`Bench Player for ${row.player.web_name}`}
-                                      className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1"
-                                      value={swapChoiceBenchId ?? ""}
-                                      onChange={(event) => setSwapChoiceBenchId(Number(event.target.value))}
-                                    >
-                                      <option value="">Select bench player</option>
-                                      {eligibleBenchOptionsForStarter(row.player.player_id).map((benchPlayer) => (
-                                        <option key={benchPlayer.player_id} value={benchPlayer.player_id}>
-                                          {benchPlayer.web_name} ({benchPlayer.position})
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </label>
-                                  <button
-                                    type="button"
-                                    className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-white hover:bg-emerald-500 disabled:opacity-50"
-                                    disabled={swapChoiceBenchId === null}
-                                    onClick={() => {
-                                      if (swapChoiceBenchId !== null) {
-                                        applyStarterBenchSwap(row.player.player_id, swapChoiceBenchId);
-                                      }
-                                    }}
-                                  >
-                                    Confirm Swap
-                                  </button>
-                                </div>
-                              )}
-
-                              {transferTargetPlayerId === row.player.player_id && (
-                                <div className="space-y-2">
-                                  <label className="block">
-                                    Replacement Player
-                                    <select
-                                      aria-label={`Replacement Player for ${row.player.web_name}`}
-                                      className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1"
-                                      value={transferChoicePlayerId ?? ""}
-                                      disabled={transferPlayerPool === null}
-                                      onChange={(event) =>
-                                        setTransferChoicePlayerId(Number(event.target.value))
-                                      }
-                                    >
-                                      <option value="">
-                                        {transferPlayerPool === null ? "Loading players..." : "Select replacement"}
-                                      </option>
-                                      {eligibleTransferOptions(row.player).map((candidate) => (
-                                        <option key={candidate.id} value={candidate.id}>
-                                          {candidate.web_name} ({candidate.team_short_name}) £
-                                          {candidate.current_price.toFixed(1)}m
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </label>
-                                  <button
-                                    type="button"
-                                    className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-white hover:bg-emerald-500 disabled:opacity-50"
-                                    disabled={
-                                      transferChoicePlayerId === null ||
-                                      transferSavingPlayerId === row.player.player_id
-                                    }
-                                    onClick={() => void handleConfirmTransfer(row.player.player_id)}
-                                  >
-                                    {transferSavingPlayerId === row.player.player_id
-                                      ? "Saving..."
-                                      : "Confirm Transfer"}
-                                  </button>
-                                  {transferError && <p className="text-red-700">{transferError}</p>}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-              );
-            })}
+            <label className="ml-auto flex items-center gap-2 text-sm text-slate-700">
+              Optimise starting 11 by
+              <select
+                aria-label="Optimise starting 11 by"
+                className="rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+                value={optimiseMode}
+                onChange={(event) => {
+                  setOptimiseMode(event.target.value as OptimiseMode);
+                  setSwapTargetStarterId(null);
+                  setSwapChoiceBenchId(null);
+                }}
+              >
+                <option value="none">None</option>
+                <option value="xpts">xPts</option>
+                <option value="difficulty">Fixture difficulty</option>
+              </select>
+            </label>
           </div>
-        </div>
 
-        <div>
-          <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Bench</h3>
-          <div className="space-y-5">
-            {POSITION_ORDER.map((position) => {
-              const rows = benchByPosition.get(position) ?? [];
-              if (rows.length === 0) {
-                return null;
-              }
+          {refreshState.type === "success" && <p className="mb-4 text-sm text-emerald-700">{refreshState.message}</p>}
+          {refreshState.type === "error" && <p className="mb-4 text-sm text-red-700">{refreshState.message}</p>}
+          {editState.type === "error" && <p className="mb-4 text-sm text-red-700">{editState.message}</p>}
 
-              return (
-                <section key={`bench-${position}`}>
-                  <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    {position}
-                  </h4>
-                  <div className="space-y-3">
-                    {rows.map((row) => {
-                      const gwPoints =
-                        currentGameweek !== null ? pointsForGameweek(row.player, currentGameweek) : null;
-                      const opposition =
-                        currentGameweek !== null
-                          ? opponentLabelForGameweek(row.player, currentGameweek)
-                          : "-";
-
-                      return (
-                        <article key={row.player.player_id} className="rounded-lg border border-slate-200 p-3">
-                          <p className="text-sm font-semibold text-slate-900">{row.player.web_name}</p>
-                          <p className="text-xs text-slate-600">
-                            Bench {row.selection.bench_order} · {row.player.team_short_name} · {row.player.position}
-                          </p>
-                          <p className="mt-2 text-xs text-slate-600">Opponent: {opposition}</p>
-                          <p className="mt-1 text-xs text-slate-600">
-                            GW xPts: {gwPoints?.toFixed(1) ?? "-"}
-                          </p>
-                          {activeDraft && optimiseMode === "none" && (
-                            <div className="mt-3 space-y-2 text-xs text-slate-700">
-                              <button
-                                type="button"
-                                aria-label={`Transfer ${row.player.web_name}`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() => handleOpenTransfer(row.player.player_id)}
-                              >
-                                Transfer
-                              </button>
-
-                              {transferTargetPlayerId === row.player.player_id && (
-                                <div className="space-y-2">
-                                  <label className="block">
-                                    Replacement Player
-                                    <select
-                                      aria-label={`Replacement Player for ${row.player.web_name}`}
-                                      className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1"
-                                      value={transferChoicePlayerId ?? ""}
-                                      disabled={transferPlayerPool === null}
-                                      onChange={(event) =>
-                                        setTransferChoicePlayerId(Number(event.target.value))
-                                      }
-                                    >
-                                      <option value="">
-                                        {transferPlayerPool === null ? "Loading players..." : "Select replacement"}
-                                      </option>
-                                      {eligibleTransferOptions(row.player).map((candidate) => (
-                                        <option key={candidate.id} value={candidate.id}>
-                                          {candidate.web_name} ({candidate.team_short_name}) £
-                                          {candidate.current_price.toFixed(1)}m
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </label>
-                                  <button
-                                    type="button"
-                                    className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-white hover:bg-emerald-500 disabled:opacity-50"
-                                    disabled={
-                                      transferChoicePlayerId === null ||
-                                      transferSavingPlayerId === row.player.player_id
-                                    }
-                                    onClick={() => void handleConfirmTransfer(row.player.player_id)}
-                                  >
-                                    {transferSavingPlayerId === row.player.player_id
-                                      ? "Saving..."
-                                      : "Confirm Transfer"}
-                                  </button>
-                                  {transferError && <p className="text-red-700">{transferError}</p>}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-              );
-            })}
+          <div className="mb-5 grid gap-3 sm:grid-cols-3">
+            {projectionCards.map((card) => (
+              <article key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  {card.label}
+                </p>
+                <p className="mt-2 text-2xl font-semibold text-slate-900">
+                  {card.value?.toFixed(1) ?? "-"}
+                </p>
+              </article>
+            ))}
           </div>
-        </div>
-      </div>
+
+          <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+            <SquadPitch
+              title="Starting XI"
+              itemsByPosition={startersByPosition}
+              keyFor={(row) => row.player.player_id}
+              renderCard={(row) => {
+                const gwPoints =
+                  currentGameweek !== null ? pointsForGameweek(row.player, currentGameweek) : null;
+                const opposition =
+                  currentGameweek !== null
+                    ? opponentLabelForGameweek(row.player, currentGameweek)
+                    : "-";
+
+                return (
+                  <SquadPlayerCard
+                    webName={row.player.web_name}
+                    teamShortName={row.player.team_short_name}
+                    position={row.player.position}
+                    badge={badgeLabel(row.selection.is_captain, row.selection.is_vice_captain)}
+                    projectedPoints={gwPoints}
+                    opponentLabel={opposition}
+                    transferHref={`/transfers?out=${row.player.player_id}`}
+                  >
+                    {renderEditControls(row, { showSwap: true })}
+                  </SquadPlayerCard>
+                );
+              }}
+            />
+
+            <Bench
+              itemsByPosition={benchByPosition}
+              keyFor={(row) => row.player.player_id}
+              renderCard={(row) => {
+                const gwPoints =
+                  currentGameweek !== null ? pointsForGameweek(row.player, currentGameweek) : null;
+                const opposition =
+                  currentGameweek !== null
+                    ? opponentLabelForGameweek(row.player, currentGameweek)
+                    : "-";
+
+                return (
+                  <SquadPlayerCard
+                    webName={row.player.web_name}
+                    teamShortName={row.player.team_short_name}
+                    position={row.player.position}
+                    benchOrder={row.selection.bench_order}
+                    projectedPoints={gwPoints}
+                    opponentLabel={opposition}
+                    transferHref={`/transfers?out=${row.player.player_id}`}
+                  >
+                    {renderEditControls(row, { showSwap: false })}
+                  </SquadPlayerCard>
+                );
+              }}
+            />
+          </div>
+        </>
+      )}
     </section>
   );
 }

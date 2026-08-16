@@ -84,6 +84,7 @@ class MyTeamRecommendationResponse(BaseModel):
     captain: int
     vice_captain: int
     player_projected_points: dict[int, float]
+    current_captain_adjusted_points: float
 
 
 class MyTeamRecommendationUnavailableResponse(BaseModel):

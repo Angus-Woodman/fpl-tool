@@ -246,6 +246,7 @@ def _recommendation() -> MyTeamRecommendation:
         captain=13,
         vice_captain=14,
         player_projected_points={1: 3.6, 13: 4.5},
+        current_captain_adjusted_points=37.5,
     )
 
 
@@ -300,5 +301,6 @@ def test_get_my_team_recommendation_returns_the_recommendation() -> None:
         assert payload["bench_goalkeeper"] == 2
         assert payload["bench_outfield"] == [7, 11, 12]
         assert len(payload["starting_xi"]) == 11
+        assert payload["current_captain_adjusted_points"] == 37.5
     finally:
         app.dependency_overrides.clear()

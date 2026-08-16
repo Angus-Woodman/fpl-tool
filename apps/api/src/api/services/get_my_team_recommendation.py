@@ -6,6 +6,8 @@ from typing import Protocol
 
 from fpl_engine.domain import PlayerPosition
 from fpl_engine.optimisation import LineupCandidate, optimise_lineup
+from fpl_engine.rules.scoring import score_gameweek
+from fpl_engine.rules.squad import SquadSlot
 
 from api.repositories.current_squad_repository import CurrentSquadRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
@@ -36,6 +38,11 @@ class MyTeamRecommendation:
     # caller can render "Captain Haaland: 3.45 xPts" style cues without
     # recalculating anything.
     player_projected_points: dict[int, float]
+    # The currently saved selection's own total for the same gameweek/model,
+    # via fpl_engine's own scoring (never recomputed client-side), so a
+    # caller can show the expected gain from switching without reimplementing
+    # scoring itself.
+    current_captain_adjusted_points: float
 
 
 @dataclass(frozen=True)
@@ -129,6 +136,20 @@ class GetMyTeamRecommendationService:
         ]
         selection = optimise_lineup(candidates)
 
+        current_slots = [
+            SquadSlot(
+                player_id=player.player_id,
+                position=PlayerPosition(player.position),
+                team_id=player.team_id,
+                is_starting=player.is_starting,
+                bench_order=player.bench_order,
+                is_captain=player.is_captain,
+                is_vice_captain=player.is_vice_captain,
+            )
+            for player in current_squad.players
+        ]
+        current_score = score_gameweek(slots=current_slots, projected_points=points_by_player)
+
         return MyTeamRecommendation(
             model_version=model_version,
             projection_run_id=run.id,
@@ -142,4 +163,5 @@ class GetMyTeamRecommendationService:
             captain=selection.captain,
             vice_captain=selection.vice_captain,
             player_projected_points=points_by_player,
+            current_captain_adjusted_points=current_score.total_points,
         )
