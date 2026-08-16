@@ -1,3 +1,4 @@
+import datetime as dt
 from typing import Any
 
 from api.db.session import get_db_session
@@ -6,8 +7,16 @@ from api.repositories.current_squad_repository import (
     CurrentSquadPlayerRecord,
     CurrentSquadRecord,
 )
-from api.routers.my_team import get_current_squad_service, get_upsert_current_squad_service
+from api.routers.my_team import (
+    get_current_squad_service,
+    get_my_team_recommendation_service,
+    get_upsert_current_squad_service,
+)
 from api.services.current_squad import UpsertCurrentSquadRequest
+from api.services.get_my_team_recommendation import (
+    MyTeamRecommendation,
+    MyTeamRecommendationFailure,
+)
 from api.services.get_my_team_view import (
     HorizonProjectionTotals,
     MyTeamPlayerViewRecord,
@@ -209,5 +218,87 @@ def test_put_my_team_returns_saved_squad() -> None:
         assert service.last_request.free_transfers == 2
         assert session.committed is True
         assert session.rolled_back is False
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _FakeGetMyTeamRecommendationService:
+    def __init__(self, result: MyTeamRecommendation | MyTeamRecommendationFailure | None) -> None:
+        self._result = result
+
+    def execute(
+        self, model_version: str = "component_v3"
+    ) -> MyTeamRecommendation | MyTeamRecommendationFailure | None:
+        return self._result
+
+
+def _recommendation() -> MyTeamRecommendation:
+    return MyTeamRecommendation(
+        model_version="component_v3",
+        projection_run_id=42,
+        generated_at=dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.UTC),
+        target_gameweek_number=5,
+        starting_xi_points=34.9,
+        captain_adjusted_points=39.4,
+        starting_xi=(1, 3, 4, 5, 6, 8, 9, 10, 13, 14, 15),
+        bench_goalkeeper=2,
+        bench_outfield=(7, 11, 12),
+        captain=13,
+        vice_captain=14,
+        player_projected_points={1: 3.6, 13: 4.5},
+    )
+
+
+def test_get_my_team_recommendation_returns_404_when_no_squad() -> None:
+    app.dependency_overrides[get_my_team_recommendation_service] = (
+        lambda: _FakeGetMyTeamRecommendationService(None)
+    )
+    try:
+        client = TestClient(app)
+        response = client.get("/my-team/recommendation")
+
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_my_team_recommendation_returns_422_on_a_structured_failure() -> None:
+    failure = MyTeamRecommendationFailure(
+        code="missing_player_projections",
+        message="2 squad player(s) have no component_v3 projection in run 42",
+        missing_player_ids=(9, 12),
+    )
+    app.dependency_overrides[get_my_team_recommendation_service] = (
+        lambda: _FakeGetMyTeamRecommendationService(failure)
+    )
+    try:
+        client = TestClient(app)
+        response = client.get("/my-team/recommendation")
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["code"] == "missing_player_projections"
+        assert detail["missing_player_ids"] == [9, 12]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_my_team_recommendation_returns_the_recommendation() -> None:
+    app.dependency_overrides[get_my_team_recommendation_service] = (
+        lambda: _FakeGetMyTeamRecommendationService(_recommendation())
+    )
+    try:
+        client = TestClient(app)
+        response = client.get("/my-team/recommendation")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["model_version"] == "component_v3"
+        assert payload["projection_run_id"] == 42
+        assert payload["captain"] == 13
+        assert payload["vice_captain"] == 14
+        assert payload["bench_goalkeeper"] == 2
+        assert payload["bench_outfield"] == [7, 11, 12]
+        assert len(payload["starting_xi"]) == 11
     finally:
         app.dependency_overrides.clear()

@@ -24,6 +24,9 @@ class CurrentSquadPlayerRecord:
     bench_order: int | None
     is_captain: bool
     is_vice_captain: bool
+    # Needed by the lineup optimiser's club-limit/domain shape, not by any
+    # existing consumer -- defaulted so existing fixtures/tests are unaffected.
+    team_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,7 @@ class CurrentSquadRepository:
                 SquadPlayerModel.bench_order,
                 SquadPlayerModel.is_captain,
                 SquadPlayerModel.is_vice_captain,
+                PlayerModel.team_id,
             )
             .join(SquadPlayerModel, SquadPlayerModel.player_id == PlayerModel.id)
             .join(TeamModel, TeamModel.id == PlayerModel.team_id)
@@ -94,6 +98,7 @@ class CurrentSquadRepository:
                 bench_order=row[10],
                 is_captain=row[11],
                 is_vice_captain=row[12],
+                team_id=row[13],
             )
             for row in rows
         ]

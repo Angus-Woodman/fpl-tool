@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Row, func, select
 from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql import Select
 
 from api.models import FixtureModel, GameweekModel, PlayerModel, ProjectionModel, TeamModel
 
@@ -38,10 +41,32 @@ class MyTeamProjectionRepository:
         if latest_generated_at is None:
             return []
 
+        rows = self._session.execute(
+            self._base_statement(player_ids).where(
+                ProjectionModel.generated_at == latest_generated_at
+            )
+        ).all()
+        return self._rows_to_records(rows)
+
+    def list_player_fixture_projections_for_run(
+        self, player_ids: list[int], run_id: int
+    ) -> list[PlayerProjectionFixtureRecord]:
+        """Every row comes from one explicit projection run -- never rows
+        merely sharing a timestamp across models, and never a mix of an old
+        and a new run for the same model."""
+        if not player_ids:
+            return []
+
+        rows = self._session.execute(
+            self._base_statement(player_ids).where(ProjectionModel.run_id == run_id)
+        ).all()
+        return self._rows_to_records(rows)
+
+    def _base_statement(self, player_ids: list[int]) -> Select[Any]:
         home_team = aliased(TeamModel)
         away_team = aliased(TeamModel)
 
-        rows = self._session.execute(
+        return (
             select(
                 ProjectionModel.player_id,
                 ProjectionModel.fixture_id,
@@ -60,14 +85,14 @@ class MyTeamProjectionRepository:
             .outerjoin(home_team, home_team.id == FixtureModel.home_team_id)
             .outerjoin(away_team, away_team.id == FixtureModel.away_team_id)
             .where(ProjectionModel.player_id.in_(player_ids))
-            .where(ProjectionModel.generated_at == latest_generated_at)
             .order_by(
                 ProjectionModel.player_id.asc(),
                 GameweekModel.number.asc(),
                 FixtureModel.kickoff_time.asc().nulls_last(),
             )
-        ).all()
+        )
 
+    def _rows_to_records(self, rows: Sequence[Row[Any]]) -> list[PlayerProjectionFixtureRecord]:
         return [
             PlayerProjectionFixtureRecord(
                 player_id=row[0],

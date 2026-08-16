@@ -186,3 +186,83 @@ def test_projection_run_id_must_reference_an_existing_run(db_session: Session) -
             db_session.commit()
     finally:
         db_session.rollback()
+
+
+def test_get_latest_selects_only_the_requested_model_version(db_session: Session) -> None:
+    """The regression for the mixing bug: baseline_v1, baseline_v2 and
+    component_v3 sharing one generated_at (as a real dual-write run produces)
+    must never be confused with each other."""
+    _clear(db_session)
+    repository = ProjectionRunRepository(db_session)
+
+    v1_id = repository.create(
+        model_version="baseline_v1",
+        generated_at=GENERATED_AT,
+        gameweeks_covered=[5],
+        parameters={},
+        team_strength_snapshot=_team_strength_snapshot(),
+        player_snapshot_generated_at=GENERATED_AT,
+    )
+    v2_id = repository.create(
+        model_version="baseline_v2",
+        generated_at=GENERATED_AT,
+        gameweeks_covered=[5],
+        parameters={},
+        team_strength_snapshot=_team_strength_snapshot(),
+        player_snapshot_generated_at=GENERATED_AT,
+    )
+    v3_id = repository.create(
+        model_version="component_v3",
+        generated_at=GENERATED_AT,
+        gameweeks_covered=[5],
+        parameters={},
+        team_strength_snapshot=_team_strength_snapshot(),
+        player_snapshot_generated_at=GENERATED_AT,
+    )
+    db_session.commit()
+
+    v1_latest = repository.get_latest("baseline_v1")
+    v2_latest = repository.get_latest("baseline_v2")
+    v3_latest = repository.get_latest("component_v3")
+
+    assert v1_latest is not None and v1_latest.id == v1_id
+    assert v2_latest is not None and v2_latest.id == v2_id
+    assert v3_latest is not None and v3_latest.id == v3_id
+
+
+def test_get_latest_prefers_a_newer_run_over_an_older_one_for_the_same_model(
+    db_session: Session,
+) -> None:
+    _clear(db_session)
+    repository = ProjectionRunRepository(db_session)
+
+    older_id = repository.create(
+        model_version="component_v3",
+        generated_at=GENERATED_AT - dt.timedelta(days=1),
+        gameweeks_covered=[5],
+        parameters={},
+        team_strength_snapshot=_team_strength_snapshot(),
+        player_snapshot_generated_at=GENERATED_AT - dt.timedelta(days=1),
+    )
+    newer_id = repository.create(
+        model_version="component_v3",
+        generated_at=GENERATED_AT,
+        gameweeks_covered=[6],
+        parameters={},
+        team_strength_snapshot=_team_strength_snapshot(),
+        player_snapshot_generated_at=GENERATED_AT,
+    )
+    db_session.commit()
+
+    latest = repository.get_latest("component_v3")
+
+    assert latest is not None
+    assert latest.id == newer_id
+    assert latest.id != older_id
+
+
+def test_get_latest_returns_none_when_the_model_has_no_runs(db_session: Session) -> None:
+    _clear(db_session)
+    repository = ProjectionRunRepository(db_session)
+
+    assert repository.get_latest("component_v3") is None

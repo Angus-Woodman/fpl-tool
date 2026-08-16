@@ -64,3 +64,29 @@ class CurrentSquadResponse(BaseModel):
     captain_adjusted_projection_totals: HorizonProjectionTotalsResponse | None = None
     gameweek_numbers: list[int] = Field(default_factory=list)
     players: list[CurrentSquadPlayerResponse]
+
+
+class MyTeamRecommendationResponse(BaseModel):
+    """Advice only: the frontend must render this separately from the saved
+    squad's own is_starting/is_captain flags, not merge them."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_version: str
+    projection_run_id: int
+    generated_at: str
+    target_gameweek_number: int
+    starting_xi_points: float
+    captain_adjusted_points: float
+    starting_xi: list[int]
+    bench_goalkeeper: int
+    bench_outfield: list[int]
+    captain: int
+    vice_captain: int
+    player_projected_points: dict[int, float]
+
+
+class MyTeamRecommendationUnavailableResponse(BaseModel):
+    code: str
+    message: str
+    missing_player_ids: list[int] = Field(default_factory=list)
