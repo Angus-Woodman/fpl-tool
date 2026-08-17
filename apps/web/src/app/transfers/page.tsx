@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 
 import { PageHeader } from "@/components/layout/page-header";
-import { TransferExplorerPlaceholder } from "@/components/transfers/transfer-explorer-placeholder";
+import { TransferExplorer } from "@/components/transfers/transfer-explorer";
 
 export default function TransfersPage(): JSX.Element {
   return (
@@ -10,8 +10,8 @@ export default function TransfersPage(): JSX.Element {
         title="Transfers"
         description="Explore legal replacements for any squad player over 1, 3, and 5 gameweeks."
       />
-      <Suspense fallback={null}>
-        <TransferExplorerPlaceholder />
+      <Suspense fallback={<p className="text-sm text-slate-600">Loading...</p>}>
+        <TransferExplorer />
       </Suspense>
     </>
   );

@@ -158,6 +158,86 @@ export class MyTeamRecommendationUnavailableError extends Error {
   }
 }
 
+export type TransferHorizon = 1 | 3 | 5;
+
+export type TransferOutgoingPlayerSummary = {
+  player_id: number;
+  web_name: string;
+  position: "GK" | "DEF" | "MID" | "FWD";
+  team_short_name: string;
+  current_price: number;
+  selling_price: number;
+  projected_points_by_horizon: Record<string, number>;
+};
+
+export type RankedTransferCandidate = {
+  player_id: number;
+  web_name: string;
+  team_short_name: string;
+  price: number;
+  resulting_bank: number;
+  team_gain_by_horizon: Record<string, number>;
+  direct_xpts_difference: number | null;
+  gameweeks_evaluated: number;
+};
+
+export type TransferExplorerResponse = {
+  model_version: string;
+  projection_run_id: number;
+  generated_at: string;
+  primary_horizon: number;
+  bank: number;
+  selling_price_is_approximate: boolean;
+  outgoing: TransferOutgoingPlayerSummary;
+  candidates: RankedTransferCandidate[];
+  evaluated_gameweek_numbers: number[];
+};
+
+export type TransferExplorerFetchResult =
+  | { type: "ok"; data: TransferExplorerResponse }
+  | { type: "no_squad" }
+  | { type: "player_not_found" }
+  | { type: "unavailable"; code: string; message: string; missingPlayerIds: number[] };
+
+export async function fetchTransferExplorer(
+  playerOutId: number,
+  primaryHorizon: TransferHorizon = 5,
+): Promise<TransferExplorerFetchResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/my-team/transfers/${playerOutId}?primary_horizon=${primaryHorizon}`,
+  );
+
+  if (response.status === 404) {
+    const body = (await response.json()) as { detail?: unknown };
+    const detail =
+      typeof body.detail === "object" && body.detail !== null
+        ? (body.detail as { code?: string })
+        : undefined;
+    if (detail?.code === "player_not_found") {
+      return { type: "player_not_found" };
+    }
+    return { type: "no_squad" };
+  }
+
+  if (response.status === 422) {
+    const body = (await response.json()) as {
+      detail?: { code?: string; message?: string; missing_player_ids?: number[] };
+    };
+    return {
+      type: "unavailable",
+      code: body.detail?.code ?? "transfer_explorer_unavailable",
+      message: body.detail?.message ?? "This transfer could not be explored",
+      missingPlayerIds: body.detail?.missing_player_ids ?? [],
+    };
+  }
+
+  if (!response.ok) {
+    throw new Error(`Transfer explorer request failed with status ${response.status}`);
+  }
+
+  return { type: "ok", data: (await response.json()) as TransferExplorerResponse };
+}
+
 export type PlanChip = "WILDCARD" | "FREE_HIT" | "BENCH_BOOST" | "TRIPLE_CAPTAIN";
 
 export type PlanSummary = {

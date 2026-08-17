@@ -1,0 +1,229 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { TransferExplorerResponse } from "@/lib/api";
+import { TransferExplorer } from "@/components/transfers/transfer-explorer";
+
+const { useSearchParams, useRouter } = vi.hoisted(() => ({
+  useSearchParams: vi.fn(),
+  useRouter: vi.fn(),
+}));
+
+vi.mock("next/navigation", () => ({
+  useSearchParams,
+  useRouter,
+}));
+
+function makeSearchParams(params: Record<string, string> = {}): URLSearchParams {
+  return new URLSearchParams(params);
+}
+
+const routerPush = vi.fn();
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  routerPush.mockClear();
+});
+
+function buildSquadResponse() {
+  const players = [
+    { player_id: 1, web_name: "GK One", position: "GK", team_short_name: "ARS" },
+    { player_id: 9, web_name: "MID Nine", position: "MID", team_short_name: "LIV" },
+  ];
+
+  return {
+    squad_id: 1,
+    name: "My Team",
+    bank: 1.5,
+    free_transfers: 2,
+    projection_totals: null,
+    bench_projection_totals: null,
+    captain_adjusted_projection_totals: null,
+    gameweek_numbers: [],
+    players: players.map((player) => ({
+      ...player,
+      first_name: player.web_name,
+      second_name: player.web_name,
+      team_name: player.team_short_name,
+      current_price: 5.0,
+      status: "a",
+      is_starting: true,
+      bench_order: null,
+      is_captain: false,
+      is_vice_captain: false,
+      projection_totals: null,
+      fixture_projections: [],
+    })),
+  };
+}
+
+function buildExplorerResponse(): TransferExplorerResponse {
+  return {
+    model_version: "component_v3",
+    projection_run_id: 42,
+    generated_at: "2026-08-16T08:10:00+00:00",
+    primary_horizon: 5,
+    bank: 1.5,
+    selling_price_is_approximate: true,
+    outgoing: {
+      player_id: 9,
+      web_name: "MID Nine",
+      position: "MID",
+      team_short_name: "LIV",
+      current_price: 5.0,
+      selling_price: 5.0,
+      projected_points_by_horizon: { "1": 3.3, "3": 9.0, "5": 15.0 },
+    },
+    candidates: [
+      { player_id: 201, web_name: "Low1High5", team_short_name: "AVL", price: 5.5, resulting_bank: 1.0, team_gain_by_horizon: { "1": 0.2, "3": 1.0, "5": 5.0 }, direct_xpts_difference: 0.5, gameweeks_evaluated: 5 },
+      { player_id: 202, web_name: "High1Low5", team_short_name: "CHE", price: 5.0, resulting_bank: 1.5, team_gain_by_horizon: { "1": 2.0, "3": 2.5, "5": 2.6 }, direct_xpts_difference: 1.2, gameweeks_evaluated: 5 },
+    ],
+    evaluated_gameweek_numbers: [5, 6, 7, 8, 9],
+  };
+}
+
+function mockFetchWith(explorerResult: unknown, explorerStatus = 200): void {
+  vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/my-team")) {
+      return { ok: true, json: async () => buildSquadResponse() } as Response;
+    }
+    if (url.includes("/my-team/transfers/")) {
+      return {
+        ok: explorerStatus === 200,
+        status: explorerStatus,
+        json: async () => explorerResult,
+      } as Response;
+    }
+    throw new Error(`Unexpected fetch call: ${url}`);
+  });
+}
+
+describe("TransferExplorer", () => {
+  it("preselects the outgoing player from ?out= and renders the ranked candidates", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+    mockFetchWith(buildExplorerResponse());
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Replacing MID Nine")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Low1High5")).toBeInTheDocument();
+    expect(screen.getByText("High1Low5")).toBeInTheDocument();
+    expect(screen.getByText(/component_v3 · generated/)).toBeInTheDocument();
+  });
+
+  it("re-sorts candidates locally when the horizon changes, without refetching", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+    const fetchSpy = vi.fn();
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      fetchSpy(url);
+      if (url.endsWith("/my-team")) {
+        return { ok: true, json: async () => buildSquadResponse() } as Response;
+      }
+      return { ok: true, json: async () => buildExplorerResponse() } as Response;
+    });
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Low1High5")).toBeInTheDocument();
+    });
+
+    // Default horizon is 5 GWs: Low1High5 (5.0) ranks above High1Low5 (2.6).
+    let rows = screen.getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("Low1High5");
+
+    const callsBeforeSwitch = fetchSpy.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "1 GW" }));
+
+    await waitFor(() => {
+      rows = screen.getAllByRole("row").slice(1);
+      expect(rows[0]).toHaveTextContent("High1Low5");
+    });
+    // Switching horizon must not trigger a new network request.
+    expect(fetchSpy.mock.calls.length).toBe(callsBeforeSwitch);
+  });
+
+  it("shows an empty state when there are no legal candidates", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+    mockFetchWith({ ...buildExplorerResponse(), candidates: [] });
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No legal, affordable replacements were found for this player right now."),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows a structured message when the player is not in the squad", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "999" }));
+    useRouter.mockReturnValue({ push: routerPush });
+    mockFetchWith(
+      {
+        detail: {
+          code: "player_not_in_squad",
+          message: "Player 999 is not in the current squad",
+          missing_player_ids: [],
+        },
+      },
+      422,
+    );
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/is not in the current squad/)).toBeInTheDocument();
+    });
+    // Falls back to letting the user pick a valid outgoing player.
+    expect(screen.getByLabelText("Outgoing player")).toBeInTheDocument();
+  });
+
+  it("shows a no-projection-run message distinctly", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+    mockFetchWith(
+      {
+        detail: {
+          code: "no_projection_run",
+          message: "No projection run found",
+          missing_player_ids: [],
+        },
+      },
+      422,
+    );
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Projections need to be refreshed before transfers can be explored."),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows the outgoing player selector when no ?out= is present", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams());
+    useRouter.mockReturnValue({ push: routerPush });
+    mockFetchWith(buildExplorerResponse());
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Outgoing player")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText("Outgoing player"), { target: { value: "9" } });
+
+    expect(routerPush).toHaveBeenCalledWith("/transfers?out=9");
+  });
+});
