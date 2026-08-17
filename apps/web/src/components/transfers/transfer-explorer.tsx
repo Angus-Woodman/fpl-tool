@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import {
   MyTeamResponse,
   TransferExplorerResponse,
   TransferHorizon,
+  applyTransfer,
   fetchMyTeam,
   fetchTransferExplorer,
   fetchTransferPreview,
@@ -32,6 +34,12 @@ type ExplorerState =
   | { type: "error"; message: string }
   | { type: "ready"; data: TransferExplorerResponse };
 
+type ApplyState =
+  | { type: "idle" }
+  | { type: "applying" }
+  | { type: "success"; outgoingName: string; incomingName: string }
+  | { type: "error"; message: string };
+
 export function TransferExplorer(): JSX.Element {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -44,6 +52,7 @@ export function TransferExplorer(): JSX.Element {
   const [horizon, setHorizon] = useState<TransferHorizon>(5);
   const [previewCandidateId, setPreviewCandidateId] = useState<number | null>(null);
   const [previewState, setPreviewState] = useState<TransferPreviewState>({ type: "loading" });
+  const [applyState, setApplyState] = useState<ApplyState>({ type: "idle" });
 
   useEffect(() => {
     let cancelled = false;
@@ -132,6 +141,7 @@ export function TransferExplorer(): JSX.Element {
 
     setPreviewCandidateId(candidateId);
     setPreviewState({ type: "loading" });
+    setApplyState({ type: "idle" });
 
     try {
       const result = await fetchTransferPreview(playerOutId as number, candidateId);
@@ -153,6 +163,33 @@ export function TransferExplorer(): JSX.Element {
 
   function handleClosePreview(): void {
     setPreviewCandidateId(null);
+    setApplyState({ type: "idle" });
+  }
+
+  async function handleApply(
+    outgoingName: string,
+    incomingName: string,
+    candidateId: number,
+  ): Promise<void> {
+    if (!hasValidOutParam) {
+      return;
+    }
+
+    setApplyState({ type: "applying" });
+
+    try {
+      const result = await applyTransfer(playerOutId as number, candidateId);
+      if (result.type === "ok") {
+        setApplyState({ type: "success", outgoingName, incomingName });
+      } else if (result.type === "no_squad" || result.type === "player_not_found") {
+        setApplyState({ type: "error", message: "This transfer could not be applied." });
+      } else {
+        setApplyState({ type: "error", message: result.message });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to apply the transfer";
+      setApplyState({ type: "error", message });
+    }
   }
 
   if (squadState.type === "loading") {
@@ -220,6 +257,21 @@ export function TransferExplorer(): JSX.Element {
   }
 
   const { data } = explorerState;
+
+  if (applyState.type === "success") {
+    return (
+      <section className="rounded-xl border border-emerald-300 bg-emerald-50 p-5 shadow-sm">
+        <h2 className="text-lg font-semibold text-emerald-900">Transfer applied</h2>
+        <p className="mt-2 text-sm text-emerald-800">
+          {applyState.outgoingName} &rarr; {applyState.incomingName} has been saved to your squad.
+        </p>
+        <Link href="/my-team" className="mt-4 inline-block text-sm font-medium underline">
+          View My Team
+        </Link>
+      </section>
+    );
+  }
+
   const previewCandidate = data.candidates.find(
     (candidate) => candidate.player_id === previewCandidateId,
   );
@@ -277,7 +329,15 @@ export function TransferExplorer(): JSX.Element {
           incomingName={previewCandidate.web_name}
           onClose={handleClosePreview}
           resolveName={resolveName}
+          onApply={() =>
+            void handleApply(data.outgoing.web_name, previewCandidate.web_name, previewCandidate.player_id)
+          }
+          applying={applyState.type === "applying"}
         />
+      )}
+
+      {applyState.type === "error" && (
+        <p className="text-sm text-red-700">{applyState.message}</p>
       )}
     </section>
   );

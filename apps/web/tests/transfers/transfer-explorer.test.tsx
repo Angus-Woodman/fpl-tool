@@ -100,6 +100,67 @@ function mockFetchWith(explorerResult: unknown, explorerStatus = 200): void {
   });
 }
 
+function buildPreviewResponseBody() {
+  return {
+    model_version: "component_v3",
+    projection_run_id: 42,
+    generated_at: "2026-08-16T08:10:00+00:00",
+    target_gameweek_number: 5,
+    bank: 1.5,
+    resulting_bank: 1.0,
+    selling_price_is_approximate: true,
+    player_out_id: 9,
+    player_in_id: 201,
+    is_legal: true,
+    errors: [],
+    projected_team_gain: 2.6,
+    direct_player_xpts_difference: 1.2,
+    lineup_before: {
+      starting_xi: [1, 3, 9],
+      bench_goalkeeper: 2,
+      bench_outfield: [4, 5, 6],
+      captain: 9,
+      vice_captain: 1,
+      starting_xi_points: 30.0,
+      captain_adjusted_points: 33.3,
+    },
+    lineup_after: {
+      starting_xi: [1, 3, 201],
+      bench_goalkeeper: 2,
+      bench_outfield: [4, 5, 6],
+      captain: 201,
+      vice_captain: 1,
+      starting_xi_points: 30.7,
+      captain_adjusted_points: 35.9,
+    },
+    captain_changed: true,
+    vice_captain_changed: false,
+  };
+}
+
+function mockFetchWithApply(applyResult: unknown, applyStatus = 200) {
+  return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/my-team") && !init) {
+      return { ok: true, json: async () => buildSquadResponse() } as Response;
+    }
+    if (url.includes("/preview")) {
+      return { ok: true, json: async () => buildPreviewResponseBody() } as Response;
+    }
+    if (url.includes("/apply")) {
+      return {
+        ok: applyStatus === 200,
+        status: applyStatus,
+        json: async () => applyResult,
+      } as Response;
+    }
+    if (url.includes("/my-team/transfers/")) {
+      return { ok: true, json: async () => buildExplorerResponse() } as Response;
+    }
+    throw new Error(`Unexpected fetch call: ${url}`);
+  });
+}
+
 describe("TransferExplorer", () => {
   it("preselects the outgoing player from ?out= and renders the ranked candidates", async () => {
     useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
@@ -342,5 +403,88 @@ describe("TransferExplorer", () => {
     await waitFor(() => {
       expect(screen.getByText("Player 202 has no projection")).toBeInTheDocument();
     });
+  });
+
+  it("explicitly applies the transfer and links back to My Team on success", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+
+    const fetchMock = mockFetchWithApply({
+      squad_id: 1,
+      name: "My Team",
+      bank: 1.0,
+      free_transfers: 1,
+      projection_totals: null,
+      bench_projection_totals: null,
+      captain_adjusted_projection_totals: null,
+      gameweek_numbers: [],
+      players: [],
+    });
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Low1High5")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Preview transfer" })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Apply transfer" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply transfer" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Transfer applied")).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("link", { name: "View My Team" })).toHaveAttribute(
+      "href",
+      "/my-team",
+    );
+
+    const applyCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/apply"));
+    expect(applyCall).toBeDefined();
+    expect(applyCall?.[1]?.method).toBe("POST");
+    expect(JSON.parse(String(applyCall?.[1]?.body))).toEqual({ player_in_id: 201 });
+  });
+
+  it("shows an error message when applying fails, without a false success state", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+
+    mockFetchWithApply(
+      {
+        detail: {
+          code: "transfer_illegal",
+          message: "This transfer is not legal: insufficient_bank",
+          errors: ["insufficient_bank"],
+        },
+      },
+      422,
+    );
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Low1High5")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Preview transfer" })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Apply transfer" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply transfer" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("This transfer is not legal: insufficient_bank"),
+      ).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Transfer applied")).not.toBeInTheDocument();
   });
 });

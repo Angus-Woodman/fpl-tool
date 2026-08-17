@@ -313,6 +313,65 @@ export async function fetchTransferPreview(
   return { type: "ok", data: (await response.json()) as TransferPreviewResponse };
 }
 
+export type ApplyTransferFetchResult =
+  | { type: "ok"; data: MyTeamResponse }
+  | { type: "no_squad" }
+  | { type: "player_not_found" }
+  | {
+      type: "unavailable";
+      code: string;
+      message: string;
+      missingPlayerIds: number[];
+      errors: string[];
+    };
+
+export async function applyTransfer(
+  playerOutId: number,
+  playerInId: number,
+): Promise<ApplyTransferFetchResult> {
+  const response = await fetch(`${API_BASE_URL}/my-team/transfers/${playerOutId}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ player_in_id: playerInId }),
+  });
+
+  if (response.status === 404) {
+    const body = (await response.json()) as { detail?: unknown };
+    const detail =
+      typeof body.detail === "object" && body.detail !== null
+        ? (body.detail as { code?: string })
+        : undefined;
+    if (detail?.code === "player_not_found") {
+      return { type: "player_not_found" };
+    }
+    return { type: "no_squad" };
+  }
+
+  if (response.status === 422) {
+    const body = (await response.json()) as {
+      detail?: {
+        code?: string;
+        message?: string;
+        missing_player_ids?: number[];
+        errors?: string[];
+      };
+    };
+    return {
+      type: "unavailable",
+      code: body.detail?.code ?? "transfer_apply_unavailable",
+      message: body.detail?.message ?? "This transfer could not be applied",
+      missingPlayerIds: body.detail?.missing_player_ids ?? [],
+      errors: body.detail?.errors ?? [],
+    };
+  }
+
+  if (!response.ok) {
+    throw new Error(`Apply transfer request failed with status ${response.status}`);
+  }
+
+  return { type: "ok", data: (await response.json()) as MyTeamResponse };
+}
+
 export type PlanChip = "WILDCARD" | "FREE_HIT" | "BENCH_BOOST" | "TRIPLE_CAPTAIN";
 
 export type PlanSummary = {

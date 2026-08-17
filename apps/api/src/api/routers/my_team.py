@@ -8,6 +8,10 @@ from api.repositories.my_team_projection_repository import MyTeamProjectionRepos
 from api.repositories.player_read_repository import PlayerReadRepository
 from api.repositories.projection_run_repository import ProjectionRunRepository
 from api.repositories.squad_player_lookup_repository import SquadPlayerLookupRepository
+from api.schemas.apply_transfer import (
+    ApplyTransferRequestBody,
+    ApplyTransferUnavailableResponse,
+)
 from api.schemas.my_team import (
     CurrentSquadPlayerResponse,
     CurrentSquadResponse,
@@ -28,6 +32,7 @@ from api.schemas.transfers import (
     TransferExplorerResponse,
     TransferExplorerUnavailableResponse,
 )
+from api.services.apply_transfer import ApplyTransferFailure, ApplyTransferService
 from api.services.current_squad import (
     CurrentSquadPlayerSelection,
     UpsertCurrentSquadRequest,
@@ -37,7 +42,7 @@ from api.services.get_my_team_recommendation import (
     GetMyTeamRecommendationService,
     MyTeamRecommendationFailure,
 )
-from api.services.get_my_team_view import GetMyTeamViewService
+from api.services.get_my_team_view import GetMyTeamViewService, MyTeamViewRecord
 from api.services.get_transfer_explorer import (
     GetTransferExplorerService,
     TransferExplorerFailure,
@@ -102,14 +107,22 @@ def get_transfer_preview_service(
     )
 
 
-@router.get("", response_model=CurrentSquadResponse)
-def get_my_team(
-    service: Annotated[GetMyTeamViewService, Depends(get_current_squad_service)],
-) -> CurrentSquadResponse:
-    result = service.execute()
-    if result is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No squad saved yet")
+def get_apply_transfer_service(
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> ApplyTransferService:
+    return ApplyTransferService(
+        CurrentSquadRepository(db_session),
+        ProjectionRunRepository(db_session),
+        MyTeamProjectionRepository(db_session),
+        PlayerReadRepository(db_session),
+        GetMyTeamViewService(
+            CurrentSquadRepository(db_session),
+            MyTeamProjectionRepository(db_session),
+        ),
+    )
 
+
+def _map_my_team_view_to_response(result: MyTeamViewRecord) -> CurrentSquadResponse:
     return CurrentSquadResponse(
         squad_id=result.squad_id,
         name=result.name,
@@ -161,6 +174,17 @@ def get_my_team(
             for player in result.players
         ],
     )
+
+
+@router.get("", response_model=CurrentSquadResponse)
+def get_my_team(
+    service: Annotated[GetMyTeamViewService, Depends(get_current_squad_service)],
+) -> CurrentSquadResponse:
+    result = service.execute()
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No squad saved yet")
+
+    return _map_my_team_view_to_response(result)
 
 
 @router.put("", response_model=CurrentSquadResponse)
@@ -386,3 +410,45 @@ def get_transfer_preview(
         captain_changed=result.captain_changed,
         vice_captain_changed=result.vice_captain_changed,
     )
+
+
+@router.post(
+    "/transfers/{player_out_id}/apply",
+    response_model=CurrentSquadResponse,
+    responses={422: {"model": ApplyTransferUnavailableResponse}},
+)
+def apply_transfer(
+    player_out_id: int,
+    body: ApplyTransferRequestBody,
+    db_session: Annotated[Session, Depends(get_db_session)],
+    service: Annotated[ApplyTransferService, Depends(get_apply_transfer_service)],
+) -> CurrentSquadResponse:
+    result = service.execute(player_out_id, body.player_in_id)
+
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No squad saved yet")
+
+    if isinstance(result, ApplyTransferFailure):
+        db_session.rollback()
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if result.code == "player_not_found"
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": result.code,
+                "message": result.message,
+                "missing_player_ids": list(result.missing_player_ids),
+                "errors": list(result.errors),
+            },
+        )
+
+    try:
+        db_session.commit()
+    except Exception:
+        db_session.rollback()
+        raise
+
+    return _map_my_team_view_to_response(result)
