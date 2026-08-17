@@ -238,6 +238,81 @@ export async function fetchTransferExplorer(
   return { type: "ok", data: (await response.json()) as TransferExplorerResponse };
 }
 
+export type LineupSummary = {
+  starting_xi: number[];
+  bench_goalkeeper: number;
+  bench_outfield: number[];
+  captain: number;
+  vice_captain: number;
+  starting_xi_points: number;
+  captain_adjusted_points: number;
+};
+
+export type TransferPreviewResponse = {
+  model_version: string;
+  projection_run_id: number;
+  generated_at: string;
+  target_gameweek_number: number;
+  bank: number;
+  resulting_bank: number;
+  selling_price_is_approximate: boolean;
+  player_out_id: number;
+  player_in_id: number;
+  is_legal: boolean;
+  errors: string[];
+  projected_team_gain: number;
+  direct_player_xpts_difference: number;
+  lineup_before: LineupSummary | null;
+  lineup_after: LineupSummary | null;
+  captain_changed: boolean;
+  vice_captain_changed: boolean;
+};
+
+export type TransferPreviewFetchResult =
+  | { type: "ok"; data: TransferPreviewResponse }
+  | { type: "no_squad" }
+  | { type: "player_not_found" }
+  | { type: "unavailable"; code: string; message: string; missingPlayerIds: number[] };
+
+export async function fetchTransferPreview(
+  playerOutId: number,
+  playerInId: number,
+): Promise<TransferPreviewFetchResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/my-team/transfers/${playerOutId}/preview?player_in_id=${playerInId}`,
+  );
+
+  if (response.status === 404) {
+    const body = (await response.json()) as { detail?: unknown };
+    const detail =
+      typeof body.detail === "object" && body.detail !== null
+        ? (body.detail as { code?: string })
+        : undefined;
+    if (detail?.code === "player_not_found") {
+      return { type: "player_not_found" };
+    }
+    return { type: "no_squad" };
+  }
+
+  if (response.status === 422) {
+    const body = (await response.json()) as {
+      detail?: { code?: string; message?: string; missing_player_ids?: number[] };
+    };
+    return {
+      type: "unavailable",
+      code: body.detail?.code ?? "transfer_preview_unavailable",
+      message: body.detail?.message ?? "This transfer could not be previewed",
+      missingPlayerIds: body.detail?.missing_player_ids ?? [],
+    };
+  }
+
+  if (!response.ok) {
+    throw new Error(`Transfer preview request failed with status ${response.status}`);
+  }
+
+  return { type: "ok", data: (await response.json()) as TransferPreviewResponse };
+}
+
 export type PlanChip = "WILDCARD" | "FREE_HIT" | "BENCH_BOOST" | "TRIPLE_CAPTAIN";
 
 export type PlanSummary = {

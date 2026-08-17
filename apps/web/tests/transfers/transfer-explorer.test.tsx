@@ -226,4 +226,121 @@ describe("TransferExplorer", () => {
 
     expect(routerPush).toHaveBeenCalledWith("/transfers?out=9");
   });
+
+  it("opens a preview without persisting the squad, and renders the resulting XI/gain", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/my-team")) {
+        return { ok: true, json: async () => buildSquadResponse() } as Response;
+      }
+      if (url.includes("/preview")) {
+        return {
+          ok: true,
+          json: async () => ({
+            model_version: "component_v3",
+            projection_run_id: 42,
+            generated_at: "2026-08-16T08:10:00+00:00",
+            target_gameweek_number: 5,
+            bank: 1.5,
+            resulting_bank: 1.0,
+            selling_price_is_approximate: true,
+            player_out_id: 9,
+            player_in_id: 202,
+            is_legal: true,
+            errors: [],
+            projected_team_gain: 2.6,
+            direct_player_xpts_difference: 1.2,
+            lineup_before: {
+              starting_xi: [1, 3, 9],
+              bench_goalkeeper: 2,
+              bench_outfield: [4, 5, 6],
+              captain: 9,
+              vice_captain: 1,
+              starting_xi_points: 30.0,
+              captain_adjusted_points: 33.3,
+            },
+            lineup_after: {
+              starting_xi: [1, 3, 202],
+              bench_goalkeeper: 2,
+              bench_outfield: [4, 5, 6],
+              captain: 202,
+              vice_captain: 1,
+              starting_xi_points: 30.7,
+              captain_adjusted_points: 35.9,
+            },
+            captain_changed: true,
+            vice_captain_changed: false,
+          }),
+        } as Response;
+      }
+      if (url.includes("/my-team/transfers/")) {
+        return { ok: true, json: async () => buildExplorerResponse() } as Response;
+      }
+      throw new Error(`Unexpected fetch call: ${url}`);
+    });
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Low1High5")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Preview transfer" })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preview: MID Nine → Low1High5")).toBeInTheDocument();
+    });
+
+    const previewSection = screen.getByText("Preview: MID Nine → Low1High5").closest("section");
+    expect(previewSection).not.toBeNull();
+    expect(previewSection).toHaveTextContent("£1.0m");
+    expect(screen.getByText(/Projected gain: \+2.6 xPts/)).toBeInTheDocument();
+    expect(previewSection).toHaveTextContent("Captain changes.");
+
+    const putCalls = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(putCalls).toHaveLength(0);
+  });
+
+  it("shows an error message when the preview cannot be computed", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/my-team")) {
+        return { ok: true, json: async () => buildSquadResponse() } as Response;
+      }
+      if (url.includes("/preview")) {
+        return {
+          ok: false,
+          status: 422,
+          json: async () => ({
+            detail: {
+              code: "missing_projections",
+              message: "Player 202 has no projection",
+              missing_player_ids: [202],
+            },
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => buildExplorerResponse() } as Response;
+    });
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Low1High5")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Preview transfer" })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText("Player 202 has no projection")).toBeInTheDocument();
+    });
+  });
 });

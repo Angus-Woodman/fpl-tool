@@ -23,9 +23,11 @@ function formatSignedPoints(value: number): string {
 export function ReplacementTable({
   candidates,
   horizon,
+  onPreview,
 }: {
   candidates: RankedTransferCandidate[];
   horizon: TransferHorizon;
+  onPreview?: (playerId: number) => void;
 }): JSX.Element {
   if (candidates.length === 0) {
     return (
@@ -48,6 +50,7 @@ export function ReplacementTable({
           <th className="py-2 pr-3">1 GW</th>
           <th className="py-2 pr-3">3 GW</th>
           <th className="py-2 pr-3">5 GW</th>
+          {onPreview && <th className="py-2 pr-3">&nbsp;</th>}
         </tr>
       </thead>
       <tbody>
@@ -65,6 +68,17 @@ export function ReplacementTable({
                 {formatSignedPoints(candidate.team_gain_by_horizon[column] ?? 0)} xPts
               </td>
             ))}
+            {onPreview && (
+              <td className="py-2 pr-3">
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                  onClick={() => onPreview(candidate.player_id)}
+                >
+                  Preview transfer
+                </button>
+              </td>
+            )}
           </tr>
         ))}
       </tbody>

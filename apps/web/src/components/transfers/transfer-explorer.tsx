@@ -9,11 +9,13 @@ import {
   TransferHorizon,
   fetchMyTeam,
   fetchTransferExplorer,
+  fetchTransferPreview,
 } from "@/lib/api";
 import { ProjectionRunBadge } from "@/components/team/projection-run-badge";
 import { HorizonSelector } from "@/components/transfers/horizon-selector";
 import { OutgoingPlayerSelector } from "@/components/transfers/outgoing-player-selector";
 import { ReplacementTable } from "@/components/transfers/replacement-table";
+import { TransferPreview, type TransferPreviewState } from "@/components/transfers/transfer-preview";
 
 type SquadState =
   | { type: "loading" }
@@ -40,6 +42,8 @@ export function TransferExplorer(): JSX.Element {
   const [squadState, setSquadState] = useState<SquadState>({ type: "loading" });
   const [explorerState, setExplorerState] = useState<ExplorerState>({ type: "idle" });
   const [horizon, setHorizon] = useState<TransferHorizon>(5);
+  const [previewCandidateId, setPreviewCandidateId] = useState<number | null>(null);
+  const [previewState, setPreviewState] = useState<TransferPreviewState>({ type: "loading" });
 
   useEffect(() => {
     let cancelled = false;
@@ -121,6 +125,36 @@ export function TransferExplorer(): JSX.Element {
     router.push(`/transfers?out=${id}`);
   }
 
+  async function handlePreview(candidateId: number): Promise<void> {
+    if (!hasValidOutParam) {
+      return;
+    }
+
+    setPreviewCandidateId(candidateId);
+    setPreviewState({ type: "loading" });
+
+    try {
+      const result = await fetchTransferPreview(playerOutId as number, candidateId);
+      if (result.type === "ok") {
+        setPreviewState({ type: "ready", data: result.data });
+      } else if (result.type === "no_squad" || result.type === "player_not_found") {
+        setPreviewState({
+          type: "unavailable",
+          message: "This transfer could not be previewed.",
+        });
+      } else {
+        setPreviewState({ type: "unavailable", message: result.message });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load the preview";
+      setPreviewState({ type: "error", message });
+    }
+  }
+
+  function handleClosePreview(): void {
+    setPreviewCandidateId(null);
+  }
+
   if (squadState.type === "loading") {
     return <p className="text-sm text-slate-600">Loading your squad...</p>;
   }
@@ -186,6 +220,19 @@ export function TransferExplorer(): JSX.Element {
   }
 
   const { data } = explorerState;
+  const previewCandidate = data.candidates.find(
+    (candidate) => candidate.player_id === previewCandidateId,
+  );
+  const namesById = new Map<number, string>([
+    ...squadState.team.players.map(
+      (player): [number, string] => [player.player_id, player.web_name],
+    ),
+    ...data.candidates.map((candidate): [number, string] => [
+      candidate.player_id,
+      candidate.web_name,
+    ]),
+  ]);
+  const resolveName = (playerId: number): string => namesById.get(playerId) ?? `#${playerId}`;
 
   return (
     <section className="space-y-5">
@@ -221,7 +268,17 @@ export function TransferExplorer(): JSX.Element {
         <HorizonSelector value={horizon} onChange={setHorizon} />
       </div>
 
-      <ReplacementTable candidates={data.candidates} horizon={horizon} />
+      <ReplacementTable candidates={data.candidates} horizon={horizon} onPreview={handlePreview} />
+
+      {previewCandidate && (
+        <TransferPreview
+          state={previewState}
+          outgoingName={data.outgoing.web_name}
+          incomingName={previewCandidate.web_name}
+          onClose={handleClosePreview}
+          resolveName={resolveName}
+        />
+      )}
     </section>
   );
 }

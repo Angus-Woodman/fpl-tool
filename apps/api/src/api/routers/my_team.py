@@ -17,6 +17,11 @@ from api.schemas.my_team import (
     PlayerFixtureProjectionResponse,
     UpsertCurrentSquadRequestBody,
 )
+from api.schemas.transfer_preview import (
+    LineupSummaryResponse,
+    TransferPreviewResponse,
+    TransferPreviewUnavailableResponse,
+)
 from api.schemas.transfers import (
     OutgoingPlayerSummaryResponse,
     RankedTransferCandidateResponse,
@@ -36,6 +41,10 @@ from api.services.get_my_team_view import GetMyTeamViewService
 from api.services.get_transfer_explorer import (
     GetTransferExplorerService,
     TransferExplorerFailure,
+)
+from api.services.get_transfer_preview import (
+    GetTransferPreviewService,
+    TransferPreviewFailure,
 )
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -75,6 +84,17 @@ def get_transfer_explorer_service(
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> GetTransferExplorerService:
     return GetTransferExplorerService(
+        CurrentSquadRepository(db_session),
+        ProjectionRunRepository(db_session),
+        MyTeamProjectionRepository(db_session),
+        PlayerReadRepository(db_session),
+    )
+
+
+def get_transfer_preview_service(
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> GetTransferPreviewService:
+    return GetTransferPreviewService(
         CurrentSquadRepository(db_session),
         ProjectionRunRepository(db_session),
         MyTeamProjectionRepository(db_session),
@@ -291,4 +311,78 @@ def get_transfer_explorer(
             for candidate in result.candidates
         ],
         evaluated_gameweek_numbers=result.evaluated_gameweek_numbers,
+    )
+
+
+@router.get(
+    "/transfers/{player_out_id}/preview",
+    response_model=TransferPreviewResponse,
+    responses={422: {"model": TransferPreviewUnavailableResponse}},
+)
+def get_transfer_preview(
+    player_out_id: int,
+    player_in_id: int,
+    service: Annotated[GetTransferPreviewService, Depends(get_transfer_preview_service)],
+) -> TransferPreviewResponse:
+    result = service.execute(player_out_id, player_in_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No squad saved yet")
+
+    if isinstance(result, TransferPreviewFailure):
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if result.code == "player_not_found"
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": result.code,
+                "message": result.message,
+                "missing_player_ids": list(result.missing_player_ids),
+            },
+        )
+
+    return TransferPreviewResponse(
+        model_version=result.model_version,
+        projection_run_id=result.projection_run_id,
+        generated_at=result.generated_at.isoformat(),
+        target_gameweek_number=result.target_gameweek_number,
+        bank=result.bank,
+        resulting_bank=result.resulting_bank,
+        selling_price_is_approximate=result.selling_price_is_approximate,
+        player_out_id=result.player_out_id,
+        player_in_id=result.player_in_id,
+        is_legal=result.is_legal,
+        errors=list(result.errors),
+        projected_team_gain=result.projected_team_gain,
+        direct_player_xpts_difference=result.direct_player_xpts_difference,
+        lineup_before=(
+            LineupSummaryResponse(
+                starting_xi=list(result.lineup_before.starting_xi),
+                bench_goalkeeper=result.lineup_before.bench_goalkeeper,
+                bench_outfield=list(result.lineup_before.bench_outfield),
+                captain=result.lineup_before.captain,
+                vice_captain=result.lineup_before.vice_captain,
+                starting_xi_points=result.lineup_before.starting_xi_points,
+                captain_adjusted_points=result.lineup_before.captain_adjusted_points,
+            )
+            if result.lineup_before is not None
+            else None
+        ),
+        lineup_after=(
+            LineupSummaryResponse(
+                starting_xi=list(result.lineup_after.starting_xi),
+                bench_goalkeeper=result.lineup_after.bench_goalkeeper,
+                bench_outfield=list(result.lineup_after.bench_outfield),
+                captain=result.lineup_after.captain,
+                vice_captain=result.lineup_after.vice_captain,
+                starting_xi_points=result.lineup_after.starting_xi_points,
+                captain_adjusted_points=result.lineup_after.captain_adjusted_points,
+            )
+            if result.lineup_after is not None
+            else None
+        ),
+        captain_changed=result.captain_changed,
+        vice_captain_changed=result.vice_captain_changed,
     )
