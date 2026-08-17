@@ -211,3 +211,75 @@ def test_returns_empty_list_for_no_player_ids(db_session: Session) -> None:
     repository = MyTeamProjectionRepository(db_session)
 
     assert repository.list_player_fixture_projections_for_run([], 1) == []
+
+
+def test_list_latest_never_mixes_models_sharing_a_generated_at(db_session: Session) -> None:
+    """The regression behind duplicated opponent labels and inflated totals
+    on My Team: dual-write's baseline_v1/v2/component_v3 sharing one
+    generated_at must not all be returned as if they were "the latest"."""
+    _clear(db_session)
+    player_id, gameweek_id, fixture_id = _seed(db_session)
+
+    v1_run_id = _create_run(db_session, model_version="baseline_v1", generated_at=GENERATED_AT)
+    v2_run_id = _create_run(db_session, model_version="baseline_v2", generated_at=GENERATED_AT)
+    v3_run_id = _create_run(db_session, model_version="component_v3", generated_at=GENERATED_AT)
+
+    for run_id, model_version, points in (
+        (v1_run_id, "baseline_v1", 2.0),
+        (v2_run_id, "baseline_v2", 3.0),
+        (v3_run_id, "component_v3", 4.0),
+    ):
+        _create_projection(
+            db_session,
+            player_id=player_id,
+            fixture_id=fixture_id,
+            gameweek_id=gameweek_id,
+            run_id=run_id,
+            model_version=model_version,
+            generated_at=GENERATED_AT,
+            projected_points=points,
+        )
+    db_session.commit()
+
+    repository = MyTeamProjectionRepository(db_session)
+    rows = repository.list_latest_player_fixture_projections([player_id])
+
+    assert len(rows) == 1
+    assert rows[0].projected_points == 4.0
+
+
+def test_list_latest_can_request_a_different_model_explicitly(db_session: Session) -> None:
+    _clear(db_session)
+    player_id, gameweek_id, fixture_id = _seed(db_session)
+
+    v1_run_id = _create_run(db_session, model_version="baseline_v1", generated_at=GENERATED_AT)
+    v3_run_id = _create_run(db_session, model_version="component_v3", generated_at=GENERATED_AT)
+
+    _create_projection(
+        db_session,
+        player_id=player_id,
+        fixture_id=fixture_id,
+        gameweek_id=gameweek_id,
+        run_id=v1_run_id,
+        model_version="baseline_v1",
+        generated_at=GENERATED_AT,
+        projected_points=2.0,
+    )
+    _create_projection(
+        db_session,
+        player_id=player_id,
+        fixture_id=fixture_id,
+        gameweek_id=gameweek_id,
+        run_id=v3_run_id,
+        model_version="component_v3",
+        generated_at=GENERATED_AT,
+        projected_points=4.0,
+    )
+    db_session.commit()
+
+    repository = MyTeamProjectionRepository(db_session)
+    rows = repository.list_latest_player_fixture_projections(
+        [player_id], model_version="baseline_v1"
+    )
+
+    assert [row.projected_points for row in rows] == [2.0]

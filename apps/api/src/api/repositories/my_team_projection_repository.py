@@ -8,7 +8,20 @@ from sqlalchemy import Row, func, select
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql import Select
 
-from api.models import FixtureModel, GameweekModel, PlayerModel, ProjectionModel, TeamModel
+from api.models import (
+    FixtureModel,
+    GameweekModel,
+    PlayerModel,
+    ProjectionModel,
+    ProjectionRunModel,
+    TeamModel,
+)
+
+# The active user-facing model. Dual-write can generate baseline_v1,
+# baseline_v2, and component_v3 projections from the same generated_at, so
+# selecting "latest" by timestamp alone (with no model filter) would silently
+# mix all three models' rows together.
+DEFAULT_MODEL_VERSION = "component_v3"
 
 
 @dataclass(frozen=True)
@@ -27,14 +40,19 @@ class MyTeamProjectionRepository:
         self._session = session
 
     def list_latest_player_fixture_projections(
-        self, player_ids: list[int]
+        self, player_ids: list[int], model_version: str = DEFAULT_MODEL_VERSION
     ) -> list[PlayerProjectionFixtureRecord]:
+        """Latest run of one explicit model only -- never a mix of whichever
+        models happen to share the newest generated_at."""
         if not player_ids:
             return []
 
         latest_generated_at = self._session.execute(
-            select(func.max(ProjectionModel.generated_at)).where(
-                ProjectionModel.player_id.in_(player_ids)
+            select(func.max(ProjectionModel.generated_at))
+            .join(ProjectionRunModel, ProjectionRunModel.id == ProjectionModel.run_id)
+            .where(
+                ProjectionModel.player_id.in_(player_ids),
+                ProjectionRunModel.model_version == model_version,
             )
         ).scalar_one()
 
@@ -42,8 +60,11 @@ class MyTeamProjectionRepository:
             return []
 
         rows = self._session.execute(
-            self._base_statement(player_ids).where(
-                ProjectionModel.generated_at == latest_generated_at
+            self._base_statement(player_ids)
+            .join(ProjectionRunModel, ProjectionRunModel.id == ProjectionModel.run_id)
+            .where(
+                ProjectionModel.generated_at == latest_generated_at,
+                ProjectionRunModel.model_version == model_version,
             )
         ).all()
         return self._rows_to_records(rows)
