@@ -5,6 +5,7 @@ from typing import Annotated
 from api.db.session import get_db_session
 from api.repositories.current_squad_repository import CurrentSquadRepository
 from api.repositories.my_team_projection_repository import MyTeamProjectionRepository
+from api.repositories.player_read_repository import PlayerReadRepository
 from api.repositories.projection_run_repository import ProjectionRunRepository
 from api.repositories.squad_player_lookup_repository import SquadPlayerLookupRepository
 from api.schemas.my_team import (
@@ -16,6 +17,12 @@ from api.schemas.my_team import (
     PlayerFixtureProjectionResponse,
     UpsertCurrentSquadRequestBody,
 )
+from api.schemas.transfers import (
+    OutgoingPlayerSummaryResponse,
+    RankedTransferCandidateResponse,
+    TransferExplorerResponse,
+    TransferExplorerUnavailableResponse,
+)
 from api.services.current_squad import (
     CurrentSquadPlayerSelection,
     UpsertCurrentSquadRequest,
@@ -26,6 +33,10 @@ from api.services.get_my_team_recommendation import (
     MyTeamRecommendationFailure,
 )
 from api.services.get_my_team_view import GetMyTeamViewService
+from api.services.get_transfer_explorer import (
+    GetTransferExplorerService,
+    TransferExplorerFailure,
+)
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -57,6 +68,17 @@ def get_my_team_recommendation_service(
         CurrentSquadRepository(db_session),
         ProjectionRunRepository(db_session),
         MyTeamProjectionRepository(db_session),
+    )
+
+
+def get_transfer_explorer_service(
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> GetTransferExplorerService:
+    return GetTransferExplorerService(
+        CurrentSquadRepository(db_session),
+        ProjectionRunRepository(db_session),
+        MyTeamProjectionRepository(db_session),
+        PlayerReadRepository(db_session),
     )
 
 
@@ -201,4 +223,72 @@ def get_my_team_recommendation(
         vice_captain=result.vice_captain,
         player_projected_points=result.player_projected_points,
         current_captain_adjusted_points=result.current_captain_adjusted_points,
+    )
+
+
+@router.get(
+    "/transfers/{player_out_id}",
+    response_model=TransferExplorerResponse,
+    responses={422: {"model": TransferExplorerUnavailableResponse}},
+)
+def get_transfer_explorer(
+    player_out_id: int,
+    service: Annotated[GetTransferExplorerService, Depends(get_transfer_explorer_service)],
+    primary_horizon: int = 5,
+) -> TransferExplorerResponse:
+    if primary_horizon not in (1, 3, 5):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="primary_horizon must be one of 1, 3, or 5",
+        )
+
+    result = service.execute(player_out_id, primary_horizon=primary_horizon)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No squad saved yet")
+
+    if isinstance(result, TransferExplorerFailure):
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if result.code == "player_not_found"
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": result.code,
+                "message": result.message,
+                "missing_player_ids": list(result.missing_player_ids),
+            },
+        )
+
+    return TransferExplorerResponse(
+        model_version=result.model_version,
+        projection_run_id=result.projection_run_id,
+        generated_at=result.generated_at.isoformat(),
+        primary_horizon=result.primary_horizon,
+        bank=result.bank,
+        selling_price_is_approximate=result.selling_price_is_approximate,
+        outgoing=OutgoingPlayerSummaryResponse(
+            player_id=result.outgoing.player_id,
+            web_name=result.outgoing.web_name,
+            position=result.outgoing.position,
+            team_short_name=result.outgoing.team_short_name,
+            current_price=result.outgoing.current_price,
+            selling_price=result.outgoing.selling_price,
+            projected_points_by_horizon=result.outgoing.projected_points_by_horizon,
+        ),
+        candidates=[
+            RankedTransferCandidateResponse(
+                player_id=candidate.player_id,
+                web_name=candidate.web_name,
+                team_short_name=candidate.team_short_name,
+                price=candidate.price,
+                resulting_bank=candidate.resulting_bank,
+                team_gain_by_horizon=candidate.team_gain_by_horizon,
+                direct_xpts_difference=candidate.direct_xpts_difference,
+                gameweeks_evaluated=candidate.gameweeks_evaluated,
+            )
+            for candidate in result.candidates
+        ],
+        evaluated_gameweek_numbers=result.evaluated_gameweek_numbers,
     )

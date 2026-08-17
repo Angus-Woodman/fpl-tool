@@ -40,28 +40,43 @@ class PlayerQueryResult:
     page_size: int
 
 
+@dataclass(frozen=True)
+class CandidatePlayerRecord:
+    """A transfer-market candidate's static profile. Availability
+    (status == "a") is the only filter applied here -- same-position,
+    already-owned, budget, and club-limit legality are all fpl_engine's
+    responsibility, not this repository's."""
+
+    player_id: int
+    web_name: str
+    team_id: int
+    team_short_name: str
+    current_price: float
+    position: str
+    status: str
+
+
 class PlayerReadRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def list_players(self, query: PlayerQuery) -> PlayerQueryResult:
-        base = (
-            select(
-                PlayerModel.id,
-                PlayerModel.web_name,
-                PlayerModel.first_name,
-                PlayerModel.second_name,
-                TeamModel.name,
-                TeamModel.short_name,
-                PlayerModel.position,
-                PlayerModel.current_price,
-                PlayerModel.status,
-            )
-            .join(TeamModel, TeamModel.id == PlayerModel.team_id)
-        )
+        base = select(
+            PlayerModel.id,
+            PlayerModel.web_name,
+            PlayerModel.first_name,
+            PlayerModel.second_name,
+            TeamModel.name,
+            TeamModel.short_name,
+            PlayerModel.position,
+            PlayerModel.current_price,
+            PlayerModel.status,
+        ).join(TeamModel, TeamModel.id == PlayerModel.team_id)
 
-        count_stmt = select(func.count()).select_from(PlayerModel).join(
-            TeamModel, TeamModel.id == PlayerModel.team_id
+        count_stmt = (
+            select(func.count())
+            .select_from(PlayerModel)
+            .join(TeamModel, TeamModel.id == PlayerModel.team_id)
         )
 
         if query.search:
@@ -118,4 +133,60 @@ class PlayerReadRepository:
             total=total,
             page=query.page,
             page_size=query.page_size,
+        )
+
+    def list_available_by_position(self, position: str) -> list[CandidatePlayerRecord]:
+        rows = self._session.execute(
+            select(
+                PlayerModel.id,
+                PlayerModel.web_name,
+                PlayerModel.team_id,
+                TeamModel.short_name,
+                PlayerModel.current_price,
+                PlayerModel.position,
+                PlayerModel.status,
+            )
+            .join(TeamModel, TeamModel.id == PlayerModel.team_id)
+            .where(PlayerModel.position == position, PlayerModel.status == "a")
+        ).all()
+
+        return [
+            CandidatePlayerRecord(
+                player_id=row[0],
+                web_name=row[1],
+                team_id=row[2],
+                team_short_name=row[3],
+                current_price=float(row[4]),
+                position=row[5].value if hasattr(row[5], "value") else str(row[5]),
+                status=row[6],
+            )
+            for row in rows
+        ]
+
+    def get_by_id(self, player_id: int) -> CandidatePlayerRecord | None:
+        row = self._session.execute(
+            select(
+                PlayerModel.id,
+                PlayerModel.web_name,
+                PlayerModel.team_id,
+                TeamModel.short_name,
+                PlayerModel.current_price,
+                PlayerModel.position,
+                PlayerModel.status,
+            )
+            .join(TeamModel, TeamModel.id == PlayerModel.team_id)
+            .where(PlayerModel.id == player_id)
+        ).first()
+
+        if row is None:
+            return None
+
+        return CandidatePlayerRecord(
+            player_id=row[0],
+            web_name=row[1],
+            team_id=row[2],
+            team_short_name=row[3],
+            current_price=float(row[4]),
+            position=row[5].value if hasattr(row[5], "value") else str(row[5]),
+            status=row[6],
         )
