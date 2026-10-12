@@ -116,7 +116,6 @@ For substantial tasks, report:
 
 Task-specific workflows live under `.github/skills/`:
 
-- `feature-implementation` — bounded feature implementation workflow.
 - `ui-browser-verification` — verifying substantial UI changes in a real
   browser.
 - `code-review` — independent review of completed work.
