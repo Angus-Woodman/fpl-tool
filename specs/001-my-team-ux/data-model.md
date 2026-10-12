@@ -1,8 +1,11 @@
 # Phase 1 Data Model: My Team UX and Transfer Exploration
 
 No database schema changes. All entities below map to existing persisted
-records or existing/extended API response shapes; only the "Replacement
-Candidate" shape gains new fields.
+records or existing/extended API response shapes. "Replacement Candidate"
+gains two new fields (all existing fields stay fully populated, not
+optional). "Transfer Preview" gains one new rejection case but no schema
+change. A new "Lineup Legality" section documents wiring an existing,
+previously-unused domain rule into the squad-save path.
 
 ## Squad Player
 
@@ -17,21 +20,49 @@ Existing entity, unchanged. Source: `MyTeamPlayerViewRecord` /
 | `bench_order` | 1–4 when on the bench, else `null`; the bench goalkeeper and the 3 outfield subs share this field today — FR-004a's reorder only ever swaps it between two non-GK bench players |
 | `is_captain` / `is_vice_captain` | unchanged; carried by whichever player occupies the starting slot after a swap, per existing behaviour |
 
+## Lineup Legality (authoritative, domain-owned)
+
+Not a new entity — this documents wiring the squad-save path to the
+existing `fpl_engine.rules.SquadSlot` / `validate_squad` (which composes
+`validate_squad_composition` + `validate_starting_formation`), which today
+is defined but never called from the save path (see
+[research.md](./research.md), decision 3).
+
+| Field (`SquadSlot`) | Source on the save request |
+|---|---|
+| `player_id` | request player id |
+| `position` | `PlayerPosition(...)` from the existing `SquadPlayerLookupItem` lookup |
+| `team_id` | same lookup |
+| `is_starting`, `bench_order`, `is_captain`, `is_vice_captain` | request fields, unchanged |
+
+`UpsertCurrentSquadService._validate` builds one `SquadSlot` per requested
+player from data it already fetches, and calls `validate_squad(slots)`
+instead of its current hand-rolled checks. `RuleViolationError` maps to the
+same external 400 response as today's `ValueError` — no API contract
+change, only an internal implementation swap from a duplicate, incomplete
+check to the authoritative one (it additionally enforces
+`validate_starting_formation`, which nothing checks today). This is the
+backend authority that FR-004's "remains valid under the existing
+squad/formation rules" relies on; the frontend's selection predicates
+(below) are UX-only and never the final word.
+
 ## Selection (new, client-only, not persisted)
 
 Represents the manager's in-progress choice while rearranging the team.
 Exists only in `apps/web` component state (`my-team-board.tsx`); never sent
-to or stored by the backend.
+to or stored by the backend as such — a completed swap is sent through the
+existing `saveMyTeam` request, which is now authoritatively re-validated
+server-side (see Lineup Legality above) regardless of what the frontend
+predicate believed was valid.
 
 | Field | Notes |
 |---|---|
 | `selectedPlayerId` | `number \| null` — the squad player currently selected |
-| *(derived)* valid target ids | computed per render from `selectedPlayerId` via `canSwapStarterWithBench` (starter ⇄ bench) or `canReorderBench` (bench ⇄ bench); never itself stored |
+| *(derived)* valid target ids | computed per render from `selectedPlayerId` via `canSwapStarterWithBench` (starter ⇄ bench) or `canReorderBench` (bench ⇄ bench); UX pre-filtering only, never itself stored or authoritative |
 
 Selecting a different player replaces the prior selection (per the spec's
 Assumptions); there is no server round-trip until a swap is actually
-performed, and swaps are persisted immediately via the existing `saveMyTeam`
-call, same as today's Edit Team save.
+performed.
 
 ## Replacement Candidate (extended)
 
@@ -41,23 +72,45 @@ Source: `RankedReplacement` (domain) → `RankedTransferCandidateResponse`
 | Field | Status | Notes |
 |---|---|---|
 | `player_id`, `web_name`, `team_short_name`, `price` | unchanged | pool membership fields (same position, not owned) are already enforced before this stage and never change |
-| `resulting_bank`, `team_gain_by_horizon`, `direct_xpts_difference`, `gameweeks_evaluated` | now **optional** | present only when `is_legal` is `true`; a transfer that fails legality has no reliable post-transfer gain to report |
-| `is_legal` | **new** | `bool`; `false` means the candidate is visible but currently unavailable |
-| `unavailable_reasons` | **new** | `list[str]`; the same error codes `evaluate_single_transfer` already produces (`insufficient_bank`, `club_limit_exceeded`, `invalid_position_composition`); empty when `is_legal` is `true` |
+| `resulting_bank`, `team_gain_by_horizon`, `direct_xpts_difference`, `gameweeks_evaluated` | **unchanged, still always present** | `evaluate_single_transfer` already computes these for every in-pool candidate regardless of legality (position composition is preserved by same-position swaps); they are **not** made optional (see [research.md](./research.md), decision 1) |
+| `is_legal` | **new** | `bool`; `false` means the candidate is visible, fully comparable, but currently unavailable to apply |
+| `unavailable_reasons` | **new** | `list[str]`; the same error codes `evaluate_single_transfer` already produces (`insufficient_bank`, `club_limit_exceeded`, and defensively `invalid_position_composition`); empty when `is_legal` is `true` |
 
-Reason-code → user-facing text mapping (presentation concern, `apps/web`):
+Sort order: a single key — descending `team_gain_by_horizon[primary_horizon]`,
+`player_id` tie-break — applied across the whole pool, legal and illegal
+candidates together (no special-casing; see research.md, decision 2).
+
+## Legality reason mapping (shared, presentation-only)
+
+One mapping, used by **both** the candidate comparison's
+`unavailable_reasons` and Transfer Preview's `errors` (same code
+vocabulary), so the two surfaces can never drift or show raw codes to the
+user (see [research.md](./research.md), decision 9):
 
 | Code | Shown as |
 |---|---|
 | `insufficient_bank` | insufficient budget |
 | `club_limit_exceeded` | already have 3 players from that club |
-| `invalid_position_composition` | squad composition constraint (defensive; should not normally occur since the pool is already position-filtered upstream) |
+| `invalid_position_composition` | squad composition constraint (defensive; should not normally occur for in-pool candidates since position already matches) |
 
 ## Transfer Preview
 
-Existing entity, **no schema change**. Source: `TransferPreviewResult` /
-`TransferPreviewResponse`. Already carries `is_legal: bool` and
+Source: `TransferPreviewResult` / `TransferPreviewResponse`. Response
+schema **unchanged** — already carries `is_legal: bool` and
 `errors: tuple[str, ...]` (reusing the same codes above), and the existing
 `TransferPreview` component already renders a legality-aware preview with
-Apply disabled when illegal — this is exactly FR-015/FR-016's Preview-side
-behaviour, already in place.
+Apply disabled when illegal for in-pool candidates — this is exactly
+FR-015/FR-016's Preview-side behaviour, already in place (its only bug is
+displaying `errors` raw instead of through the shared mapping above).
+
+**New rejection case (service-level, not a schema change)**: before
+evaluating legality, `GetTransferPreviewService` now checks that
+`player_in_id` is in the candidate pool (same position as the outgoing
+player, not already in the squad). If not, it returns a new
+`player_not_in_candidate_pool` failure, mapped to the same 404-style
+response already used for `player_not_found` — Transfer Preview is
+unreachable for an out-of-pool player, per FR-013/FR-017. This check runs
+*before* — and is distinct from — the existing legality evaluation, which
+still produces a normal `ready` preview (`is_legal=false`, Apply disabled)
+for in-pool candidates that merely fail budget, club limit, or another
+squad-level constraint (see [research.md](./research.md), decision 4).

@@ -29,6 +29,12 @@ Starter Squad" action if not).
 6. Select two non-goalkeeper bench players and confirm their substitute
    order reorders; confirm the bench goalkeeper cannot be reordered against
    outfield subs (see [data-model.md](./data-model.md)).
+7. Backend authority check: with the frontend open, attempt to save a squad
+   via a direct `POST /my-team` call using a starting XI that violates
+   `STARTING_POSITION_LIMITS` (e.g. 2 goalkeepers starting); confirm the API
+   rejects it with a 400, proving the save path is now authoritatively
+   validated by `validate_squad` rather than only by frontend predicates
+   (see [data-model.md](./data-model.md), "Lineup Legality").
 
 ## Scenario 2 — Projected points hidden by default
 
@@ -44,17 +50,25 @@ Starter Squad" action if not).
 2. Confirm `/transfers` opens already showing that player as the one being
    replaced (`?out=` preserved), without re-selecting them.
 
-## Scenario 4 — Unavailable candidates stay visible and previewable
+## Scenario 4 — Unavailable candidates stay visible, comparable, and previewable
 
 1. In the resulting candidate comparison, find or construct a candidate
    that fails a transfer-legality constraint (e.g. priced above the
    available budget).
 2. Confirm it is still listed (not omitted), visually marked unavailable,
-   with a reason shown (see [contracts/transfer-explorer-get.md](./contracts/transfer-explorer-get.md)).
-3. Open its Transfer Preview; confirm the preview opens normally, repeats
-   the reason, and keeps Apply disabled.
-4. Confirm a player of a different position, or already in the squad, does
-   not appear in the comparison at all.
+   with a user-facing reason shown — not a raw code like `insufficient_bank`
+   (see [contracts/transfer-explorer-get.md](./contracts/transfer-explorer-get.md)
+   and [data-model.md](./data-model.md), "Legality reason mapping").
+3. Confirm it still shows the same comparison figures (resulting bank,
+   1/3/5-GW gain, direct xPts difference) as a legal candidate would — these
+   are not hidden or blanked out merely because the candidate is unavailable.
+4. Open its Transfer Preview; confirm the preview opens normally, repeats
+   the (mapped, non-raw) reason, and keeps Apply disabled.
+5. Confirm a player of a different position, or already in the squad, does
+   not appear in the comparison at all, **and** that directly requesting a
+   Transfer Preview for such a player (e.g. via the API) is rejected rather
+   than returning an illegal-but-viewable preview (see
+   [contracts/transfer-preview-get.md](./contracts/transfer-preview-get.md)).
 
 ## Scenario 5 — Preview → explicit apply
 
@@ -67,13 +81,23 @@ Starter Squad" action if not).
 ## Automated coverage expected from `tasks.md`
 
 - `packages/fpl_engine/tests/test_replacement_ranking.py`: illegal
-  candidates are now returned with `is_legal=False` and the matching
-  `errors`, not dropped.
-- `apps/api/tests/transfers/`: response schema includes the new fields and
-  nullability.
+  in-pool candidates are now returned (not dropped) with `is_legal=False`,
+  the matching `errors`, and their full, non-null comparison data.
+- `packages/fpl_engine/tests` (squad rules): a 5-2-3 starting formation
+  (`MID=2`) round-trips as legal through `validate_squad`, documenting why
+  the frontend's stricter `MID >= 3` check cannot be authoritative.
+- `apps/api/tests` (squad save / `current_squad`): saving a starting XI
+  that violates `validate_starting_formation` is now rejected by the API,
+  where today it is accepted.
+- `apps/api/tests/transfers/`: Transfer Explorer response includes the new
+  additive fields with full comparison data for illegal candidates;
+  Transfer Preview rejects an out-of-pool `player_in_id` with
+  `player_not_in_candidate_pool` and still returns a normal, legality-aware
+  preview for an in-pool-but-illegal one.
 - `apps/web/tests/team/` and `apps/web/tests/transfers/`: selection/swap/
-  reorder interactions, points reveal/hide, and unavailable-candidate
-  rendering.
+  reorder interactions, points reveal/hide, unavailable-candidate rendering
+  with preserved comparison data, and the shared reason-mapping used by both
+  the candidate comparison and Transfer Preview.
 - `apps/web/tests/e2e/`: one durable Playwright spec for Scenario 1 and
   Scenario 4/5 end-to-end (rearrange, explore, see an unavailable candidate,
   preview and apply a legal one).
