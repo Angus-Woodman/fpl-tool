@@ -31,6 +31,6 @@
 
 ## Notes
 
-- All three [NEEDS CLARIFICATION] markers (FR-004a, FR-008, FR-010) were
-  resolved with the user and are recorded under "Resolved Clarifications" in
-  spec.md. No open markers remain.
+- All [NEEDS CLARIFICATION] markers raised during specification and
+  clarification were resolved with the user and are recorded in the
+  `## Clarifications` section of spec.md. No open markers remain.
