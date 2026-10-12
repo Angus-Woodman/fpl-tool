@@ -103,6 +103,12 @@ selectability uses its own code/message. A known false flag excludes the
 player without an unknown-data failure, even if the other flag is missing.
 Outgoing players are not subject to the incoming flags.
 
+Precedence: structural exclusion (owned, then wrong position), then known
+non-selectable, then unknown. The failure fires only for otherwise-relevant profiles
+that reach the unknown tier. A bootstrap refresh normally resolves it; if the upstream
+source omits the field the diagnostic intentionally persists rather than returning an
+incomplete pool.
+
 ## Backward compatibility
 
 - `is_legal`, `unavailable_reasons` and `status` are additive; existing consumers that

@@ -311,3 +311,81 @@ status as transfer illegality; `can_transact` alone; defaulting absent flags
 to true; inferring flags from status; fetching live FPL separately on every
 Preview/Apply. Apply rechecks the latest imported flags, like existing
 price/club data; it is not a live upstream transaction guarantee.
+
+**Exclusion precedence**: structural exclusion (already owned, then wrong
+position), then known non-selectable (either flag `false`, even if the other is
+missing), then unknown selectability. An owned or wrong-position player with
+`false` or unknown flags therefore reports the structural reason, and a
+`false` flag beside an unknown one reports `player_not_selectable`. The
+owned-before-wrong-position order is a deterministic tie-break only.
+
+**Unknown selectability (resolved)**: if any otherwise-relevant candidate
+profile (one that passes the structural and known-non-selectable tiers) has
+unknown incoming selectability, Explorer returns the explicit
+`selectability_unknown` state rather than an incomplete pool. A bootstrap
+refresh normally resolves locally stale or newly migrated data; if the upstream
+source itself omits the field, continuing to surface the diagnostic is
+intentional.
+
+**Operational prerequisite**: once the migration exists, the local development
+database must be migrated (`make db-migrate`) and bootstrap-refreshed
+(`make data-refresh`) before any real-backend manual or browser verification.
+The migration is hand-written, never produced by running Alembic autogenerate
+against the development database, and is verified only on the dedicated test
+database. Automated tests use fixtures and the guarded `fpl_test` database and
+do not depend on this step.
+
+## 11. Legacy inline Transfer path removed with Edit Team
+
+**Decision**: The per-player "Transfer" button, "Replacement Player" dropdown
+and "Confirm Transfer" action in `my-team-board.tsx` exist only inside Edit Team
+mode, with their state (`transferPlayerPool`, `transferTargetPlayerId`,
+`transferChoicePlayerId`, `transferSavingPlayerId`, `transferError`) and helpers
+(`ensureTransferPlayerPool`, `handleOpenTransfer`, `eligibleTransferOptions`,
+`handleConfirmTransfer`). They are removed with the mode (spec FR-007a). The
+always-visible Explore Transfers → Preview → Apply journey replaces them.
+
+**Rationale**: the inline path saved directly through `PUT /my-team` with no
+Preview, which FR-017 forbids for transfers, and it cannot exist without the mode
+without becoming a second, unreviewed transfer route. Because the removal is
+stated in the spec it is not an exception to FR-021. `fetchPlayers` stays only
+where Create Starter Squad still needs it.
+
+**Scope note**: `PUT /my-team` gains only squad/formation validation (decision 3).
+Incoming selectability is not enforced there; it applies to Explorer, Preview and
+Apply.
+
+## 12. Saved bank is preserved and displayed
+
+**Decision**: Rearrangement sends the currently loaded `bank` (and
+`free_transfers`) exactly as returned by `GET /my-team`. My Team displays that
+saved `loadedTeam.bank`, replacing the current `BUDGET_CAP - sum(current_price)`
+computation. Cost remains the computed sum of current prices.
+
+**Rationale**: current prices drift after imports, so a recomputed bank can differ
+from the saved bank, and persisting it would silently change the manager's money.
+Tests cover both the displayed value and the swap/reorder request value.
+
+## 13. Optimiser interaction and verification strategy
+
+**Optimiser**: direct rearrangement is available only on the actual saved lineup
+(`optimiseMode === "none"`). Optimiser modes show a hypothetical lineup and are
+read-only for rearrangement. The optimiser, gameweek-navigation and
+projection-refresh controls may stay visible while projected-point figures are
+hidden.
+
+**Verification strategy**: three layers with distinct jobs.
+
+- Deterministic tests (domain, API, component) own every artificial or transient
+  state: `status="a"` with a false flag, flag flips after Preview, unknown and
+  refresh-required combinations, outgoing sales, and the repository status-filter
+  removal (guarded integration test).
+- One API-stubbed Playwright spec (`page.route`, no `webServer`, no full-stack
+  harness) covers the durable journey, including one case where a non-`a` but
+  authoritatively selectable player remains explorable, previewable and
+  applicable.
+- Real-stack verification covers normal flows and states that refreshed imported
+  data actually contains (for example injured/doubtful/suspended selectable
+  players and `u` non-selectable players). It never mutates development data to
+  manufacture a state, and applying a transfer on the real stack changes the saved
+  squad, so it needs the human's explicit consent.

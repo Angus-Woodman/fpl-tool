@@ -33,7 +33,10 @@ upstream `can_select` / `can_transact`, and using it from Preview and Apply so
 out-of-pool candidates are rejected, rather than re-implementing the rule in
 `apps/api`; (4) retaining those flags through import and an Alembic migration,
 removing the repository's playing-status filter, and exposing advisory status
-in Explorer and Preview. All other changes
+in Explorer and Preview. The legacy inline per-player Transfer / Replacement Player /
+Confirm Transfer path that exists only inside Edit Team is removed with the mode
+(human-approved; spec FR-007a): the always-visible Explore Transfers → Preview →
+Apply journey replaces it. All other changes
 are in `apps/web`, including a single shared mapping from legality reason
 codes to user-facing text used by both the candidate comparison and
 Transfer Preview.
@@ -46,7 +49,7 @@ Transfer Preview.
 
 **Storage**: PostgreSQL 16 (Docker Compose locally). One Alembic migration adds nullable `players.can_select` / `players.can_transact`, populated by bootstrap refresh, never backfilled from status. Rearrangement reuses existing squad fields; selection/reveal state remains ephemeral. No snapshot/projection schema change.
 
-**Testing**: pytest (`apps/api`, `packages/fpl_engine`); Vitest + Testing Library (`apps/web` unit/component); Playwright Test (`apps/web` e2e, `tests/e2e/`).
+**Testing**: pytest (`apps/api`, `packages/fpl_engine`); Vitest + Testing Library (`apps/web` unit/component); Playwright Test (`apps/web` e2e, `tests/e2e/`) with the API stubbed via `page.route` and no new `webServer`/full-stack harness. Real-stack browser verification is a separate, manual step (`ui-browser-verification`) that covers normal flows and states actually present in refreshed imported data; artificial flag/status combinations, flag transitions after Preview and unknown/refresh-required combinations are verified only with deterministic domain/API/component tests and stubs, never by mutating development data.
 
 **Target Platform**: Web application (browser client against a FastAPI JSON backend).
 
@@ -54,7 +57,7 @@ Transfer Preview.
 
 **Performance Goals**: None beyond preserving current My Team / Transfer Explorer responsiveness; the spec defines no new performance targets.
 
-**Constraints**: Domain-owned lineup/transfer rules and a single pool predicate. Playing status is advisory, never an eligibility or legality rule. Both upstream flags must explicitly permit incoming selection; unknown data surfaces a refresh-required condition, never a status fallback. Apply rechecks the latest imported flags, not live FPL. Existing availability/minutes projections and ranking stay unchanged. Strict typing; no new dependencies/infrastructure.
+**Constraints**: Domain-owned lineup/transfer rules and a single pool predicate. Playing status is advisory, never an eligibility or legality rule. Both upstream flags must explicitly permit incoming selection; unknown data surfaces a refresh-required condition, never a status fallback. Apply rechecks the latest imported flags, not live FPL. Existing availability/minutes projections and ranking stay unchanged. Strict typing; no new dependencies/infrastructure. Saving a lineup (`PUT /my-team`) validates squad composition and starting formation only; incoming selectability is not enforced there. Rearrangement preserves the saved bank exactly and My Team displays the saved `bank`, not a figure recomputed from prices. Pool-exclusion precedence: structural (owned / wrong position), then known non-selectable, then unknown selectability. Rearrangement is available only when no optimiser mode is active.
 
 **Scale/Scope**: Two existing pages; ranking and one shared domain pool helper; squad-save validation rewiring; import/model/repository flag propagation and one migration; Explorer/Preview additive fields and early rejection; Apply eligibility recheck; shared frontend legality and advisory-status mappings. No new pages, services, persisted entities, or projection model.
 
@@ -84,6 +87,11 @@ and stale-Preview Apply rejection, plus advisory-status component/browser
 coverage. DB checks use only guarded `TEST_DATABASE_URL`. This narrow work
 implements FR-013/FR-013a/FR-013b, not unrelated projection work.
 
+Removing the Edit-Team-only inline Transfer path (spec FR-007a) is a
+human-approved change recorded in the spec, so it is inside the agreed change
+surface (Principles II, VIII, IX) and does not conflict with FR-021. It also
+removes a route that saved directly via `PUT /my-team` without Preview.
+
 No unjustified violations. Complexity Tracking is intentionally empty.
 
 **Post-Design Re-check (after Phase 1, revised again)**: Still PASS.
@@ -105,6 +113,15 @@ and observed payload combinations, not a published exhaustive contract.
 Apply uses latest imported data and cannot guarantee live FPL state. No
 fallback derives eligibility from status. `tasks.md` has been generated;
 implementation remains unauthorized until explicitly started.
+
+Resolved implementation decisions (see research.md decisions 10-13):
+
+- Incoming selectability stays out of `PUT /my-team`; it only gains authoritative squad/formation validation.
+- Rearrangement preserves the saved bank, and My Team displays the saved bank.
+- Exclusion precedence: structural, then known non-selectable, then unknown.
+- Unknown selectability makes Explorer return `selectability_unknown`; a refresh normally resolves it and an upstream omission intentionally keeps the diagnostic.
+- The migration and bootstrap refresh are an operational gate placed immediately after the persistence tasks and before any real-backend verification. US1 can be done and verified before the migration exists.
+- Playwright stays API-stubbed (one non-`a`-but-selectable case); real-stack verification is separate and limited to states present in refreshed data.
 
 ## Project Structure
 
@@ -133,18 +150,19 @@ apps/api/
 │   ├── routers/my_team.py                  # transfer explorer/preview endpoints (response/rejection changes only)
 │   ├── schemas/transfers.py                # candidate legality + advisory status
 │   ├── schemas/transfer_preview.py         # additive player_in_status
-│   ├── services/get_transfer_explorer.py   # passes through the extended (non-filtering) ranking result
+│   ├── services/get_transfer_explorer.py   # calls the shared pool helper per profile before projections (unknown → `selectability_unknown`), passes through legality/status fields
+│   ├── services/candidate_pool_failures.py # new: translates pool-exclusion reasons into failure messages (no eligibility rules)
 │   ├── services/get_transfer_preview.py    # calls the shared fpl_engine pool-eligibility helper before loading projections/evaluating legality
 │   ├── services/apply_transfer.py          # fresh incoming pool check before evaluation/save
 │   ├── adapters/fpl/, services/import_fpl_data.py # retain upstream flags
-│   ├── models/entities.py, repositories/   # persist/read flags; remove status filter
+│   ├── models/entities.py, repositories/   # persist/read flags; `list_available_by_position` → `list_by_position` with the status filter removed
 │   └── services/current_squad.py           # _validate rewired onto fpl_engine.rules.validate_squad
 ├── alembic/versions/                       # one nullable-flag migration, no status backfill
-└── tests/transfers/, tests/team/           # service/router tests for the schema, rejection, and validation changes
+└── tests/transfers/, tests/team/, tests/fpl/, tests/services/, tests/repositories/   # service/router/adapter/guarded-DB tests (incl. `list_by_position` status-filter test)
 
 apps/web/
 ├── src/components/team/
-│   ├── my-team-board.tsx                   # replaces Edit Team mode with direct selection/rearrange + points reveal
+│   ├── my-team-board.tsx                   # direct selection/rearrange (actual lineup only, saved bank preserved and displayed), points reveal; Edit Team mode and inline Transfer path removed
 │   ├── squad-player-card.tsx               # selection/valid-target/unavailable visual states
 │   ├── bench.tsx / squad-pitch.tsx          # render selection state, unchanged layout contract
 │   └── recommendation-summary.tsx           # projected-points panel hidden behind the same reveal control
@@ -154,7 +172,7 @@ apps/web/
 │   ├── legality-reasons.ts                  # new: shared code → user-facing text mapping
 │   ├── playing-status.ts                    # new: shared advisory status mapping, no legality logic
 │   └── transfer-preview.tsx                 # renders errors via the shared mapping instead of raw codes
-└── tests/team/, tests/transfers/, tests/e2e/
+└── tests/team/, tests/transfers/, tests/e2e/my-team-ux.spec.ts   # Vitest component tests; one API-stubbed Playwright spec
 
 packages/fpl_engine/
 ├── src/fpl_engine/transfers/

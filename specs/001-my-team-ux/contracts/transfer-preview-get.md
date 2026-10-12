@@ -37,6 +37,11 @@ If eligibility is unknown rather than explicitly false, use the same 422
 `player_not_in_candidate_pool` shape with a message explaining that FPL
 player data must be refreshed. Do not infer eligibility from status.
 
+When several exclusions apply the reported reason follows: structural (owned, then
+wrong position), then known non-selectable (`player_not_selectable`), then unknown
+(`selectability_unknown`). A wrong-position or owned player with unknown flags
+therefore reports the structural reason.
+
 ### Unchanged case: in-pool candidate that fails a legality constraint
 
 Still returns a normal, `ready` preview — Transfer Preview remains reachable

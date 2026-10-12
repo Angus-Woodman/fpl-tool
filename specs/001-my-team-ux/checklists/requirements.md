@@ -38,3 +38,8 @@
   distinct from advisory playing status; Story 3 covers selectable non-available
   players, genuinely non-selectable players, changed eligibility and missing
   data. Same-position/not-owned scope and existing projection behaviour remain.
+- Revalidated after analyze remediation: added FR-004b (saved bank) and FR-007a
+  (inline Transfer removal); Story 3's independent test now covers non-selectable
+  and selectable-but-injured players; the unknown-selectability Explorer
+  behaviour, optimiser assumption, `PUT /my-team` scope and exclusion precedence
+  are recorded.

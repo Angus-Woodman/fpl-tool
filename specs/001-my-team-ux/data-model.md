@@ -65,6 +65,14 @@ backend authority that FR-004's "remains valid under the existing
 squad/formation rules" relies on; the frontend's selection predicates
 (below) are UX-only and never the final word.
 
+This path validates squad composition and the starting formation only.
+Incoming-transfer selectability is **not** enforced on `PUT /my-team`; it applies
+to Explorer, Preview and Apply (see "Candidate pool eligibility").
+
+The saved `bank` and `free_transfers` are preserved by rearrangement: the request
+carries the loaded values exactly, and My Team displays the saved `bank` rather
+than `100 - sum(current_price)` (research.md, decision 12).
+
 ## Selection (new, client-only, not persisted)
 
 Represents the manager's in-progress choice while rearranging the team.
@@ -133,6 +141,13 @@ Apply uses `transfer_illegal` with the exclusion reason and no write. A
 known false flag excludes the player even if the other flag is missing.
 Only the incoming player is subject to these flags.
 
+**Precedence** when several exclusions apply: (1) structural — `player_already_in_squad`
+then `different_position`; (2) known non-selectable — `player_not_selectable` (either
+flag `false`, even if the other is missing); (3) unknown — `selectability_unknown`.
+Explorer's `selectability_unknown` failure fires only for profiles that pass tiers 1
+and 2. A refresh normally resolves it; if upstream omits the field the diagnostic
+intentionally persists.
+
 One presentation-only playing-status mapping is shared between Explorer
 and Preview (separate from legality reasons). Unknown status codes get a
 generic advisory label, never a legality failure.
@@ -168,3 +183,10 @@ evaluation, read the current incoming profile and call the same helper;
 reject excluded or unknown incoming players via existing `transfer_illegal`
 failure/errors, without saving. Eligible injured/doubtful/suspended players
 remain applicable when the unchanged transfer evaluator reports legal.
+
+## Selection gating (client-only)
+
+`selectedPlayerId` is active only when no optimiser mode is selected
+(`optimiseMode === "none"`): optimiser modes show a hypothetical lineup and are
+read-only for rearrangement. Optimiser, gameweek and refresh controls may remain
+visible while projected-point figures are hidden.
