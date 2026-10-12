@@ -64,16 +64,15 @@ While comparing replacement candidates for a squad player, a manager wants to se
 
 **Why this priority**: This improves the usefulness of the comparison introduced/preserved in Story 2, but is not required for the core rearrangement or exploration journeys to work.
 
-**Independent Test**: Open transfer exploration for a squad player who has at least one otherwise-relevant candidate that is not currently affordable or otherwise not currently legal, and confirm that candidate is still shown, clearly marked as unavailable, with a reason, and cannot be selected as a proposed transfer.
+**Independent Test**: Open transfer exploration for a squad player who has at least one candidate within the comparison pool that is not currently affordable or otherwise fails a transfer-legality constraint, and confirm that candidate remains visible, clearly marked as unavailable, with a reason, and can still be opened in Transfer Preview there, though not applied while it remains unavailable; separately confirm a player of a different position, or already in the manager's squad, does not appear in the comparison at all.
 
 **Acceptance Scenarios**:
 
-1. **Given** a relevant replacement candidate that cannot currently be legally transferred in, **When** the manager views the candidate comparison, **Then** that candidate is still visible rather than omitted.
-2. **Given** such a candidate, **When** the manager looks at it, **Then** it is clearly and visually distinguished as currently unavailable, as opposed to a candidate that can be selected.
-3. **Given** such a candidate, **When** the manager tries to select it as a proposed transfer, **Then** they cannot do so.
-4. **Given** such a candidate, **When** the manager looks for why it is unavailable, **Then** the reason (for example, insufficient budget, a club limit, or another squad-composition constraint) is communicated to them.
-5. **Given** a candidate that can currently be legally transferred in, **When** the manager views the comparison, **Then** it is clearly distinguishable from the unavailable candidates and can be selected to proceed toward Transfer Preview.
-6. **Given** an unavailable candidate, **When** the manager opens a Transfer Preview for it, **Then** the preview is shown with the same unavailability reason and with applying disabled, rather than Transfer Preview being unreachable for that candidate.
+1. **Given** a candidate within the comparison pool that currently fails a transfer-legality constraint, **When** the manager views the candidate comparison, **Then** that candidate is still visible rather than omitted.
+2. **Given** such a candidate, **When** the manager looks at it, **Then** it is clearly and visually distinguished as currently unavailable, as opposed to a candidate that is currently available to apply.
+3. **Given** such a candidate, **When** the manager opens its Transfer Preview, **Then** the preview opens normally, shows the reason it is currently unavailable, and keeps applying disabled, so the manager cannot apply it while it remains unavailable.
+4. **Given** a candidate that is currently available, **When** the manager views the comparison, **Then** it is clearly distinguishable from the unavailable candidates, and can be opened in Transfer Preview and applied there.
+5. **Given** a player of a different position than the outgoing player, or already in the manager's squad, **When** the manager views the candidate comparison, **Then** that player does not appear and has no Transfer Preview.
 
 ---
 
