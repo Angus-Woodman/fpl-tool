@@ -103,8 +103,8 @@ import gaps and missing-field handling. Existing rows require bootstrap
 refresh after migration. Flag semantics are based on upstream field names
 and observed payload combinations, not a published exhaustive contract.
 Apply uses latest imported data and cannot guarantee live FPL state. No
-fallback derives eligibility from status. Implementation and `tasks.md`
-remain explicitly unauthorized.
+fallback derives eligibility from status. `tasks.md` has been generated;
+implementation remains unauthorized until explicitly started.
 
 ## Project Structure
 
