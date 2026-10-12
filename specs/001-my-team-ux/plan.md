@@ -16,7 +16,7 @@ domain formation rule; hide projected-points information on My Team by
 default behind a reveal control; keep "explore transfers" as a distinct,
 always-visible per-player action that preserves which player is being
 replaced; and change transfer exploration so that candidates in the
-existing same-position/not-owned comparison pool are no longer dropped
+same-position/not-owned/FPL-selectable comparison pool are no longer dropped
 when they fail a transfer-legality constraint (budget, club limit, squad
 composition) — they stay visible, keep their full comparison data, are
 clearly marked unavailable with a user-facing reason, and remain
@@ -28,10 +28,12 @@ replacement-ranking domain function and its API response, to stop dropping
 unavailable pool candidates; (2) wiring the squad-save path to the
 existing, previously-unused `validate_squad`/`validate_starting_formation`
 domain rule, which today allows illegal starting formations; (3) extracting
-the existing candidate-pool rule (same position, not already owned) into a
-single `fpl_engine` helper and using it from the preview service so
+the candidate-pool rule into a single `fpl_engine` helper, extending it with
+upstream `can_select` / `can_transact`, and using it from Preview and Apply so
 out-of-pool candidates are rejected, rather than re-implementing the rule in
-`apps/api`. All other changes
+`apps/api`; (4) retaining those flags through import and an Alembic migration,
+removing the repository's playing-status filter, and exposing advisory status
+in Explorer and Preview. All other changes
 are in `apps/web`, including a single shared mapping from legality reason
 codes to user-facing text used by both the candidate comparison and
 Transfer Preview.
@@ -42,7 +44,7 @@ Transfer Preview.
 
 **Primary Dependencies**: Next.js 15.0.0 (App Router) + React 18.3.1 + Tailwind CSS for the frontend; FastAPI 0.114 + Pydantic 2.9 + SQLAlchemy 2.0 + Alembic for the backend; no new dependencies required.
 
-**Storage**: PostgreSQL 16 via the existing `current_squad` / projection tables (Docker Compose locally). No schema change: rearrangement reuses the existing `is_starting`/`bench_order`/`is_captain`/`is_vice_captain` fields already persisted by `saveMyTeam`; selection state and the points reveal/hide toggle are ephemeral client UI state, never persisted.
+**Storage**: PostgreSQL 16 (Docker Compose locally). One Alembic migration adds nullable `players.can_select` / `players.can_transact`, populated by bootstrap refresh, never backfilled from status. Rearrangement reuses existing squad fields; selection/reveal state remains ephemeral. No snapshot/projection schema change.
 
 **Testing**: pytest (`apps/api`, `packages/fpl_engine`); Vitest + Testing Library (`apps/web` unit/component); Playwright Test (`apps/web` e2e, `tests/e2e/`).
 
@@ -52,9 +54,9 @@ Transfer Preview.
 
 **Performance Goals**: None beyond preserving current My Team / Transfer Explorer responsiveness; the spec defines no new performance targets.
 
-**Constraints**: Transfer and lineup legality remain authoritatively computed in `packages/fpl_engine` (Constitution I) — this plan specifically closes two existing gaps where that wasn't yet true (squad-save formation validation; Preview's pool-boundary check), rather than introducing new rules. Strict TypeScript/mypy preserved; no new infrastructure or dependencies (Constitution VIII, AGENTS.md).
+**Constraints**: Domain-owned lineup/transfer rules and a single pool predicate. Playing status is advisory, never an eligibility or legality rule. Both upstream flags must explicitly permit incoming selection; unknown data surfaces a refresh-required condition, never a status fallback. Apply rechecks the latest imported flags, not live FPL. Existing availability/minutes projections and ranking stay unchanged. Strict typing; no new dependencies/infrastructure.
 
-**Scale/Scope**: Two pages (`/my-team`, `/transfers`), ~7 existing frontend components, one domain ranking function, one small extracted domain helper for pool eligibility, one squad-save validation rewiring (reusing an existing domain rule), one preview-service call to that helper, two API response/behaviour changes (Explorer additive fields, Preview new rejection case), one shared frontend reason-mapping module. No new pages, services, persisted entities, or domain rules.
+**Scale/Scope**: Two existing pages; ranking and one shared domain pool helper; squad-save validation rewiring; import/model/repository flag propagation and one migration; Explorer/Preview additive fields and early rejection; Apply eligibility recheck; shared frontend legality and advisory-status mappings. No new pages, services, persisted entities, or projection model.
 
 ## Constitution Check
 
@@ -73,29 +75,36 @@ Transfer Preview.
 | IX. Explicit acceptance criteria | PASS — spec.md's clarified acceptance scenarios govern; no implementation starts ahead of them. |
 | X. Final review & green gates | Deferred to completion — plan requires full lint/typecheck/test/build gates and a full `git diff` review before the feature is considered done. |
 
+Decision 10 extends assessments I/II/III/IV/VII/VIII: the human-authorized
+selectability policy lives in the same pure domain helper used by Explorer,
+Preview and Apply; import persistence requires one Alembic migration, not
+another ruleset. Require adapter/mapper/upsert/migration tests, domain flag
+combination tests, service/router tests for status-independent eligibility
+and stale-Preview Apply rejection, plus advisory-status component/browser
+coverage. DB checks use only guarded `TEST_DATABASE_URL`. This narrow work
+implements FR-013/FR-013a/FR-013b, not unrelated projection work.
+
 No unjustified violations. Complexity Tracking is intentionally empty.
 
 **Post-Design Re-check (after Phase 1, revised again)**: Still PASS.
-`data-model.md` and `contracts/` remain additive/behaviour-scoped: the Explorer response
-gains two fields with no existing field changed or made optional; the
-Preview response schema is unchanged (only a new, earlier rejection path
-that surfaces as a 422 like the existing non-`player_not_found` failures);
-pool eligibility is a single extracted domain helper rather than a copy in
-`apps/api`; the squad-save path swaps a duplicate, incomplete check for the
-existing authoritative domain rule. No new entities, services,
-dependencies, or persisted state were introduced during design.
+Explorer gains `is_legal`, `unavailable_reasons`, `status`; Preview gains
+`player_in_status` and an early 422 rejection; Apply adds fresh eligibility
+validation with existing failure/success shapes. Existing comparison types
+(including direct-xPts nullability) stay unchanged. One migration retains
+authoritative upstream flags on existing players. Eligibility remains one
+domain helper; no projection changes, new entities/services/dependencies,
+or unguarded DB validation.
 
-## Open Decisions (human input required before `tasks.md`)
+## Resolved Decision And Risks
 
-1. **Candidate availability status** — FR-013 defines the pool as same
-   position + not already owned, but
-   `PlayerReadRepository.list_available_by_position()` also filters
-   `status == "a"`, which the spec never mentions. Should non-`"a"`
-   (injured/doubtful/suspended/unavailable/not-in-squad) players remain
-   excluded from transfer exploration? Options and their effects on
-   Explorer, Preview and Apply are tabulated in
-   [research.md](./research.md), decision 10. `spec.md` FR-013 is
-   intentionally unchanged until this is decided.
+Decision 10 is resolved: same position, not owned, both upstream flags true;
+playing status advisory. See [research.md](./research.md) for live evidence,
+import gaps and missing-field handling. Existing rows require bootstrap
+refresh after migration. Flag semantics are based on upstream field names
+and observed payload combinations, not a published exhaustive contract.
+Apply uses latest imported data and cannot guarantee live FPL state. No
+fallback derives eligibility from status. Implementation and `tasks.md`
+remain explicitly unauthorized.
 
 ## Project Structure
 
@@ -122,10 +131,15 @@ No new projects, services, or directories are introduced.
 apps/api/
 ├── src/api/
 │   ├── routers/my_team.py                  # transfer explorer/preview endpoints (response/rejection changes only)
-│   ├── schemas/transfers.py                # RankedTransferCandidateResponse gains is_legal/unavailable_reasons
+│   ├── schemas/transfers.py                # candidate legality + advisory status
+│   ├── schemas/transfer_preview.py         # additive player_in_status
 │   ├── services/get_transfer_explorer.py   # passes through the extended (non-filtering) ranking result
 │   ├── services/get_transfer_preview.py    # calls the shared fpl_engine pool-eligibility helper before loading projections/evaluating legality
+│   ├── services/apply_transfer.py          # fresh incoming pool check before evaluation/save
+│   ├── adapters/fpl/, services/import_fpl_data.py # retain upstream flags
+│   ├── models/entities.py, repositories/   # persist/read flags; remove status filter
 │   └── services/current_squad.py           # _validate rewired onto fpl_engine.rules.validate_squad
+├── alembic/versions/                       # one nullable-flag migration, no status backfill
 └── tests/transfers/, tests/team/           # service/router tests for the schema, rejection, and validation changes
 
 apps/web/
@@ -138,15 +152,17 @@ apps/web/
 │   ├── transfer-explorer.tsx                # unchanged orchestration; passes availability through
 │   ├── replacement-table.tsx                # shows unavailable candidates + mapped reason; Preview action stays enabled for them (only Apply, inside Preview, is disabled)
 │   ├── legality-reasons.ts                  # new: shared code → user-facing text mapping
+│   ├── playing-status.ts                    # new: shared advisory status mapping, no legality logic
 │   └── transfer-preview.tsx                 # renders errors via the shared mapping instead of raw codes
 └── tests/team/, tests/transfers/, tests/e2e/
 
 packages/fpl_engine/
 ├── src/fpl_engine/transfers/
-│   ├── candidate_pool.py                    # new: single pure definition of pool eligibility (same position, not owned)
-│   ├── replacement_ranking.py               # stop discarding illegal candidates; keep full per-gameweek data; use candidate_pool.py instead of its inline skip
+│   ├── candidate_pool.py                    # new: same position, not owned, both incoming flags true
+│   ├── replacement_ranking.py               # PricedPlayer flag inputs; retain illegal-candidate metrics; shared pool helper
 │   └── single_transfer.py                   # unchanged; already the source of per-candidate errors/comparison data
 ├── src/fpl_engine/rules/squad.py             # unchanged; validate_squad/validate_starting_formation now consumed by apps/api
+├── src/fpl_engine/domain/entities.py        # Player retains nullable upstream flags
 └── tests/test_replacement_ranking.py, tests/test_candidate_pool.py   # retained-but-unavailable candidates with full data; pool-eligibility helper
 ```
 

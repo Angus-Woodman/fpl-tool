@@ -34,3 +34,7 @@
 - All [NEEDS CLARIFICATION] markers raised during specification and
   clarification were resolved with the user and are recorded in the
   `## Clarifications` section of spec.md. No open markers remain.
+- Revalidated after decision 10: authoritative incoming eligibility is
+  distinct from advisory playing status; Story 3 covers selectable non-available
+  players, genuinely non-selectable players, changed eligibility and missing
+  data. Same-position/not-owned scope and existing projection behaviour remain.

@@ -15,6 +15,12 @@ make frontend-dev  # separate terminal
 A saved squad must already exist on My Team (use the existing "Create
 Starter Squad" action if not).
 
+After implementing the player-flag migration, migrate through the existing
+workflow and refresh bootstrap data so imported players have authoritative
+`can_select` / `can_transact` values. Never backfill them from status. Use
+representative deterministic fixtures for the cases below if live data
+lacks them; do not alter persistent development data to manufacture cases.
+
 ## Scenario 1 — Direct rearrangement, no Edit Team mode
 
 1. Open `/my-team`.
@@ -78,16 +84,42 @@ Starter Squad" action if not).
 3. Apply the transfer; confirm the squad updates to reflect it.
 4. Repeat, but back out of the preview instead; confirm no change was made.
 
+## Scenario 6 — Advisory Playing Status Versus Incoming Selectability
+
+1. Use a same-position, not-owned player with `status="i"`, `"d"` or `"s"`
+   and both upstream flags true. Confirm it appears with a useful advisory
+   status, retains existing availability-adjusted projections and unified
+   gain ranking, and reaches Preview with the same advisory status.
+2. If budget/club/squad legality passes, confirm Apply is enabled and works;
+   if it fails, confirm only the existing legality reason disables Apply,
+   not the playing-status warning.
+3. Use a player with either flag false (including `can_select=false`,
+   `can_transact=true` and `status="a"`). Confirm no candidate row, direct
+   Preview returns 422 `player_not_in_candidate_pool`, and direct Apply
+   returns 422 `transfer_illegal` without a write.
+4. In isolated test fixtures, change an incoming flag from true to false
+   after a legal Preview. Confirm Apply rechecks it and rejects without
+   changing the saved squad.
+5. With otherwise relevant unknown flags and neither false, confirm Explorer
+   returns 422 `selectability_unknown`, Preview explains the refresh need
+   through 422 `player_not_in_candidate_pool`, and Apply reports
+   `transfer_illegal` / `selectability_unknown` without mutation. Refreshing
+   populated flags resolves the condition; status never supplies a fallback.
+6. Confirm an already-owned outgoing player with incoming flags false can
+   still be sold for an eligible replacement. No new projection model or
+   availability-driven transfer-legality rule should be introduced.
+
 ## Automated coverage expected from `tasks.md`
 
 - `packages/fpl_engine/tests/test_replacement_ranking.py`: illegal
   in-pool candidates are now returned (not dropped) with `is_legal=False`,
-  the matching `errors`, and their full, non-null comparison data.
+   the matching `errors`, and their full comparison data with unchanged
+   types (including existing direct-xPts nullability).
 - `packages/fpl_engine/tests/test_candidate_pool.py`: the shared
   pool-eligibility helper returns `None` for a same-position, not-owned
-  candidate and `player_already_in_squad` / `different_position` otherwise,
-  and `rank_replacement_candidates` uses it (same results as today's inline
-  skip for out-of-pool players).
+   candidate with both flags true; exclusions cover owned, position, either
+   false flag, both/mixed missing flags and false-plus-missing precedence.
+   Non-`a` status must not change eligibility; ranking uses the helper.
 - `packages/fpl_engine/tests` (squad rules): a 5-2-3 starting formation
   (`MID=2`) round-trips as legal through `validate_squad`, documenting why
   the frontend's stricter `MID >= 3` check cannot be authoritative.
@@ -99,10 +131,22 @@ Starter Squad" action if not).
   Transfer Preview rejects an out-of-pool `player_in_id` (422,
   `player_not_in_candidate_pool`) and still returns a normal, legality-aware
   preview for an in-pool-but-illegal one.
+- `apps/api/tests/fpl/`, repository tests and guarded DB tests: parsing,
+  mapping and insert/update preserve true/false/unknown flags independently
+  of status; missing flags clear stale values; migration leaves existing
+  rows unknown and bootstrap refresh fills them; position queries no longer
+  filter status. DB checks use only `TEST_DATABASE_URL` with the existing
+  `_test` safeguard, never the development database.
+- `apps/api/tests/transfers/`: Scenario 6 at service/router boundaries,
+  including all three endpoints, advisory response fields, unknown-data
+  messages, rejection before missing projections, stale-Preview Apply,
+  non-selectable outgoing sales and zero writes on rejected Apply.
 - `apps/web/tests/team/` and `apps/web/tests/transfers/`: selection/swap/
   reorder interactions, points reveal/hide, unavailable-candidate rendering
   with preserved comparison data, and the shared reason-mapping used by both
-  the candidate comparison and Transfer Preview.
+   the candidate comparison and Transfer Preview; shared advisory status
+   mapping and unknown-code rendering, independent from legality/Apply state.
 - `apps/web/tests/e2e/`: one durable Playwright spec for Scenario 1 and
   Scenario 4/5 end-to-end (rearrange, explore, see an unavailable candidate,
-  preview and apply a legal one).
+   preview and apply a legal one), plus Scenario 6's important browser
+   journey for a selectable non-`a` player and the refresh-required state.

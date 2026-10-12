@@ -28,8 +28,8 @@ being `None`). Capture `is_legal` and `errors` once per candidate (they are
 constant across gameweeks) and include **every** pool candidate in the
 result — `team_gain_by_horizon`, `resulting_bank`, `direct_xpts_difference`,
 and `gameweeks_evaluated` stay fully populated for both legal and illegal
-candidates. Only `is_legal: bool` and `unavailable_reasons: list[str]` are
-new.
+candidates. `is_legal: bool` and `unavailable_reasons: list[str]` are new
+domain result fields; decision 10 also adds advisory API status.
 
 **Rationale**: The comparison numbers are genuine and already computed by
 the existing primitive; discarding them (e.g. by making them `null`) would
@@ -107,7 +107,9 @@ code (e.g. `fpl_engine/transfers/candidate_pool.py`, exported from
 `fpl_engine.transfers`) — something like
 `candidate_pool_exclusion(squad, player_out_id, candidate) -> reason | None`
 returning `None` for an in-pool candidate and a stable reason code
-(`player_already_in_squad`, `different_position`) otherwise. Then:
+(`player_already_in_squad`, `different_position`, `player_not_selectable`,
+`selectability_unknown`) otherwise. The profile carries upstream
+`can_select` / `can_transact`; decision 10 defines their policy. Then:
 
 - `rank_replacement_candidates` replaces its current inline
   `candidate.position != outgoing.position or candidate.player_id in
@@ -150,11 +152,12 @@ reachable from Preview.
   explicit helper is clearer and keeps pool eligibility distinct from
   transfer legality, which is exactly the distinction the spec draws.
 
-**`ApplyTransferService` needs no equivalent change for position/ownership**:
-it already rejects anything `evaluate_single_transfer` marks illegal
-(`transfer_illegal`) before saving, so a different-position or already-owned
-`player_in_id` can never mutate the squad today. (Candidate *status* is a
-separate, open question — see decision 10.)
+**Apply enforcement**: Although the evaluator already rejects wrong-position
+and owned incoming players, `ApplyTransferService` must also call the shared
+pool helper before loading projections/evaluating/saving, using freshly read
+incoming flags. A non-eligible incoming player returns `transfer_illegal`
+with the helper's reason and no write (see decision 10). Do not require
+incoming-selectability flags on the outgoing player.
 
 ## 5. Bench-to-bench substitute reordering
 
@@ -235,34 +238,76 @@ the API — display copy is a presentation concern that belongs in
 feature's `RuleViolationError.code`) and lets the caller decide
 presentation.
 
-## 10. OPEN DECISION — candidate availability status (human decision required)
+## 10. Resolved: authoritative incoming selectability, advisory playing status
 
-**Mismatch found**: FR-013 defines the candidate pool as "same position as
-the outgoing player, not already in the manager's squad." The current
-implementation applies a third filter that the spec does not mention:
-`PlayerReadRepository.list_available_by_position()` only returns players with
-`status == "a"` (FPL "available"), so injured (`i`), doubtful (`d`),
-suspended (`s`), unavailable (`u`) and not-in-squad (`n`) players never reach
-`rank_replacement_candidates` at all. The repository docstring describes
-this status filter as the one filter it deliberately owns.
+**Decision**: Same position, not already owned, and upstream `can_select`
+and `can_transact` both explicitly `true` define incoming pool eligibility.
+Playing `status` never determines pool membership or transfer legality.
+Injury, doubt and suspension remain advisory; otherwise legal players may
+be explored, previewed and applied. Existing availability/minutes projection
+behaviour and unified ranking remain unchanged.
 
-This plan does **not** choose a product rule here. Whichever way the
-decision goes, the pool-eligibility *helper* in decision 4 stays limited to
-position/ownership (the FPL-rule part); candidate status is player-availability
-data, not a squad-legality rule, and would live at the data-access/service
-boundary. The decision changes behaviour as follows:
+**Evidence**: A read-only GET of
+`https://fantasy.premierleague.com/api/bootstrap-static/` returned HTTP 200
+on 2026-10-12 (response Date: 17:47:01 GMT), with 667 elements. All elements
+contained boolean `can_select` and `can_transact`. Observed combinations:
 
-| Option | Explorer | Preview / Apply (direct API) | Spec impact |
+| Playing status | Count | `can_select` | `can_transact` |
 |---|---|---|---|
-| **A. Keep non-`"a"` players excluded** (today's Explorer behaviour) | unchanged | Today `get_by_id` applies no status filter, so Preview (and Apply, since `evaluate_single_transfer` has no status rule) currently accept a non-`"a"` `player_in_id`. To honour "out-of-pool candidates have no Preview" consistently, Preview would also need to reject non-`"a"` players (and Apply should not be able to buy one). | FR-013 amended to name the availability condition; Preview rejection reason extended. |
-| **B. Include non-`"a"` players as visible-but-unavailable candidates** | widened pool; status becomes a new unavailability reason alongside budget/club limit | Preview stays reachable; Apply must be blocked while the candidate is unavailable | New legality-style reason + user-facing text; the existing "pool is not widened" clarification would need revisiting |
-| **C. Include non-`"a"` players with no special treatment** | widened pool | Preview and Apply unchanged | Behaviour change with no signal to the user that the player is injured/suspended — flagged here only for completeness |
+| `a` | 466 | true | true |
+| `i` | 69 | true | true |
+| `d` | 22 | true | true |
+| `s` | 5 | true | true |
+| `u` | 105 | false | true |
 
-**Recommendation to review (not adopted)**: Option A is the smallest change
-and matches both today's Explorer and the previously clarified "pool is not
-widened" answer, but it should be a deliberate, spec-recorded rule rather
-than an unrecorded repository detail — and it implies the Preview/Apply
-status gap noted above must be closed for consistency.
+For example, Saliba (`i`) had both flags true; Martinelli (`u`, departure
+news) had `can_select=false`, `can_transact=true`. Thus `can_transact` alone
+does not identify a player who can be bought. Requiring both flags is a
+conservative incoming-selection policy; this capture establishes field
+presence and observed combinations, not a published guarantee about every
+combination. Do not apply this incoming-only restriction to selling an
+already-owned outgoing player.
 
-Until this is decided, `spec.md` FR-013 is left unchanged and `tasks.md`
-should not be generated.
+**Import gap**: `FplElementDto` has `extra="ignore"` and declares neither
+flag, so it discards them. `PlayerSeed`, `map_bootstrap_static`,
+`ImportFplDataService`, the domain `Player`, player repository upserts and
+`PlayerModel` must carry both flags. The checked-in bootstrap fixture has
+only two `status="a"` players and neither flag; it cannot establish current
+upstream eligibility. Add representative true/false/missing fixtures when
+implementing rather than inferring flags from that fixture's statuses.
+
+**Narrow persistence design**: One Alembic migration adds nullable boolean
+`players.can_select` and `players.can_transact`, with no true/status-derived
+backfill. `None` means unknown, not eligible. Import retains missing flags
+as unknown (including clearing previously-known values when absent); refresh
+bootstrap after migration to populate existing rows. Unknown incoming
+eligibility fails closed with an explicit refresh-required diagnostic,
+never a silent `status == "a"` fallback. No new service, dependency, historical
+snapshot field, projection feature or model change is needed.
+
+**Shared enforcement**: Extend decision 4's pure domain pool helper with
+the two flag inputs and stable exclusions `player_not_selectable` (either
+false) and `selectability_unknown` (missing, unless already explicitly
+false). Remove the repository's status filter and retrieve same-position
+profiles including flags and status; the helper remains the authority for
+Explorer, early Preview rejection and fresh Apply rejection. Preview uses
+the existing 422 `player_not_in_candidate_pool` failure; Apply uses its
+existing `transfer_illegal` failure with the exclusion reason and does not
+write. An unknown selectability failure explains that a data refresh is
+required. Explorer reports an explicit refresh-required failure if otherwise
+relevant profiles have unknown flags, rather than silently omitting them.
+
+**Advisory presentation**: Add `status: string` to candidate responses and
+`player_in_status: string` to the Preview response (which currently exposes
+IDs, not an incoming-player object). Use one presentation-only status
+mapping in both views; unknown codes remain advisory and get a generic
+label. Do not put status codes in `unavailable_reasons` or Preview `errors`,
+disable Apply because of status, or change the projection model. Existing
+comparison-field types (including existing direct-xPts nullability) stay
+unchanged.
+
+**Alternatives rejected**: `status == "a"` eligibility; treating non-`a`
+status as transfer illegality; `can_transact` alone; defaulting absent flags
+to true; inferring flags from status; fetching live FPL separately on every
+Preview/Apply. Apply rechecks the latest imported flags, like existing
+price/club data; it is not a live upstream transaction guarantee.

@@ -1,11 +1,30 @@
 # Phase 1 Data Model: My Team UX and Transfer Exploration
 
-No database schema changes. All entities below map to existing persisted
-records or existing/extended API response shapes. "Replacement Candidate"
-gains two new fields (all existing fields stay fully populated, not
-optional). "Transfer Preview" gains one new rejection case but no schema
-change. A new "Lineup Legality" section documents wiring an existing,
-previously-unused domain rule into the squad-save path.
+One Alembic migration retains upstream incoming-selectability flags on the
+existing player record. Replacement Candidate gains legality fields and
+advisory status; Transfer Preview gains a rejection case and advisory
+`player_in_status`. Existing comparison types remain unchanged, including
+the existing nullable direct-xPts field. Lineup Legality wires an existing
+domain rule into squad save; no new persisted entity or projection model.
+
+## Imported Player Selectability (extended existing player)
+
+| Field | Source / policy |
+|---|---|
+| `can_select` | upstream boolean; nullable in imported/domain/persisted data when absent |
+| `can_transact` | upstream boolean; nullable in imported/domain/persisted data when absent |
+| `status` | existing string; advisory presentation and existing projection input only |
+
+Carry flags through `FplElementDto`, `PlayerSeed`, the mapper/import service,
+domain `Player`, repository insert/update and `PlayerModel`, then expose
+them on `CandidatePlayerRecord` and the ranking `PricedPlayer` profile.
+The migration adds nullable boolean columns with unknown existing values;
+no status-derived/default-true backfill. Bootstrap refresh populates them;
+an absent flag on a later import clears its prior value to unknown. Retrieve
+same-position profiles without the old status filter (rename the repository
+method to `list_by_position` and update its ports/call sites). No new
+historical snapshot fields or projection features. See research decision 10
+for the observed live payload and unknown-data policy.
 
 ## Squad Player
 
@@ -71,10 +90,11 @@ Source: `RankedReplacement` (domain) → `RankedTransferCandidateResponse`
 
 | Field | Status | Notes |
 |---|---|---|
-| `player_id`, `web_name`, `team_short_name`, `price` | unchanged | pool membership (same position, not owned) is decided by the shared domain helper described under "Candidate pool eligibility" below and does not change in this feature; any additional candidate-status filter is an **open decision** (see [research.md](./research.md), decision 10) |
+| `player_id`, `web_name`, `team_short_name`, `price` | unchanged | the shared domain helper decides same-position/not-owned/authoritatively-selectable pool membership |
 | `resulting_bank`, `team_gain_by_horizon`, `direct_xpts_difference`, `gameweeks_evaluated` | **unchanged, still always present** | `evaluate_single_transfer` already computes these for every in-pool candidate regardless of legality (position composition is preserved by same-position swaps); they are **not** made optional (see [research.md](./research.md), decision 1) |
 | `is_legal` | **new** | `bool`; `false` means the candidate is visible, fully comparable, but currently unavailable to apply |
 | `unavailable_reasons` | **new** | `list[str]`; the same error codes `evaluate_single_transfer` already produces (`insufficient_bank`, `club_limit_exceeded`, and defensively `invalid_position_composition`); empty when `is_legal` is `true` |
+| `status` | **new** | imported playing-status string; mapped to advisory text, never an unavailability reason or Apply gate |
 
 Sort order: a single key — descending `team_gain_by_horizon[primary_horizon]`,
 `player_id` tie-break — applied across the whole pool, legal and illegal
@@ -95,27 +115,32 @@ user (see [research.md](./research.md), decision 9):
 
 ## Candidate pool eligibility (shared domain helper)
 
-Pool eligibility (same position as the outgoing player, not already in the
-squad) is distinct from transfer legality (budget, club limit, ...) and is
+Pool eligibility (same position, not owned, `can_select` and `can_transact`
+both explicitly true) is distinct from transfer legality (budget, club limit) and is
 expressed **once**, in `packages/fpl_engine`, as a small pure helper (see
 [research.md](./research.md), decision 4):
 
 | Input | Output |
 |---|---|
-| squad, `player_out_id`, candidate profile | `None` if in the pool; otherwise a reason code: `player_already_in_squad` or `different_position` |
+| squad, `player_out_id`, candidate profile including nullable flags | `None` if in the pool; otherwise `player_already_in_squad`, `different_position`, `player_not_selectable` (either flag false), or `selectability_unknown` (missing, unless explicitly false) |
 
-It is used by `rank_replacement_candidates` (Explorer) and by
-`GetTransferPreviewService` (Preview), so both surfaces share a single
-definition and `apps/api` carries no pool-eligibility logic of its own.
-Candidate availability status (`status == "a"`) is **not** part of this
-helper: it is player data rather than an FPL squad rule, and whether it
-should remain part of pool eligibility is an open decision
-([research.md](./research.md), decision 10).
+Use it in Explorer ranking, early Preview rejection and fresh Apply
+validation. Services translate its result, never duplicate its rules.
+Playing status is not an input. Explorer surfaces `selectability_unknown`
+as an explicit refresh-required failure for otherwise relevant profiles;
+Preview uses `player_not_in_candidate_pool` with a refresh-required message;
+Apply uses `transfer_illegal` with the exclusion reason and no write. A
+known false flag excludes the player even if the other flag is missing.
+Only the incoming player is subject to these flags.
+
+One presentation-only playing-status mapping is shared between Explorer
+and Preview (separate from legality reasons). Unknown status codes get a
+generic advisory label, never a legality failure.
 
 ## Transfer Preview
 
 Source: `TransferPreviewResult` / `TransferPreviewResponse`. Response
-schema **unchanged** — already carries `is_legal: bool` and
+schema gains `player_in_status: str`; existing fields are unchanged, including `is_legal: bool` and
 `errors: tuple[str, ...]` (reusing the same codes above), and the existing
 `TransferPreview` component already renders a legality-aware preview with
 Apply disabled when illegal for in-pool candidates — this is exactly
@@ -135,3 +160,11 @@ existing legality evaluation, which still produces a normal `ready` preview
 (`is_legal=false`, Apply disabled) for in-pool candidates that merely fail
 budget, club limit, or another squad-level constraint (see
 [research.md](./research.md), decision 4).
+
+## Transfer Apply (eligibility recheck)
+
+The request and success schemas stay unchanged. Before projections or
+evaluation, read the current incoming profile and call the same helper;
+reject excluded or unknown incoming players via existing `transfer_illegal`
+failure/errors, without saving. Eligible injured/doubtful/suspended players
+remain applicable when the unchanged transfer evaluator reports legal.
