@@ -2,9 +2,11 @@
 
 This is the single source of truth for standing, repository-wide instructions
 to AI coding agents. Task-specific procedures live in `.github/skills/`
-instead of being duplicated here. Spec Kit (`.specify/`) governs how
-substantial feature work is specified and planned; this file governs how
-agents behave in this repository at all times.
+instead of being duplicated here. Spec Kit governs how substantial feature
+work is specified and planned: `.specify/` holds its tooling/configuration,
+while generated feature specs, plans and tasks live under the repository-root
+`specs/` directory. This file governs how agents behave in this repository
+at all times.
 
 ## Engineering ownership
 
@@ -49,8 +51,9 @@ agents behave in this repository at all times.
 - Python dependencies stay in the project-local uv environment.
 - JavaScript dependencies stay in the project-local pnpm workspace
   (`node_modules`).
-- PostgreSQL runs through Docker Compose rather than as a native host
-  service.
+- For local development, PostgreSQL runs through Docker Compose rather than
+  as a native host service. CI may use an isolated PostgreSQL service
+  container instead.
 - Do not introduce dev containers, Codespaces or new infrastructure services
   without explicit justification.
 - Do not containerise the frontend/backend development workflow without a
