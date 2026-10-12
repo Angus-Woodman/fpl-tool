@@ -30,7 +30,7 @@ Starter Squad" action if not).
    order reorders; confirm the bench goalkeeper cannot be reordered against
    outfield subs (see [data-model.md](./data-model.md)).
 7. Backend authority check: with the frontend open, attempt to save a squad
-   via a direct `POST /my-team` call using a starting XI that violates
+   via a direct `PUT /my-team` call using a starting XI that violates
    `STARTING_POSITION_LIMITS` (e.g. 2 goalkeepers starting); confirm the API
    rejects it with a 400, proving the save path is now authoritatively
    validated by `validate_squad` rather than only by frontend predicates
@@ -42,7 +42,7 @@ Starter Squad" action if not).
    the recommended-vs-current panel are all hidden by default.
 2. Use the reveal control; confirm all three become visible.
 3. Hide them again; reload the page; confirm they are hidden again (not
-   remembered — see [research.md](./research.md), decision 5).
+   remembered — see [research.md](./research.md), decision 7).
 
 ## Scenario 3 — Explore transfers from My Team, preserving context
 
@@ -83,6 +83,11 @@ Starter Squad" action if not).
 - `packages/fpl_engine/tests/test_replacement_ranking.py`: illegal
   in-pool candidates are now returned (not dropped) with `is_legal=False`,
   the matching `errors`, and their full, non-null comparison data.
+- `packages/fpl_engine/tests/test_candidate_pool.py`: the shared
+  pool-eligibility helper returns `None` for a same-position, not-owned
+  candidate and `player_already_in_squad` / `different_position` otherwise,
+  and `rank_replacement_candidates` uses it (same results as today's inline
+  skip for out-of-pool players).
 - `packages/fpl_engine/tests` (squad rules): a 5-2-3 starting formation
   (`MID=2`) round-trips as legal through `validate_squad`, documenting why
   the frontend's stricter `MID >= 3` check cannot be authoritative.
@@ -91,8 +96,8 @@ Starter Squad" action if not).
   where today it is accepted.
 - `apps/api/tests/transfers/`: Transfer Explorer response includes the new
   additive fields with full comparison data for illegal candidates;
-  Transfer Preview rejects an out-of-pool `player_in_id` with
-  `player_not_in_candidate_pool` and still returns a normal, legality-aware
+  Transfer Preview rejects an out-of-pool `player_in_id` (422,
+  `player_not_in_candidate_pool`) and still returns a normal, legality-aware
   preview for an in-pool-but-illegal one.
 - `apps/web/tests/team/` and `apps/web/tests/transfers/`: selection/swap/
   reorder interactions, points reveal/hide, unavailable-candidate rendering

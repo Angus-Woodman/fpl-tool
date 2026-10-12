@@ -71,7 +71,7 @@ Source: `RankedReplacement` (domain) → `RankedTransferCandidateResponse`
 
 | Field | Status | Notes |
 |---|---|---|
-| `player_id`, `web_name`, `team_short_name`, `price` | unchanged | pool membership fields (same position, not owned) are already enforced before this stage and never change |
+| `player_id`, `web_name`, `team_short_name`, `price` | unchanged | pool membership (same position, not owned) is decided by the shared domain helper described under "Candidate pool eligibility" below and does not change in this feature; any additional candidate-status filter is an **open decision** (see [research.md](./research.md), decision 10) |
 | `resulting_bank`, `team_gain_by_horizon`, `direct_xpts_difference`, `gameweeks_evaluated` | **unchanged, still always present** | `evaluate_single_transfer` already computes these for every in-pool candidate regardless of legality (position composition is preserved by same-position swaps); they are **not** made optional (see [research.md](./research.md), decision 1) |
 | `is_legal` | **new** | `bool`; `false` means the candidate is visible, fully comparable, but currently unavailable to apply |
 | `unavailable_reasons` | **new** | `list[str]`; the same error codes `evaluate_single_transfer` already produces (`insufficient_bank`, `club_limit_exceeded`, and defensively `invalid_position_composition`); empty when `is_legal` is `true` |
@@ -93,6 +93,25 @@ user (see [research.md](./research.md), decision 9):
 | `club_limit_exceeded` | already have 3 players from that club |
 | `invalid_position_composition` | squad composition constraint (defensive; should not normally occur for in-pool candidates since position already matches) |
 
+## Candidate pool eligibility (shared domain helper)
+
+Pool eligibility (same position as the outgoing player, not already in the
+squad) is distinct from transfer legality (budget, club limit, ...) and is
+expressed **once**, in `packages/fpl_engine`, as a small pure helper (see
+[research.md](./research.md), decision 4):
+
+| Input | Output |
+|---|---|
+| squad, `player_out_id`, candidate profile | `None` if in the pool; otherwise a reason code: `player_already_in_squad` or `different_position` |
+
+It is used by `rank_replacement_candidates` (Explorer) and by
+`GetTransferPreviewService` (Preview), so both surfaces share a single
+definition and `apps/api` carries no pool-eligibility logic of its own.
+Candidate availability status (`status == "a"`) is **not** part of this
+helper: it is player data rather than an FPL squad rule, and whether it
+should remain part of pool eligibility is an open decision
+([research.md](./research.md), decision 10).
+
 ## Transfer Preview
 
 Source: `TransferPreviewResult` / `TransferPreviewResponse`. Response
@@ -104,13 +123,15 @@ FR-015/FR-016's Preview-side behaviour, already in place (its only bug is
 displaying `errors` raw instead of through the shared mapping above).
 
 **New rejection case (service-level, not a schema change)**: before
-evaluating legality, `GetTransferPreviewService` now checks that
-`player_in_id` is in the candidate pool (same position as the outgoing
-player, not already in the squad). If not, it returns a new
-`player_not_in_candidate_pool` failure, mapped to the same 404-style
-response already used for `player_not_found` — Transfer Preview is
-unreachable for an out-of-pool player, per FR-013/FR-017. This check runs
-*before* — and is distinct from — the existing legality evaluation, which
-still produces a normal `ready` preview (`is_legal=false`, Apply disabled)
-for in-pool candidates that merely fail budget, club limit, or another
-squad-level constraint (see [research.md](./research.md), decision 4).
+loading projections or evaluating legality, `GetTransferPreviewService`
+calls the shared pool-eligibility helper above. A non-`None` result returns
+a new `player_not_in_candidate_pool` failure. The router already maps every
+failure code other than `player_not_found` to 422 (as it does for
+`player_not_in_squad`), so this surfaces as a 422 with `{code, message}` and
+the frontend's existing `unavailable` preview state displays the message —
+Transfer Preview is unreachable for an out-of-pool player, per
+FR-013/FR-017. This check runs *before* — and is distinct from — the
+existing legality evaluation, which still produces a normal `ready` preview
+(`is_legal=false`, Apply disabled) for in-pool candidates that merely fail
+budget, club limit, or another squad-level constraint (see
+[research.md](./research.md), decision 4).

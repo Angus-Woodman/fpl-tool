@@ -2,22 +2,33 @@
 
 ## Change
 
-A new rejection case is added **before** legality evaluation: if
-`player_in_id` is not in the candidate pool for `player_out_id` (different
-position than the outgoing player, or already in the squad), the endpoint
-now returns the same style of response already used for
-`player_not_found`/`player_not_in_squad`, rather than evaluating the
-transfer at all. The success/`ready` response schema (`TransferPreviewResponse`,
-including `is_legal`/`errors`) is **unchanged**.
+A new rejection case is added **before** projections are loaded and before
+legality evaluation: if `player_in_id` is not in the candidate pool for
+`player_out_id` (different position than the outgoing player, or already in
+the squad — decided by the shared `fpl_engine` pool-eligibility helper, not
+by logic in `apps/api`; see [research.md](../research.md), decision 4), the
+endpoint returns a structured failure rather than evaluating the transfer.
+The success/`ready` response schema (`TransferPreviewResponse`, including
+`is_legal`/`errors`) is **unchanged**.
+
+Whether a candidate's availability status (`status != "a"`) should also be
+out-of-pool is an **open decision** and is not specified here — see
+[research.md](../research.md), decision 10.
 
 ### New case: out-of-pool candidate
 
+The router already returns 422 for every failure code other than
+`player_not_found` (as it does today for `player_not_in_squad` and
+`missing_projections`), so this case needs no router change and the
+frontend's existing `unavailable` preview state already displays `message`:
+
 ```jsonc
-// 404, same shape as today's player_not_found case
+// 422, same shape as today's other TransferPreviewFailure cases
 {
   "detail": {
     "code": "player_not_in_candidate_pool",
-    "message": "Player 789 is not a valid replacement candidate for player 123"
+    "message": "Player 789 is not a valid replacement candidate for player 123",
+    "missing_player_ids": []
   }
 }
 ```
