@@ -12,8 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
-      - name: Install tools
-        run: mise install
       - name: Install Python dependencies
         run: uv sync --all-packages --dev
       - name: Ruff
@@ -32,8 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
-      - name: Install tools
-        run: mise install
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Frontend lint
