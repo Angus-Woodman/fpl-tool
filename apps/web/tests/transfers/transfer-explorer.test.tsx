@@ -368,6 +368,25 @@ describe("TransferExplorer", () => {
     expect(putCalls).toHaveLength(0);
   });
 
+  it("renders the opened Preview above the replacement table so it is visible without scrolling past the list", async () => {
+    useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+    useRouter.mockReturnValue({ push: routerPush });
+    mockFetchWithApply({});
+
+    render(<TransferExplorer />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Low1High5")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Preview transfer" })[0]);
+
+    const heading = await screen.findByText("Preview: MID Nine → Low1High5");
+    const table = screen.getByRole("table");
+    expect(
+      heading.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("shows an error message when the preview cannot be computed", async () => {
     useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
     useRouter.mockReturnValue({ push: routerPush });
