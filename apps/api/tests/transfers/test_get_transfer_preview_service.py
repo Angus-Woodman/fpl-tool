@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
 from api.repositories.current_squad_repository import CurrentSquadPlayerRecord, CurrentSquadRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.player_read_repository import CandidatePlayerRecord
@@ -69,17 +70,26 @@ def _squad(bank: float = 1.0) -> CurrentSquadRecord:
     )
 
 
-def _candidate(player_id: int, *, team_id: int, price: float = 5.0) -> CandidatePlayerRecord:
+def _candidate(
+    player_id: int,
+    *,
+    team_id: int,
+    price: float = 5.0,
+    position: str = "MID",
+    status: str = "a",
+    can_select: bool | None = True,
+    can_transact: bool | None = True,
+) -> CandidatePlayerRecord:
     return CandidatePlayerRecord(
         player_id=player_id,
         web_name=f"Candidate{player_id}",
         team_id=team_id,
         team_short_name=f"C{team_id}",
         current_price=price,
-        position="MID",
-        status="a",
-        can_select=True,
-        can_transact=True,
+        position=position,
+        status=status,
+        can_select=can_select,
+        can_transact=can_transact,
     )
 
 
@@ -141,18 +151,22 @@ class _FakeCurrentSquadRepository:
 class _FakeProjectionRunRepository:
     def __init__(self, run: ProjectionRunRecord | None) -> None:
         self._run = run
+        self.calls = 0
 
     def get_latest(self, model_version: str) -> ProjectionRunRecord | None:
+        self.calls += 1
         return self._run
 
 
 class _FakeProjectionRepository:
     def __init__(self, rows: list[PlayerProjectionFixtureRecord]) -> None:
         self._rows = rows
+        self.calls = 0
 
     def list_player_fixture_projections_for_run(
         self, player_ids: list[int], run_id: int
     ) -> list[PlayerProjectionFixtureRecord]:
+        self.calls += 1
         return [row for row in self._rows if row.player_id in player_ids]
 
 
@@ -307,3 +321,104 @@ def test_read_only_the_fake_squad_repository_exposes_no_save_method() -> None:
     service.execute(PLAYER_OUT_ID, 202)
 
     assert not hasattr(service._current_squad_repository, "save_current")  # type: ignore[attr-defined]
+
+
+def _pool_failure(candidate: CandidatePlayerRecord) -> tuple[TransferPreviewFailure, int, int]:
+    service = _service(
+        squad=_squad(),
+        run=_run(),
+        rows=_rows({candidate.player_id: 4.0}),
+        players_by_id={candidate.player_id: candidate},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, candidate.player_id)
+
+    assert isinstance(result, TransferPreviewFailure)
+    run_calls = service._projection_run_repository.calls  # type: ignore[attr-defined]
+    projection_calls = service._projection_repository.calls  # type: ignore[attr-defined]
+    return result, run_calls, projection_calls
+
+
+def test_rejects_an_incoming_player_of_a_different_position_before_loading_projections() -> None:
+    result, run_calls, projection_calls = _pool_failure(_candidate(202, team_id=55, position="FWD"))
+
+    assert result.code == "player_not_in_candidate_pool"
+    assert "different position" in result.message
+    assert (run_calls, projection_calls) == (0, 0)
+
+
+def test_rejects_an_incoming_player_who_is_already_in_the_squad() -> None:
+    result, run_calls, projection_calls = _pool_failure(_candidate(10, team_id=10))
+
+    assert result.code == "player_not_in_candidate_pool"
+    assert "already in your squad" in result.message
+    assert (run_calls, projection_calls) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("can_select", "can_transact"),
+    [(False, False), (False, True), (True, False)],
+)
+def test_rejects_a_known_non_selectable_incoming_player(
+    can_select: bool, can_transact: bool
+) -> None:
+    result, run_calls, projection_calls = _pool_failure(
+        _candidate(202, team_id=55, can_select=can_select, can_transact=can_transact)
+    )
+
+    assert result.code == "player_not_in_candidate_pool"
+    assert "not currently selectable" in result.message
+    assert (run_calls, projection_calls) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("can_select", "can_transact"),
+    [(None, None), (True, None), (None, True)],
+)
+def test_asks_for_a_refresh_when_selectability_is_unknown(
+    can_select: bool | None, can_transact: bool | None
+) -> None:
+    result, run_calls, projection_calls = _pool_failure(
+        _candidate(202, team_id=55, can_select=can_select, can_transact=can_transact)
+    )
+
+    assert result.code == "player_not_in_candidate_pool"
+    assert "refresh" in result.message.lower()
+    assert (run_calls, projection_calls) == (0, 0)
+
+
+def test_a_known_false_flag_beside_an_unknown_one_is_reported_as_not_selectable() -> None:
+    result, *_ = _pool_failure(_candidate(202, team_id=55, can_select=False, can_transact=None))
+
+    assert "not currently selectable" in result.message
+    assert "refresh" not in result.message.lower()
+
+
+def test_structural_exclusions_outrank_unknown_selectability() -> None:
+    owned, *_ = _pool_failure(_candidate(10, team_id=10, can_select=None, can_transact=None))
+    other_position, *_ = _pool_failure(
+        _candidate(202, team_id=55, position="FWD", can_select=None, can_transact=None)
+    )
+
+    assert "already in your squad" in owned.message
+    assert "different position" in other_position.message
+    assert "refresh" not in owned.message.lower()
+    assert "refresh" not in other_position.message.lower()
+
+
+@pytest.mark.parametrize("status", ["i", "d", "s"])
+def test_previews_an_unavailable_playing_status_player_when_both_flags_are_true(
+    status: str,
+) -> None:
+    service = _service(
+        squad=_squad(bank=1.0),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, status=status)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, TransferPreviewFailure)
+    assert result is not None
+    assert result.is_legal is True

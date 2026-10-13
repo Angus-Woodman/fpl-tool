@@ -1,4 +1,5 @@
 import type { LineupSummary, TransferPreviewResponse } from "@/lib/api";
+import { describeLegalityReasons } from "@/components/transfers/legality-reasons";
 
 export type TransferPreviewState =
   | { type: "loading" }
@@ -70,7 +71,8 @@ export function TransferPreview({
         <div className="mt-3 space-y-3">
           {!state.data.is_legal && (
             <p className="text-sm text-red-700">
-              This transfer is not currently legal: {state.data.errors.join(", ")}
+              This transfer is not currently legal:{" "}
+              {describeLegalityReasons(state.data.errors).join("; ")}
             </p>
           )}
 

@@ -13,6 +13,7 @@ from api.repositories.current_squad_repository import (
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.player_read_repository import CandidatePlayerRecord
 from api.repositories.projection_run_repository import ProjectionRunRecord
+from api.services.candidate_pool_failures import incoming_pool_exclusion, pool_exclusion_message
 from api.services.get_my_team_view import MyTeamViewRecord
 
 DEFAULT_MODEL_VERSION = "component_v3"
@@ -96,6 +97,15 @@ class ApplyTransferService:
             return ApplyTransferFailure(
                 code="player_not_found",
                 message=f"No player exists with id {player_in_id}",
+            )
+
+        # Checked against the latest imported data; only the incoming player is subject to it.
+        exclusion = incoming_pool_exclusion(current_squad.players, player_out_id, incoming_profile)
+        if exclusion is not None:
+            return ApplyTransferFailure(
+                code="transfer_illegal",
+                message=pool_exclusion_message(exclusion, incoming_profile),
+                errors=(exclusion,),
             )
 
         run = self._projection_run_repository.get_latest(DEFAULT_MODEL_VERSION)

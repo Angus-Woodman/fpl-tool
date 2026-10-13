@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MyTeamRecommendationResponse } from "@/lib/api";
@@ -224,6 +224,36 @@ describe("MyTeamBoard", () => {
     const links = screen.getAllByRole("link", { name: /Explore transfers/ });
     expect(links).toHaveLength(15);
     expect(links[0]).toHaveAttribute("href", expect.stringMatching(/^\/transfers\?out=\d+$/));
+  });
+
+  it("links every starter and bench card to /transfers?out=<player_id>, with or without a selection", async () => {
+    const squad = buildFullSquadResponse();
+    installBackend({ squad });
+
+    await renderBoard();
+
+    function expectLinksFor(players: Squad["players"]): void {
+      for (const player of players) {
+        const card = selectButton(player.web_name).closest("article");
+        expect(card).not.toBeNull();
+        const link = within(card as HTMLElement).getByRole("link", { name: /Explore transfers/ });
+        expect(link).toHaveAttribute("href", `/transfers?out=${player.player_id}`);
+      }
+    }
+
+    const starters = squad.players.filter((player) => player.is_starting);
+    const bench = squad.players.filter((player) => !player.is_starting);
+    expect(starters).toHaveLength(11);
+    expect(bench).toHaveLength(4);
+
+    expectLinksFor(squad.players);
+
+    // Starter-first and bench-first selection must leave every link in place.
+    fireEvent.click(selectButton("DEF One"));
+    expectLinksFor(squad.players);
+    fireEvent.click(selectButton("DEF One"));
+    fireEvent.click(selectButton("GK Two"));
+    expectLinksFor(squad.players);
   });
 
   it("navigates gameweeks and updates opponent labels", async () => {

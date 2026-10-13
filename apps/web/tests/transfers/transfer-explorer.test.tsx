@@ -487,4 +487,100 @@ describe("TransferExplorer", () => {
 
     expect(screen.queryByText("Transfer applied")).not.toBeInTheDocument();
   });
+
+  describe("preview eligibility and legality messaging", () => {
+    function mockPreview(previewResponse: Response) {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/my-team")) {
+          return { ok: true, json: async () => buildSquadResponse() } as Response;
+        }
+        if (url.includes("/preview")) {
+          return previewResponse;
+        }
+        return { ok: true, json: async () => buildExplorerResponse() } as Response;
+      });
+    }
+
+    async function openFirstPreview(): Promise<void> {
+      useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+      useRouter.mockReturnValue({ push: routerPush });
+
+      render(<TransferExplorer />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Low1High5")).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getAllByRole("button", { name: "Preview transfer" })[0]);
+    }
+
+    it("shows a 422 player_not_in_candidate_pool message in the unavailable state, with no Apply button", async () => {
+      mockPreview({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: {
+            code: "player_not_in_candidate_pool",
+            message: "Low1High5 is not currently selectable in FPL.",
+            missing_player_ids: [],
+          },
+        }),
+      } as Response);
+
+      await openFirstPreview();
+
+      await waitFor(() => {
+        expect(screen.getByText("Low1High5 is not currently selectable in FPL.")).toBeInTheDocument();
+      });
+      expect(screen.queryByRole("button", { name: "Apply transfer" })).not.toBeInTheDocument();
+    });
+
+    it("maps legality error codes to readable text and never shows the raw code", async () => {
+      mockPreview({
+        ok: true,
+        json: async () => ({
+          ...buildPreviewResponseBody(),
+          is_legal: false,
+          errors: ["insufficient_bank", "club_limit_exceeded", "some_future_code"],
+          resulting_bank: -0.5,
+          lineup_after: null,
+        }),
+      } as Response);
+
+      await openFirstPreview();
+
+      await waitFor(() => {
+        expect(screen.getByText(/This transfer is not currently legal/)).toBeInTheDocument();
+      });
+      const message = screen.getByText(/This transfer is not currently legal/);
+      expect(message).toHaveTextContent(/insufficient budget/i);
+      expect(message).toHaveTextContent(/3 players from that club/i);
+      expect(message).not.toHaveTextContent("insufficient_bank");
+      expect(message).not.toHaveTextContent("club_limit_exceeded");
+      expect(message).not.toHaveTextContent("some_future_code");
+      expect(screen.getByRole("button", { name: "Apply transfer" })).toBeDisabled();
+    });
+
+    it("never issues a PUT /my-team or an apply request when a preview is opened", async () => {
+      const fetchMock = mockPreview({
+        ok: true,
+        json: async () => buildPreviewResponseBody(),
+      } as Response);
+
+      await openFirstPreview();
+
+      await waitFor(() => {
+        expect(screen.getByText("Preview: MID Nine → Low1High5")).toBeInTheDocument();
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Apply transfer" })).toBeEnabled();
+      });
+
+      const mutating = fetchMock.mock.calls.filter(([url, init]) => {
+        const method = (init as RequestInit | undefined)?.method;
+        return method === "PUT" || method === "POST" || String(url).includes("/apply");
+      });
+      expect(mutating).toHaveLength(0);
+    });
+  });
 });

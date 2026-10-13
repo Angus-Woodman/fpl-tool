@@ -1,3 +1,4 @@
+from api.db.session import get_db_session
 from api.main import app
 from api.routers.my_team import get_apply_transfer_service
 from api.services.apply_transfer import ApplyTransferFailure
@@ -73,6 +74,43 @@ def test_returns_422_when_the_transfer_is_illegal() -> None:
         payload = response.json()["detail"]
         assert payload["code"] == "transfer_illegal"
         assert payload["errors"] == ["insufficient_bank"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _FakeDbSession:
+    def __init__(self) -> None:
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def test_returns_422_with_the_pool_reason_and_rolls_back_without_committing() -> None:
+    failure = ApplyTransferFailure(
+        code="transfer_illegal",
+        message="Candidate202 is not currently selectable in FPL.",
+        errors=("player_not_selectable",),
+    )
+    session = _FakeDbSession()
+    app.dependency_overrides[get_apply_transfer_service] = lambda: _FakeApplyTransferService(
+        failure
+    )
+    app.dependency_overrides[get_db_session] = lambda: session
+    try:
+        client = TestClient(app)
+        response = client.post("/my-team/transfers/9/apply", json={"player_in_id": 202})
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["code"] == "transfer_illegal"
+        assert detail["errors"] == ["player_not_selectable"]
+        assert session.rollbacks == 1
+        assert session.commits == 0
     finally:
         app.dependency_overrides.clear()
 
