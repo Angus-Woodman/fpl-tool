@@ -19,6 +19,8 @@ class PlayerSeed:
     position: PlayerPosition
     current_price: float
     status: str
+    can_select: bool | None
+    can_transact: bool | None
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,8 @@ def map_bootstrap_static(payload: BootstrapStaticDto) -> BootstrapStaticMapped:
                 position=_POSITION_MAP[element.element_type],
                 current_price=element.now_cost / 10.0,
                 status=element.status,
+                can_select=element.can_select,
+                can_transact=element.can_transact,
             )
         )
 

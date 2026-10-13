@@ -1,6 +1,6 @@
 import datetime as dt
 
-from api.adapters.fpl.mappers import map_bootstrap_static
+from api.adapters.fpl.mappers import PlayerSeed, map_bootstrap_static
 from api.adapters.fpl.schemas import BootstrapStaticDto
 
 
@@ -61,3 +61,59 @@ def test_bootstrap_mapper_derives_team_difficulty_from_strength() -> None:
     assert difficulty_by_short_name["SUN"] == 2
     assert difficulty_by_short_name["UNK"] == 3
     assert difficulty_by_short_name["OFF"] == 5
+
+
+def _element(player_id: int, **extra: object) -> dict[str, object]:
+    return {
+        "id": player_id,
+        "first_name": "First",
+        "second_name": "Second",
+        "web_name": f"Player{player_id}",
+        "team": 1,
+        "element_type": 3,
+        "now_cost": 50,
+        **extra,
+    }
+
+
+def _map_elements(elements: list[dict[str, object]]) -> list[PlayerSeed]:
+    dto = BootstrapStaticDto.model_validate(
+        {
+            "teams": [{"id": 1, "name": "Arsenal", "short_name": "ARS"}],
+            "elements": elements,
+            "events": [],
+        }
+    )
+    return map_bootstrap_static(dto).players
+
+
+def test_bootstrap_mapper_carries_selectability_flags_into_the_player_seed() -> None:
+    players = _map_elements(
+        [
+            _element(1, status="a", can_select=True, can_transact=True),
+            _element(2, status="a", can_select=False, can_transact=False),
+            _element(3, status="a"),
+        ]
+    )
+
+    assert [(p.can_select, p.can_transact) for p in players] == [
+        (True, True),
+        (False, False),
+        (None, None),
+    ]
+
+
+def test_bootstrap_mapper_keeps_selectability_independent_of_status() -> None:
+    players = _map_elements(
+        [
+            _element(1, status="a", can_select=False, can_transact=True),
+            _element(2, status="i", can_select=True, can_transact=True),
+            _element(3, status="u", can_select=False, can_transact=True),
+        ]
+    )
+
+    assert [(p.status, p.can_select, p.can_transact) for p in players] == [
+        ("a", False, True),
+        ("i", True, True),
+        ("u", False, True),
+    ]

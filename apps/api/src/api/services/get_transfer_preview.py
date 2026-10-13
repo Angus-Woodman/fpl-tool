@@ -12,6 +12,7 @@ from api.repositories.current_squad_repository import CurrentSquadRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.player_read_repository import CandidatePlayerRecord
 from api.repositories.projection_run_repository import ProjectionRunRecord
+from api.services.candidate_pool_failures import incoming_pool_exclusion, pool_exclusion_message
 
 DEFAULT_MODEL_VERSION = "component_v3"
 
@@ -63,6 +64,7 @@ class TransferPreviewResult:
     lineup_after: LineupSummary | None
     captain_changed: bool
     vice_captain_changed: bool
+    player_in_status: str
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,13 @@ class GetTransferPreviewService:
             return TransferPreviewFailure(
                 code="player_not_found",
                 message=f"No player exists with id {player_in_id}",
+            )
+
+        exclusion = incoming_pool_exclusion(current_squad.players, player_out_id, incoming_profile)
+        if exclusion is not None:
+            return TransferPreviewFailure(
+                code="player_not_in_candidate_pool",
+                message=pool_exclusion_message(exclusion, incoming_profile),
             )
 
         run = self._projection_run_repository.get_latest(DEFAULT_MODEL_VERSION)
@@ -227,4 +236,5 @@ class GetTransferPreviewService:
             lineup_after=lineup_after,
             captain_changed=captain_changed,
             vice_captain_changed=vice_captain_changed,
+            player_in_status=incoming_profile.status,
         )

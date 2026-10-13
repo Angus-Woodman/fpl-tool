@@ -313,15 +313,7 @@ export function TransferExplorer(): JSX.Element {
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
-          Ranked replacements
-        </h3>
-        <HorizonSelector value={horizon} onChange={setHorizon} />
-      </div>
-
-      <ReplacementTable candidates={data.candidates} horizon={horizon} onPreview={handlePreview} />
-
+      {/* Above the table so opening a Preview is visible without scrolling past a long list. */}
       {previewCandidate && (
         <TransferPreview
           state={previewState}
@@ -339,6 +331,15 @@ export function TransferExplorer(): JSX.Element {
       {applyState.type === "error" && (
         <p className="text-sm text-red-700">{applyState.message}</p>
       )}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
+          Ranked replacements
+        </h3>
+        <HorizonSelector value={horizon} onChange={setHorizon} />
+      </div>
+
+      <ReplacementTable candidates={data.candidates} horizon={horizon} onPreview={handlePreview} />
     </section>
   );
 }

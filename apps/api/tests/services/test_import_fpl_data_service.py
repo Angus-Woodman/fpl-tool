@@ -2,7 +2,7 @@ import pytest
 from api.adapters.fpl.schemas import BootstrapStaticDto, FplFixtureDto
 from api.core.exceptions import DataMappingError
 from api.services.import_fpl_data import ImportFplDataService
-from fpl_engine.domain import PlayerSnapshot
+from fpl_engine.domain import Player, PlayerSnapshot
 
 
 class _FakeProvider:
@@ -36,10 +36,12 @@ class _FakeTeamRepository:
 class _FakePlayerRepository:
     def __init__(self, player_map: dict[int, int] | None = None) -> None:
         self.upserted_players = 0
+        self.players: list[Player] = []
         self._player_map = player_map if player_map is not None else {}
 
-    def upsert_many(self, players: list[object]) -> None:
+    def upsert_many(self, players: list[Player]) -> None:
         self.upserted_players = len(players)
+        self.players = list(players)
 
     def get_internal_ids_by_external_ids(self, external_ids: set[int]) -> dict[int, int]:
         return {
@@ -156,6 +158,60 @@ def test_import_service_returns_summary(
     assert player_repo.upserted_players == 1
     assert gameweek_repo.upserted_gameweeks == 1
     assert fixture_repo.upserted_fixtures == 1
+
+
+def test_import_service_passes_selectability_flags_to_the_player_repository(
+    fixture_payload: list[dict[str, object]],
+) -> None:
+    def element(player_id: int, **flags: object) -> dict[str, object]:
+        return {
+            "id": player_id,
+            "first_name": "First",
+            "second_name": "Second",
+            "web_name": f"Player{player_id}",
+            "team": 1,
+            "element_type": 4,
+            "now_cost": 90,
+            "status": "a",
+            **flags,
+        }
+
+    payload = BootstrapStaticDto.model_validate(
+        {
+            "teams": [{"id": 1, "name": "Arsenal", "short_name": "ARS"}],
+            "elements": [
+                element(7, can_select=True, can_transact=True),
+                element(8, can_select=False, can_transact=True),
+                element(9),
+            ],
+            "events": [
+                {
+                    "id": 1,
+                    "name": "Gameweek 1",
+                    "deadline_time": "2026-08-14T18:30:00Z",
+                    "is_current": False,
+                    "is_next": True,
+                    "is_finished": False,
+                }
+            ],
+        }
+    )
+    player_repo = _FakePlayerRepository({7: 301, 8: 302, 9: 303})
+
+    ImportFplDataService(
+        provider=_FakeProvider(payload, fixture_payload),
+        team_repository=_FakeTeamRepository({1: 101}),
+        player_repository=player_repo,
+        gameweek_repository=_FakeGameweekRepository({1: 201}),
+        fixture_repository=_FakeFixtureRepository(),
+        player_snapshot_repository=_FakePlayerSnapshotRepository(),
+    ).import_bootstrap_static()
+
+    assert [(p.external_fpl_id, p.can_select, p.can_transact) for p in player_repo.players] == [
+        (7, True, True),
+        (8, False, True),
+        (9, None, None),
+    ]
 
 
 def test_import_service_captures_a_player_snapshot(

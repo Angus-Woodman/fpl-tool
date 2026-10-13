@@ -65,6 +65,31 @@ def test_bootstrap_schema_defaults_snapshot_fields_when_absent() -> None:
     assert element.minutes == 0
 
 
+def _payload_with_element(**overrides: object) -> dict[str, object]:
+    payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    element = payload["elements"][0]
+    element.pop("can_select", None)
+    element.pop("can_transact", None)
+    element.update(overrides)
+    return payload
+
+
+def test_bootstrap_schema_reads_selectability_flags() -> None:
+    payload = _payload_with_element(can_select=False, can_transact=True)
+
+    element = BootstrapStaticDto.model_validate(payload).elements[0]
+
+    assert element.can_select is False
+    assert element.can_transact is True
+
+
+def test_bootstrap_schema_leaves_absent_selectability_flags_unknown() -> None:
+    element = BootstrapStaticDto.model_validate(_payload_with_element()).elements[0]
+
+    assert element.can_select is None
+    assert element.can_transact is None
+
+
 def test_bootstrap_schema_rejects_missing_required_fields() -> None:
     payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     del payload["teams"][0]["short_name"]

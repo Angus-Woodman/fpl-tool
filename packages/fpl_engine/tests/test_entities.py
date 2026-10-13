@@ -19,6 +19,42 @@ def test_player_position_is_strongly_typed_enum() -> None:
     assert player.position is PlayerPosition.MIDFIELDER
 
 
+def test_player_selectability_flags_are_optional_and_default_to_unknown() -> None:
+    player = Player(
+        id=1,
+        external_fpl_id=101,
+        first_name="A",
+        second_name="B",
+        web_name="AB",
+        team_id=1,
+        position=PlayerPosition.MIDFIELDER,
+        current_price=7.5,
+        status="a",
+    )
+
+    assert player.can_select is None
+    assert player.can_transact is None
+
+
+def test_player_carries_explicit_selectability_flags() -> None:
+    player = Player(
+        id=1,
+        external_fpl_id=101,
+        first_name="A",
+        second_name="B",
+        web_name="AB",
+        team_id=1,
+        position=PlayerPosition.MIDFIELDER,
+        current_price=7.5,
+        status="u",
+        can_select=False,
+        can_transact=True,
+    )
+
+    assert player.can_select is False
+    assert player.can_transact is True
+
+
 def test_team_entity_shape() -> None:
     team = Team(id=1, name="Arsenal", short_name="ARS", external_fpl_id=1, source_difficulty=4)
 

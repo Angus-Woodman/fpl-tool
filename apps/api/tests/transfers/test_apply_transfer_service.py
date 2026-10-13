@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
 from api.repositories.current_squad_repository import (
     CurrentSquadPlayerRecord,
     CurrentSquadRecord,
@@ -70,15 +71,26 @@ def _squad(bank: float = 1.0) -> CurrentSquadRecord:
     )
 
 
-def _candidate(player_id: int, *, team_id: int, price: float = 5.0) -> CandidatePlayerRecord:
+def _candidate(
+    player_id: int,
+    *,
+    team_id: int,
+    price: float = 5.0,
+    position: str = "MID",
+    status: str = "a",
+    can_select: bool | None = True,
+    can_transact: bool | None = True,
+) -> CandidatePlayerRecord:
     return CandidatePlayerRecord(
         player_id=player_id,
         web_name=f"Candidate{player_id}",
         team_id=team_id,
         team_short_name=f"C{team_id}",
         current_price=price,
-        position="MID",
-        status="a",
+        position=position,
+        status=status,
+        can_select=can_select,
+        can_transact=can_transact,
     )
 
 
@@ -163,18 +175,22 @@ class _FakeCurrentSquadRepository:
 class _FakeProjectionRunRepository:
     def __init__(self, run: ProjectionRunRecord | None) -> None:
         self._run = run
+        self.calls = 0
 
     def get_latest(self, model_version: str) -> ProjectionRunRecord | None:
+        self.calls += 1
         return self._run
 
 
 class _FakeProjectionRepository:
     def __init__(self, rows: list[PlayerProjectionFixtureRecord]) -> None:
         self._rows = rows
+        self.calls = 0
 
     def list_player_fixture_projections_for_run(
         self, player_ids: list[int], run_id: int
     ) -> list[PlayerProjectionFixtureRecord]:
+        self.calls += 1
         return [row for row in self._rows if row.player_id in player_ids]
 
 
@@ -350,3 +366,148 @@ def test_free_transfers_are_left_unchanged() -> None:
     saved_squad = squad_repository.get_current()
     assert saved_squad is not None
     assert saved_squad.free_transfers == 1
+
+
+def _rejected_for_pool(
+    candidate: CandidatePlayerRecord,
+) -> tuple[ApplyTransferFailure, _FakeCurrentSquadRepository, int, int]:
+    service, squad_repository, view_service = _service(
+        squad=_squad(bank=1.0),
+        run=_run(),
+        rows=_rows({candidate.player_id: 4.0}),
+        players_by_id={candidate.player_id: candidate},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, candidate.player_id)
+
+    assert isinstance(result, ApplyTransferFailure)
+    assert squad_repository.save_calls == 0
+    assert view_service.call_count == 0
+    return (
+        result,
+        squad_repository,
+        service._projection_run_repository.calls,  # type: ignore[attr-defined]
+        service._projection_repository.calls,  # type: ignore[attr-defined]
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "reason", "message_fragment"),
+    [
+        (
+            _candidate(202, team_id=55, can_select=False, can_transact=False),
+            "player_not_selectable",
+            "not currently selectable",
+        ),
+        (
+            _candidate(202, team_id=55, can_select=False, can_transact=True),
+            "player_not_selectable",
+            "not currently selectable",
+        ),
+        (
+            _candidate(202, team_id=55, can_select=True, can_transact=None),
+            "selectability_unknown",
+            "refresh",
+        ),
+        (
+            _candidate(202, team_id=55, can_select=None, can_transact=None),
+            "selectability_unknown",
+            "refresh",
+        ),
+        (
+            _candidate(202, team_id=55, position="FWD"),
+            "different_position",
+            "different position",
+        ),
+        (
+            _candidate(10, team_id=10),
+            "player_already_in_squad",
+            "already in your squad",
+        ),
+    ],
+    ids=[
+        "both-flags-false",
+        "select-false-transact-true",
+        "one-flag-unknown",
+        "both-flags-unknown",
+        "wrong-position",
+        "already-owned",
+    ],
+)
+def test_rejects_an_incoming_player_outside_the_pool_before_projections_or_saving(
+    candidate: CandidatePlayerRecord, reason: str, message_fragment: str
+) -> None:
+    result, _, run_calls, projection_calls = _rejected_for_pool(candidate)
+
+    assert result.code == "transfer_illegal"
+    assert result.errors == (reason,)
+    assert message_fragment in result.message.lower()
+    assert (run_calls, projection_calls) == (0, 0)
+
+
+def test_pool_reasons_follow_the_documented_precedence() -> None:
+    owned_and_not_selectable, *_ = _rejected_for_pool(
+        _candidate(10, team_id=10, can_select=False, can_transact=False)
+    )
+    wrong_position_and_unknown, *_ = _rejected_for_pool(
+        _candidate(202, team_id=55, position="FWD", can_select=None, can_transact=None)
+    )
+    false_beside_unknown, *_ = _rejected_for_pool(
+        _candidate(203, team_id=56, can_select=False, can_transact=None)
+    )
+
+    assert owned_and_not_selectable.errors == ("player_already_in_squad",)
+    assert wrong_position_and_unknown.errors == ("different_position",)
+    assert false_beside_unknown.errors == ("player_not_selectable",)
+
+
+def test_rejects_a_player_who_became_non_selectable_after_it_was_previewed() -> None:
+    players_by_id = {202: _candidate(202, team_id=55)}
+    service, squad_repository, _ = _service(
+        squad=_squad(bank=1.0),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id=players_by_id,
+    )
+    # Eligible when previewed; the latest import has since flipped the flag.
+    players_by_id[202] = _candidate(202, team_id=55, can_select=False, can_transact=True)
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert isinstance(result, ApplyTransferFailure)
+    assert result.errors == ("player_not_selectable",)
+    assert squad_repository.save_calls == 0
+
+
+@pytest.mark.parametrize("status", ["i", "d", "s"])
+def test_applies_an_eligible_player_regardless_of_playing_status(status: str) -> None:
+    service, squad_repository, _ = _service(
+        squad=_squad(bank=1.0),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, status=status)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, ApplyTransferFailure)
+    assert squad_repository.save_calls == 1
+
+
+def test_the_outgoing_player_is_not_subject_to_the_incoming_selectability_flags() -> None:
+    service, squad_repository, _ = _service(
+        squad=_squad(bank=1.0),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={
+            202: _candidate(202, team_id=55),
+            PLAYER_OUT_ID: _candidate(
+                PLAYER_OUT_ID, team_id=PLAYER_OUT_ID, can_select=False, can_transact=False
+            ),
+        },
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, ApplyTransferFailure)
+    assert squad_repository.save_calls == 1

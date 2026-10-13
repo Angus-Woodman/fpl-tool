@@ -12,6 +12,10 @@ from api.repositories.current_squad_repository import CurrentSquadRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.player_read_repository import CandidatePlayerRecord
 from api.repositories.projection_run_repository import ProjectionRunRecord
+from api.services.candidate_pool_failures import (
+    incoming_pool_exclusion,
+    selectability_unknown_pool_message,
+)
 
 DEFAULT_MODEL_VERSION = "component_v3"
 HORIZONS = (1, 3, 5)
@@ -44,6 +48,12 @@ class RankedTransferCandidate:
     # gameweek only -- explanatory, never the ranking metric.
     direct_xpts_difference: float | None
     gameweeks_evaluated: int
+    # False means in the pool and fully comparable but currently unavailable to apply.
+    is_legal: bool
+    # evaluate_single_transfer legality codes; empty when is_legal.
+    unavailable_reasons: list[str]
+    # Advisory playing status only; never an unavailability reason.
+    status: str
 
 
 @dataclass(frozen=True)
@@ -84,7 +94,7 @@ class TransferProjectionRepositoryPort(Protocol):
 
 
 class TransferPlayerRepositoryPort(Protocol):
-    def list_available_by_position(self, position: str) -> list[CandidatePlayerRecord]: ...
+    def list_by_position(self, position: str) -> list[CandidatePlayerRecord]: ...
 
     def get_by_id(self, player_id: int) -> CandidatePlayerRecord | None: ...
 
@@ -132,9 +142,26 @@ class GetTransferExplorerService:
                 message=f"No projection run found for model_version={DEFAULT_MODEL_VERSION!r}",
             )
 
-        candidate_pool = self._player_repository.list_available_by_position(
-            outgoing_squad_player.position
+        all_candidates = self._player_repository.list_by_position(outgoing_squad_player.position)
+        exclusions = {
+            candidate.player_id: incoming_pool_exclusion(
+                current_squad.players, player_out_id, candidate
+            )
+            for candidate in all_candidates
+        }
+        # Only profiles that pass the structural and known-non-selectable tiers can be unknown.
+        unknown_count = sum(
+            1 for reason in exclusions.values() if reason == "selectability_unknown"
         )
+        if unknown_count:
+            return TransferExplorerFailure(
+                code="selectability_unknown",
+                message=selectability_unknown_pool_message(unknown_count),
+            )
+
+        candidate_pool = [
+            candidate for candidate in all_candidates if exclusions[candidate.player_id] is None
+        ]
         candidates_by_id = {candidate.player_id: candidate for candidate in candidate_pool}
         squad_player_ids = [player.player_id for player in current_squad.players]
         all_player_ids = sorted(set(squad_player_ids) | set(candidates_by_id))
@@ -195,6 +222,8 @@ class GetTransferExplorerService:
                 position=PlayerPosition(candidate.position),
                 team_id=candidate.team_id,
                 price=candidate.current_price,
+                can_select=candidate.can_select,
+                can_transact=candidate.can_transact,
             )
             for candidate in candidate_pool
         ]
@@ -246,6 +275,9 @@ class GetTransferExplorerService:
                     team_gain_by_horizon=dict(replacement.team_gain_by_horizon),
                     direct_xpts_difference=direct_xpts_difference,
                     gameweeks_evaluated=replacement.gameweeks_evaluated,
+                    is_legal=replacement.is_legal,
+                    unavailable_reasons=list(replacement.errors),
+                    status=candidate_profile.status,
                 )
             )
 

@@ -122,6 +122,43 @@ class TestSquadValidation:
         ]
         validate_starting_formation(slots)
 
+    def test_validate_squad_accepts_a_full_five_two_three_squad(self) -> None:
+        # MID=2 is legal; a frontend rule requiring MID >= 3 would wrongly block this.
+        template = (
+            [(PlayerPosition.GOALKEEPER, True)]
+            + [(PlayerPosition.DEFENDER, True)] * 5
+            + [(PlayerPosition.MIDFIELDER, True)] * 2
+            + [(PlayerPosition.FORWARD, True)] * 3
+            + [(PlayerPosition.GOALKEEPER, False)]
+            + [(PlayerPosition.MIDFIELDER, False)] * 3
+        )
+        slots: list[SquadSlot] = []
+        bench_order = 0
+        for index, (position, is_starting) in enumerate(template):
+            if not is_starting:
+                bench_order += 1
+            slots.append(
+                SquadSlot(
+                    player_id=index + 1,
+                    position=position,
+                    team_id=index % 5,
+                    is_starting=is_starting,
+                    bench_order=None if is_starting else bench_order,
+                    is_captain=index == 0,
+                    is_vice_captain=index == 1,
+                )
+            )
+        validate_squad(slots)
+
+    def test_validate_squad_rejects_two_starting_goalkeepers(self) -> None:
+        squad = build_squad()
+        # Bench a defender (order 1) and start the reserve goalkeeper; bench orders stay unique.
+        squad[1] = replace(squad[1], is_starting=False, bench_order=1)
+        squad[11] = replace(squad[11], is_starting=True, bench_order=None)
+        with pytest.raises(RuleViolationError) as error:
+            validate_squad(squad)
+        assert error.value.code == "formation"
+
 
 class TestChips:
     @pytest.mark.parametrize(

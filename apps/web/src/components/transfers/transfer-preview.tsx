@@ -1,4 +1,6 @@
 import type { LineupSummary, TransferPreviewResponse } from "@/lib/api";
+import { describeLegalityReasons } from "@/components/transfers/legality-reasons";
+import { playingStatusWarning } from "@/components/transfers/playing-status";
 
 export type TransferPreviewState =
   | { type: "loading" }
@@ -47,6 +49,9 @@ export function TransferPreview({
   onApply?: () => void;
   applying?: boolean;
 }): JSX.Element {
+  const statusWarning =
+    state.type === "ready" ? playingStatusWarning(state.data.player_in_status) : null;
+
   return (
     <section className="rounded-xl border border-slate-300 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between gap-3">
@@ -70,7 +75,15 @@ export function TransferPreview({
         <div className="mt-3 space-y-3">
           {!state.data.is_legal && (
             <p className="text-sm text-red-700">
-              This transfer is not currently legal: {state.data.errors.join(", ")}
+              This transfer is not currently legal:{" "}
+              {describeLegalityReasons(state.data.errors).join("; ")}
+            </p>
+          )}
+
+          {statusWarning && (
+            <p className="text-sm text-amber-800">
+              Playing status: {statusWarning}. This is advisory and does not affect whether the
+              transfer can be applied.
             </p>
           )}
 

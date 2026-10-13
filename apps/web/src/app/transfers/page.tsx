@@ -8,7 +8,7 @@ export default function TransfersPage(): JSX.Element {
     <>
       <PageHeader
         title="Transfers"
-        description="Explore legal replacements for any squad player over 1, 3, and 5 gameweeks."
+        description="Compare replacements for any squad player over 1, 3, and 5 gameweeks, including ones that are currently unavailable to apply."
       />
       <Suspense fallback={<p className="text-sm text-slate-600">Loading...</p>}>
         <TransferExplorer />

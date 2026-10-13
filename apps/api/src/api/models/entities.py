@@ -58,6 +58,9 @@ class PlayerModel(Base):
     position: Mapped[PlayerPosition] = mapped_column(SqlEnum(PlayerPosition), nullable=False)
     current_price: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Upstream incoming-selectability flags; NULL means unknown (never imported or absent).
+    can_select: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    can_transact: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class GameweekModel(Base):

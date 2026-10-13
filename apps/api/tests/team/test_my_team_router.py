@@ -7,12 +7,13 @@ from api.repositories.current_squad_repository import (
     CurrentSquadPlayerRecord,
     CurrentSquadRecord,
 )
+from api.repositories.squad_player_lookup_repository import SquadPlayerLookupItem
 from api.routers.my_team import (
     get_current_squad_service,
     get_my_team_recommendation_service,
     get_upsert_current_squad_service,
 )
-from api.services.current_squad import UpsertCurrentSquadRequest
+from api.services.current_squad import UpsertCurrentSquadRequest, UpsertCurrentSquadService
 from api.services.get_my_team_recommendation import (
     MyTeamRecommendation,
     MyTeamRecommendationFailure,
@@ -220,6 +221,58 @@ def test_put_my_team_returns_saved_squad() -> None:
         assert session.rolled_back is False
     finally:
         app.dependency_overrides.clear()
+
+
+def test_put_my_team_rejects_an_illegal_starting_formation_with_400() -> None:
+    # Real service + fakes: the router must surface the domain rule as a 400 without committing.
+    repository = _FakeFormationRepository()
+    lookup = _FakeFormationLookup()
+    service = UpsertCurrentSquadService(repository, lookup)
+    session = _FakeSession()
+    app.dependency_overrides[get_upsert_current_squad_service] = lambda: service
+    app.dependency_overrides[get_db_session] = lambda: session
+    try:
+        payload = _build_payload()
+        # Players 1 and 2 are both goalkeepers in the lookup, and both start.
+        response = TestClient(app).put("/my-team", json=payload)
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Starting XI must contain between 1 and 1 GK"
+        assert repository.saved is False
+        assert session.committed is False
+        assert session.rolled_back is True
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _FakeFormationRepository:
+    def __init__(self) -> None:
+        self.saved = False
+
+    def get_current(self) -> CurrentSquadRecord | None:
+        return None
+
+    def save_current(self, *, bank: float, free_transfers: int, players: list[Any]) -> Any:
+        self.saved = True
+        raise AssertionError("an illegal formation must not be saved")
+
+
+class _FakeFormationLookup:
+    _POSITIONS = (
+        ["GK", "GK"] + ["DEF"] * 4 + ["MID"] * 4 + ["FWD"] * 1 + ["DEF"] + ["MID"] + ["FWD"] * 2
+    )
+
+    def get_by_ids(self, player_ids: list[int]) -> list[SquadPlayerLookupItem]:
+        return [
+            SquadPlayerLookupItem(
+                player_id=player_id,
+                team_id=player_id,
+                web_name=f"P{player_id}",
+                position=self._POSITIONS[player_id - 1],
+                current_price=5.0,
+            )
+            for player_id in player_ids
+        ]
 
 
 class _FakeGetMyTeamRecommendationService:

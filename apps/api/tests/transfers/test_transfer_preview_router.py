@@ -53,6 +53,7 @@ def _result() -> TransferPreviewResult:
         lineup_after=_lineup(captain=13, vice_captain=14),
         captain_changed=False,
         vice_captain_changed=False,
+        player_in_status="i",
     )
 
 
@@ -100,6 +101,28 @@ def test_returns_422_when_the_outgoing_player_is_not_in_the_squad() -> None:
         app.dependency_overrides.clear()
 
 
+def test_returns_422_with_structured_detail_when_the_incoming_player_is_not_in_the_pool() -> None:
+    failure = TransferPreviewFailure(
+        code="player_not_in_candidate_pool",
+        message="Candidate202 is not currently selectable in FPL.",
+    )
+    app.dependency_overrides[get_transfer_preview_service] = lambda: _FakeGetTransferPreviewService(
+        failure
+    )
+    try:
+        client = TestClient(app)
+        response = client.get("/my-team/transfers/9/preview?player_in_id=202")
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == {
+            "code": "player_not_in_candidate_pool",
+            "message": "Candidate202 is not currently selectable in FPL.",
+            "missing_player_ids": [],
+        }
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_returns_the_preview_and_forwards_both_player_ids() -> None:
     service = _FakeGetTransferPreviewService(_result())
     app.dependency_overrides[get_transfer_preview_service] = lambda: service
@@ -113,6 +136,7 @@ def test_returns_the_preview_and_forwards_both_player_ids() -> None:
         assert payload["lineup_before"]["captain"] == 13
         assert payload["lineup_after"]["captain"] == 13
         assert payload["captain_changed"] is False
+        assert payload["player_in_status"] == "i"
         assert service.requested == [(9, 202)]
     finally:
         app.dependency_overrides.clear()
@@ -137,6 +161,7 @@ def test_returns_an_illegal_preview_as_a_normal_200_response() -> None:
         lineup_after=None,
         captain_changed=False,
         vice_captain_changed=False,
+        player_in_status="i",
     )
     app.dependency_overrides[get_transfer_preview_service] = lambda: _FakeGetTransferPreviewService(
         illegal_result
@@ -150,5 +175,7 @@ def test_returns_an_illegal_preview_as_a_normal_200_response() -> None:
         assert payload["is_legal"] is False
         assert payload["errors"] == ["insufficient_bank"]
         assert payload["lineup_after"] is None
+        # Status is advisory: carried separately, never folded into the legality errors.
+        assert payload["player_in_status"] == "i"
     finally:
         app.dependency_overrides.clear()

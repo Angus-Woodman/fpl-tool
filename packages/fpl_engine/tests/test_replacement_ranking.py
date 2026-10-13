@@ -16,13 +16,21 @@ FWD = PlayerPosition.FORWARD
 
 
 def _priced(
-    player_id: int, position: PlayerPosition, *, team_id: int | None = None, price: float = 5.0
+    player_id: int,
+    position: PlayerPosition,
+    *,
+    team_id: int | None = None,
+    price: float = 5.0,
+    can_select: bool | None = True,
+    can_transact: bool | None = True,
 ) -> PricedPlayer:
     return PricedPlayer(
         player_id=player_id,
         position=position,
         team_id=team_id if team_id is not None else player_id,
         price=price,
+        can_select=can_select,
+        can_transact=can_transact,
     )
 
 
@@ -118,35 +126,103 @@ class TestCandidateFiltering:
 
         assert results == []
 
-    def test_unaffordable_candidates_are_excluded(self) -> None:
+    def test_unaffordable_candidates_stay_in_the_pool_marked_illegal(self) -> None:
         candidates = [_priced(21, MID, team_id=121, price=50.0)]
-        gameweeks = _gameweeks(1)
+        gameweeks = _gameweeks(3, overrides={gw: {21: 6.0} for gw in (1, 2, 3)})
+
+        [result] = rank_replacement_candidates(
+            squad=_squad(),
+            player_out_id=11,
+            candidates=candidates,
+            bank=0.0,
+            gameweek_projections=gameweeks,
+            horizons=(1, 3),
+            primary_horizon=3,
+        )
+
+        assert result.candidate_player_id == 21
+        assert result.is_legal is False
+        assert result.errors == ("insufficient_bank",)
+        # Illegal candidates keep full comparison data rather than placeholders.
+        assert result.resulting_bank == pytest.approx(4.5 - 50.0)
+        assert result.resulting_bank < 0
+        assert result.gameweeks_evaluated == 3
+        assert result.team_gain_by_horizon[1] > 0
+        assert result.team_gain_by_horizon[3] == pytest.approx(3 * result.team_gain_by_horizon[1])
+
+    def test_club_limit_violating_candidates_stay_in_the_pool_marked_illegal(self) -> None:
+        squad = _squad()
+        squad[9] = _priced(10, MID, team_id=108, price=6.0)
+        squad[10] = _priced(11, MID, team_id=108, price=4.5)
+        candidates = [_priced(21, MID, team_id=108, price=4.5)]
+        gameweeks = _gameweeks(1, overrides={1: {21: 4.0}})
+
+        [result] = rank_replacement_candidates(
+            squad=squad,
+            player_out_id=12,
+            candidates=candidates,
+            bank=1.0,
+            gameweek_projections=gameweeks,
+            horizons=(1,),
+            primary_horizon=1,
+        )
+
+        assert result.is_legal is False
+        assert result.errors == ("club_limit_exceeded",)
+        assert result.gameweeks_evaluated == 1
+        assert result.team_gain_by_horizon[1] > 0
+
+    def test_a_legal_candidate_reports_no_errors(self) -> None:
+        [result] = rank_replacement_candidates(
+            squad=_squad(),
+            player_out_id=11,
+            candidates=[_priced(21, MID, team_id=121, price=4.5)],
+            bank=0.0,
+            gameweek_projections=_gameweeks(1),
+            horizons=(1,),
+            primary_horizon=1,
+        )
+
+        assert result.is_legal is True
+        assert result.errors == ()
+
+    @pytest.mark.parametrize(
+        ("can_select", "can_transact"),
+        [(False, False), (False, True), (True, False), (None, None), (True, None), (False, None)],
+    )
+    def test_non_selectable_and_unknown_flag_candidates_are_excluded(
+        self, can_select: bool | None, can_transact: bool | None
+    ) -> None:
+        candidates = [
+            _priced(
+                21, MID, team_id=121, price=4.5, can_select=can_select, can_transact=can_transact
+            )
+        ]
 
         results = rank_replacement_candidates(
             squad=_squad(),
             player_out_id=11,
             candidates=candidates,
             bank=0.0,
-            gameweek_projections=gameweeks,
+            gameweek_projections=_gameweeks(1),
             horizons=(1,),
             primary_horizon=1,
         )
 
         assert results == []
 
-    def test_club_limit_violating_candidates_are_excluded(self) -> None:
-        squad = _squad()
-        squad[9] = _priced(10, MID, team_id=108, price=6.0)
-        squad[10] = _priced(11, MID, team_id=108, price=4.5)
-        candidates = [_priced(21, MID, team_id=108, price=4.5)]
-        gameweeks = _gameweeks(1)
+    def test_owned_and_wrong_position_candidates_are_excluded_even_with_valid_flags(self) -> None:
+        candidates = [
+            _priced(9, MID, team_id=109, price=7.0),
+            _priced(20, FWD, team_id=120, price=4.5),
+        ]
 
         results = rank_replacement_candidates(
-            squad=squad,
-            player_out_id=12,
+            squad=_squad(),
+            player_out_id=11,
             candidates=candidates,
             bank=0.0,
-            gameweek_projections=gameweeks,
+            gameweek_projections=_gameweeks(1),
             horizons=(1,),
             primary_horizon=1,
         )
@@ -260,6 +336,27 @@ class TestRanking:
         )
 
         assert [result.candidate_player_id for result in results] == [22, 21]
+
+    def test_legal_and_illegal_candidates_share_one_sort_and_interleave(self) -> None:
+        candidates = [
+            _priced(21, MID, team_id=121, price=4.5),  # legal, middling gain
+            _priced(22, MID, team_id=122, price=50.0),  # illegal (budget), highest gain
+            _priced(23, MID, team_id=123, price=4.5),  # legal, lowest gain
+        ]
+        gameweeks = _gameweeks(1, overrides={1: {21: 3.0, 22: 9.0, 23: 1.0}})
+
+        results = rank_replacement_candidates(
+            squad=_squad(),
+            player_out_id=11,
+            candidates=candidates,
+            bank=0.0,
+            gameweek_projections=gameweeks,
+            horizons=(1,),
+            primary_horizon=1,
+        )
+
+        assert [result.candidate_player_id for result in results] == [22, 21, 23]
+        assert [result.is_legal for result in results] == [False, True, True]
 
     def test_tied_candidates_resolve_to_the_lower_player_id(self) -> None:
         candidates = [

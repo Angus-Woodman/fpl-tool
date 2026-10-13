@@ -23,7 +23,7 @@ import { opponentLabelForGameweek, pointsForGameweek } from "@/components/team/p
 import { RecommendationSummary, RecommendationState, ViewMode } from "@/components/team/recommendation-summary";
 import { RecommendedSquadView } from "@/components/team/recommended-squad-view";
 import { SquadPitch } from "@/components/team/squad-pitch";
-import { SquadPlayerCard } from "@/components/team/squad-player-card";
+import { SquadPlayerCard, type SelectionState } from "@/components/team/squad-player-card";
 import { POSITION_ORDER, type Position } from "@/components/team/types";
 
 type LoadState =
@@ -37,9 +37,8 @@ type CreateStarterSquadState =
   | { type: "saving" }
   | { type: "error"; message: string };
 
-type EditState =
+type SwapState =
   | { type: "idle" }
-  | { type: "editing" }
   | { type: "saving" }
   | { type: "error"; message: string };
 
@@ -177,50 +176,6 @@ function draftFromTeam(team: MyTeamResponse): SaveMyTeamRequest {
 
 function selectionMap(players: SaveMyTeamPlayerSelection[]): Map<number, SaveMyTeamPlayerSelection> {
   return new Map(players.map((player) => [player.player_id, player]));
-}
-
-function validateStartingLineup(
-  selections: SaveMyTeamPlayerSelection[],
-  playersById: Map<number, MyTeamPlayerItem>
-): string | null {
-  const starters = selections.filter((player) => player.is_starting);
-  const bench = selections.filter((player) => !player.is_starting);
-
-  if (starters.length !== 11) {
-    return "Your squad must contain exactly 11 starting players.";
-  }
-  if (bench.length !== 4) {
-    return "Your squad must contain exactly 4 bench players.";
-  }
-
-  const benchOrders = bench.map((player) => player.bench_order).sort();
-  if (benchOrders.join(",") !== "1,2,3,4") {
-    return "Bench players must have unique bench order values 1, 2, 3, and 4.";
-  }
-
-  const counts: Record<Position, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
-  for (const starter of starters) {
-    const player = playersById.get(starter.player_id);
-    if (!player) {
-      return "Starting XI has unknown players.";
-    }
-    counts[player.position] += 1;
-  }
-
-  if (counts.GK !== 1) {
-    return "Starting XI must contain exactly 1 goalkeeper.";
-  }
-  if (counts.DEF < 3) {
-    return "Starting XI must contain at least 3 defenders.";
-  }
-  if (counts.MID < 3) {
-    return "Starting XI must contain at least 3 midfielders.";
-  }
-  if (counts.FWD < 1) {
-    return "Starting XI must contain at least 1 forward.";
-  }
-
-  return null;
 }
 
 function findOptimisedSelectionForGameweek(
@@ -372,6 +327,37 @@ function lineupPointsForGameweek(
   return starterPoints + captainPoints;
 }
 
+// UX pre-filter mirroring fpl_engine.rules.squad.STARTING_POSITION_LIMITS; the server stays authoritative.
+const STARTING_POSITION_LIMITS: Record<Position, readonly [number, number]> = {
+  GK: [1, 1],
+  DEF: [3, 5],
+  MID: [2, 5],
+  FWD: [1, 3],
+};
+
+function isLegalStartingFormation(
+  starterIds: Set<number>,
+  playersById: Map<number, MyTeamPlayerItem>
+): boolean {
+  if (starterIds.size !== 11) {
+    return false;
+  }
+
+  const counts: Record<Position, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
+  for (const playerId of starterIds) {
+    const player = playersById.get(playerId);
+    if (!player) {
+      return false;
+    }
+    counts[player.position] += 1;
+  }
+
+  return POSITION_ORDER.every((position) => {
+    const [minimum, maximum] = STARTING_POSITION_LIMITS[position];
+    return counts[position] >= minimum && counts[position] <= maximum;
+  });
+}
+
 function canSwapStarterWithBench(
   starterId: number,
   benchId: number,
@@ -400,42 +386,124 @@ function canSwapStarterWithBench(
   starterIds.delete(starterId);
   starterIds.add(benchId);
 
-  const counts: Record<Position, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
-  for (const playerId of starterIds) {
-    const player = playersById.get(playerId);
-    if (!player) {
-      return false;
-    }
-    counts[player.position] += 1;
+  return isLegalStartingFormation(starterIds, playersById);
+}
+
+// Substitute priority only: the bench goalkeeper is not reorderable against outfield subs.
+function canReorderBench(
+  benchIdA: number,
+  benchIdB: number,
+  selections: SaveMyTeamPlayerSelection[],
+  playersById: Map<number, MyTeamPlayerItem>
+): boolean {
+  if (benchIdA === benchIdB) {
+    return false;
   }
 
-  return (
-    starterIds.size === 11 &&
-    counts.GK === 1 &&
-    counts.DEF >= 3 &&
-    counts.MID >= 3 &&
-    counts.FWD >= 1
-  );
+  const first = selections.find((selection) => selection.player_id === benchIdA);
+  const second = selections.find((selection) => selection.player_id === benchIdB);
+  if (!first || !second || first.is_starting || second.is_starting) {
+    return false;
+  }
+
+  const firstPlayer = playersById.get(benchIdA);
+  const secondPlayer = playersById.get(benchIdB);
+  if (!firstPlayer || !secondPlayer) {
+    return false;
+  }
+
+  return firstPlayer.position !== "GK" && secondPlayer.position !== "GK";
+}
+
+type SwapKind = "starter-bench" | "bench-order";
+
+function swapKindFor(
+  firstId: number,
+  secondId: number,
+  selections: SaveMyTeamPlayerSelection[],
+  playersById: Map<number, MyTeamPlayerItem>
+): SwapKind | null {
+  const first = selections.find((selection) => selection.player_id === firstId);
+  const second = selections.find((selection) => selection.player_id === secondId);
+  if (!first || !second || firstId === secondId) {
+    return null;
+  }
+
+  if (first.is_starting !== second.is_starting) {
+    const [starterId, benchId] = first.is_starting ? [firstId, secondId] : [secondId, firstId];
+    return canSwapStarterWithBench(starterId, benchId, selections, playersById) ? "starter-bench" : null;
+  }
+
+  if (!first.is_starting) {
+    return canReorderBench(firstId, secondId, selections, playersById) ? "bench-order" : null;
+  }
+
+  return null;
+}
+
+function applySwap(
+  kind: SwapKind,
+  firstId: number,
+  secondId: number,
+  selections: SaveMyTeamPlayerSelection[]
+): SaveMyTeamPlayerSelection[] {
+  const first = selections.find((selection) => selection.player_id === firstId);
+  const second = selections.find((selection) => selection.player_id === secondId);
+  if (!first || !second) {
+    return selections;
+  }
+
+  if (kind === "bench-order") {
+    return selections.map((selection) => {
+      if (selection.player_id === firstId) {
+        return { ...selection, bench_order: second.bench_order };
+      }
+      if (selection.player_id === secondId) {
+        return { ...selection, bench_order: first.bench_order };
+      }
+      return selection;
+    });
+  }
+
+  const starter = first.is_starting ? first : second;
+  const bench = first.is_starting ? second : first;
+  return selections.map((selection) => {
+    if (selection.player_id === starter.player_id) {
+      return {
+        ...selection,
+        is_starting: false,
+        bench_order: bench.bench_order,
+        is_captain: false,
+        is_vice_captain: false,
+      };
+    }
+    if (selection.player_id === bench.player_id) {
+      return {
+        ...selection,
+        is_starting: true,
+        bench_order: null,
+        is_captain: starter.is_captain,
+        is_vice_captain: starter.is_vice_captain,
+      };
+    }
+    return selection;
+  });
 }
 
 export function MyTeamBoard(): JSX.Element {
   const [state, setState] = useState<LoadState>({ type: "loading" });
   const [createState, setCreateState] = useState<CreateStarterSquadState>({ type: "idle" });
-  const [editState, setEditState] = useState<EditState>({ type: "idle" });
   const [refreshState, setRefreshState] = useState<RefreshState>({ type: "idle" });
-  const [draft, setDraft] = useState<SaveMyTeamRequest | null>(null);
   const [selectedGameweekIndex, setSelectedGameweekIndex] = useState(0);
   const [optimiseMode, setOptimiseMode] = useState<OptimiseMode>("none");
   const [teams, setTeams] = useState<TeamItem[]>([]);
-  const [swapTargetStarterId, setSwapTargetStarterId] = useState<number | null>(null);
-  const [swapChoiceBenchId, setSwapChoiceBenchId] = useState<number | null>(null);
-  const [transferPlayerPool, setTransferPlayerPool] = useState<PlayerItem[] | null>(null);
-  const [transferTargetPlayerId, setTransferTargetPlayerId] = useState<number | null>(null);
-  const [transferChoicePlayerId, setTransferChoicePlayerId] = useState<number | null>(null);
-  const [transferSavingPlayerId, setTransferSavingPlayerId] = useState<number | null>(null);
-  const [transferError, setTransferError] = useState<string | null>(null);
+  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
+  const [swapState, setSwapState] = useState<SwapState>({ type: "idle" });
+  const [swapConfirmation, setSwapConfirmation] = useState("");
   const [recommendation, setRecommendation] = useState<RecommendationState>({ type: "loading" });
   const [viewMode, setViewMode] = useState<ViewMode>("current");
+  // Client-only and deliberately not persisted: figures are hidden again on reload or revisit.
+  const [pointsRevealed, setPointsRevealed] = useState(false);
 
   async function loadRecommendation(): Promise<void> {
     setRecommendation({ type: "loading" });
@@ -461,23 +529,23 @@ export function MyTeamBoard(): JSX.Element {
     }
   }
 
-  async function loadMyTeam(): Promise<MyTeamResponse | null> {
+  async function loadMyTeam(options?: { keepGameweek?: boolean }): Promise<MyTeamResponse | null> {
     try {
       const data = await fetchMyTeam();
 
       if (data === null || data.players.length === 0) {
         setState({ type: "empty" });
-        setDraft(null);
         return null;
       }
 
       setState({ type: "loaded", team: data });
-      setSelectedGameweekIndex(0);
+      if (!options?.keepGameweek) {
+        setSelectedGameweekIndex(0);
+      }
       return data;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load my team";
       setState({ type: "error", message });
-      setDraft(null);
       return null;
     }
   }
@@ -583,147 +651,69 @@ export function MyTeamBoard(): JSX.Element {
     }
   }
 
-  async function ensureTransferPlayerPool(): Promise<PlayerItem[] | null> {
-    if (transferPlayerPool !== null) {
-      return transferPlayerPool;
+  function clearSelection(): void {
+    setSelectedPlayerId(null);
+    setSwapState((current) => (current.type === "error" ? { type: "idle" } : current));
+  }
+
+  async function performSwap(
+    kind: SwapKind,
+    firstId: number,
+    secondId: number,
+    team: MyTeamResponse
+  ): Promise<void> {
+    const first = team.players.find((player) => player.player_id === firstId);
+    const second = team.players.find((player) => player.player_id === secondId);
+    if (!first || !second) {
+      return;
     }
 
+    setSwapState({ type: "saving" });
     try {
-      const [gk, def, mid, fwd] = await Promise.all([
-        fetchPlayers({ position: "GK", status: "a", sort: "price_desc", page_size: 60 }),
-        fetchPlayers({ position: "DEF", status: "a", sort: "price_desc", page_size: 150 }),
-        fetchPlayers({ position: "MID", status: "a", sort: "price_desc", page_size: 150 }),
-        fetchPlayers({ position: "FWD", status: "a", sort: "price_desc", page_size: 100 }),
-      ]);
-      const pool = [...gk.items, ...def.items, ...mid.items, ...fwd.items];
-      setTransferPlayerPool(pool);
-      return pool;
-    } catch (error) {
-      setTransferError(error instanceof Error ? error.message : "Failed to load player pool");
-      return null;
-    }
-  }
-
-  function handleOpenTransfer(playerId: number): void {
-    setTransferError(null);
-    const isOpen = transferTargetPlayerId === playerId;
-    setTransferTargetPlayerId(isOpen ? null : playerId);
-    setTransferChoicePlayerId(null);
-    if (!isOpen) {
-      void ensureTransferPlayerPool();
-    }
-  }
-
-  function handleStartEditing(team: MyTeamResponse): void {
-    setOptimiseMode("none");
-    setSwapTargetStarterId(null);
-    setSwapChoiceBenchId(null);
-    setTransferTargetPlayerId(null);
-    setTransferChoicePlayerId(null);
-    setTransferError(null);
-    setDraft(draftFromTeam(team));
-    setEditState({ type: "editing" });
-  }
-
-  function handleCancelEditing(): void {
-    setSwapTargetStarterId(null);
-    setSwapChoiceBenchId(null);
-    setTransferTargetPlayerId(null);
-    setTransferChoicePlayerId(null);
-    setTransferError(null);
-    setDraft(null);
-    setEditState({ type: "idle" });
-  }
-
-  function clearEditError(): void {
-    if (editState.type === "error") {
-      setEditState({ type: "editing" });
-    }
-  }
-
-  function applyStarterBenchSwap(starterId: number, benchId: number): void {
-    clearEditError();
-    setDraft((currentDraft) => {
-      if (!currentDraft) {
-        return currentDraft;
-      }
-
-      const starter = currentDraft.players.find((player) => player.player_id === starterId);
-      const bench = currentDraft.players.find((player) => player.player_id === benchId);
-      if (!starter || !bench) {
-        return currentDraft;
-      }
-
-      if (!canSwapStarterWithBench(starterId, benchId, currentDraft.players, playersById)) {
-        return currentDraft;
-      }
-
-      return {
-        ...currentDraft,
-        players: currentDraft.players.map((player) => {
-          if (player.player_id === starterId) {
-            return {
-              ...player,
-              is_starting: false,
-              bench_order: bench.bench_order,
-              is_captain: false,
-              is_vice_captain: false,
-            };
-          }
-
-          if (player.player_id === benchId) {
-            return {
-              ...player,
-              is_starting: true,
-              bench_order: null,
-              is_captain: starter.is_captain,
-              is_vice_captain: starter.is_vice_captain,
-            };
-          }
-
-          return player;
-        }),
-      };
-    });
-
-    setSwapTargetStarterId(null);
-    setSwapChoiceBenchId(null);
-  }
-
-  async function handleSaveChanges(): Promise<void> {
-    if (draft === null || state.type !== "loaded") {
-      return;
-    }
-
-    const validationMessage = validateStartingLineup(draft.players, playersById);
-    if (validationMessage) {
-      setEditState({ type: "error", message: validationMessage });
-      return;
-    }
-
-    const totalCost = loadedTeam.players.reduce((sum, player) => sum + player.current_price, 0);
-    const computedBank = Number((BUDGET_CAP - totalCost).toFixed(1));
-    if (computedBank < 0) {
-      setEditState({ type: "error", message: "Squad value cannot exceed 100.0m." });
-      return;
-    }
-
-    setEditState({ type: "saving" });
-    try {
+      // The saved bank and free transfers are sent back exactly as loaded: a lineup change must not alter them.
       await saveMyTeam({
-        ...draft,
-        bank: computedBank,
-        free_transfers: loadedTeam.free_transfers,
+        bank: team.bank,
+        free_transfers: team.free_transfers,
+        players: applySwap(kind, firstId, secondId, draftFromTeam(team).players),
       });
-      const reloadedTeam = await loadMyTeam();
-      if (reloadedTeam !== null) {
-        setDraft(draftFromTeam(reloadedTeam));
-      }
-      setEditState({ type: "idle" });
+      await loadMyTeam({ keepGameweek: true });
+      setSelectedPlayerId(null);
+      setSwapConfirmation(
+        kind === "bench-order"
+          ? `Swapped bench order of ${first.web_name} and ${second.web_name}.`
+          : `Swapped ${first.web_name} with ${second.web_name}.`
+      );
+      setSwapState({ type: "idle" });
     } catch (error) {
+      setSelectedPlayerId(null);
+      setSwapConfirmation("");
       const message = error instanceof Error ? error.message : "Failed to save squad changes";
-      setEditState({ type: "error", message });
+      setSwapState({ type: "error", message });
     }
+  }
+
+  async function handleSelect(playerId: number, team: MyTeamResponse): Promise<void> {
+    if (swapState.type === "saving" || optimiseMode !== "none") {
+      return;
+    }
+
+    setSwapState((current) => (current.type === "error" ? { type: "idle" } : current));
+    if (selectedPlayerId === playerId) {
+      setSelectedPlayerId(null);
+      return;
+    }
+
+    if (selectedPlayerId !== null) {
+      const selections = draftFromTeam(team).players;
+      const playersByIdForTeam = new Map(team.players.map((player) => [player.player_id, player]));
+      const kind = swapKindFor(selectedPlayerId, playerId, selections, playersByIdForTeam);
+      if (kind !== null) {
+        await performSwap(kind, selectedPlayerId, playerId, team);
+        return;
+      }
+    }
+
+    setSelectedPlayerId(playerId);
   }
 
   if (state.type === "loading") {
@@ -761,12 +751,7 @@ export function MyTeamBoard(): JSX.Element {
 
   const loadedTeam = state.team;
 
-  const activeDraft =
-    editState.type === "editing" || editState.type === "saving" || editState.type === "error"
-      ? draft
-      : null;
-
-  const userSelections = activeDraft ? activeDraft.players : draftFromTeam(loadedTeam).players;
+  const userSelections = draftFromTeam(loadedTeam).players;
   const playersById = new Map(loadedTeam.players.map((player) => [player.player_id, player]));
   const difficultyByShortName = new Map(teams.map((team) => [team.short_name, team.difficulty]));
 
@@ -860,189 +845,48 @@ export function MyTeamBoard(): JSX.Element {
   ];
 
   const totalCost = loadedTeam.players.reduce((sum, player) => sum + player.current_price, 0);
-  const bank = Number((BUDGET_CAP - totalCost).toFixed(1));
+  // The saved bank is shown as-is; it is never recomputed from current squad prices.
+  const bank = loadedTeam.bank;
 
-  function eligibleBenchOptionsForStarter(starterId: number): MyTeamPlayerItem[] {
-    const sourceSelections = activeDraft ? activeDraft.players : userSelections;
-    return loadedTeam.players.filter((candidate) => {
-      const selection = sourceSelections.find((item) => item.player_id === candidate.player_id);
-      if (!selection || selection.is_starting) {
-        return false;
-      }
-      return canSwapStarterWithBench(starterId, candidate.player_id, sourceSelections, playersById);
-    });
+  // Rearrangement applies only to the actual saved lineup, not to a hypothetical optimiser view.
+  const selectionEnabled = optimiseMode === "none";
+
+  function selectionStateFor(playerId: number): SelectionState {
+    if (selectedPlayerId === null) {
+      return "idle";
+    }
+    if (playerId === selectedPlayerId) {
+      return "selected";
+    }
+    return swapKindFor(selectedPlayerId, playerId, userSelections, playersById) !== null
+      ? "target"
+      : "not-target";
   }
 
-  function eligibleTransferOptions(outgoing: MyTeamPlayerItem): PlayerItem[] {
-    if (!transferPlayerPool) {
-      return [];
-    }
-
-    const rosteredIds = new Set(loadedTeam.players.map((player) => player.player_id));
-    const teamCounts = new Map<string, number>();
-    for (const player of loadedTeam.players) {
-      if (player.player_id === outgoing.player_id) {
-        continue;
-      }
-      teamCounts.set(player.team_short_name, (teamCounts.get(player.team_short_name) ?? 0) + 1);
-    }
-
-    const availableBudget = Number((bank + outgoing.current_price).toFixed(1));
-
-    return transferPlayerPool
-      .filter((candidate) => candidate.position === outgoing.position)
-      .filter((candidate) => !rosteredIds.has(candidate.id))
-      .filter((candidate) => candidate.current_price <= availableBudget)
-      .filter((candidate) => (teamCounts.get(candidate.team_short_name) ?? 0) < 3)
-      .sort((a, b) => b.current_price - a.current_price);
-  }
-
-  async function handleConfirmTransfer(outgoingPlayerId: number): Promise<void> {
-    if (transferChoicePlayerId === null) {
-      return;
-    }
-
-    const outgoing = playersById.get(outgoingPlayerId);
-    const incoming = transferPlayerPool?.find((player) => player.id === transferChoicePlayerId);
-    if (!outgoing || !incoming) {
-      return;
-    }
-
-    const newBank = Number((bank + outgoing.current_price - incoming.current_price).toFixed(1));
-    if (newBank < 0) {
-      setTransferError("Not enough budget for that transfer.");
-      return;
-    }
-
-    setTransferSavingPlayerId(outgoingPlayerId);
-    setTransferError(null);
-    try {
-      const sourceSelections = activeDraft ? activeDraft.players : userSelections;
-      const players = sourceSelections.map((selection) =>
-        selection.player_id === outgoingPlayerId ? { ...selection, player_id: incoming.id } : selection
-      );
-
-      await saveMyTeam({
-        bank: newBank,
-        free_transfers: loadedTeam.free_transfers,
-        players,
-      });
-
-      const reloadedTeam = await loadMyTeam();
-      if (reloadedTeam !== null) {
-        setDraft(draftFromTeam(reloadedTeam));
-      }
-      setTransferTargetPlayerId(null);
-      setTransferChoicePlayerId(null);
-    } catch (error) {
-      setTransferError(error instanceof Error ? error.message : "Failed to complete transfer");
-    } finally {
-      setTransferSavingPlayerId(null);
-    }
-  }
-
-  function renderEditControls(
-    row: { player: MyTeamPlayerItem; selection: SaveMyTeamPlayerSelection },
-    options: { showSwap: boolean }
-  ): React.ReactNode {
-    if (!(activeDraft && optimiseMode === "none")) {
-      return null;
-    }
-
-    return (
-      <div className="mt-3 space-y-2 text-xs text-slate-700">
-        <div className="flex flex-wrap gap-2">
-          {options.showSwap && (
-            <button
-              type="button"
-              aria-label={`Swap ${row.player.web_name} with bench`}
-              className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-              onClick={() => {
-                const isOpen = swapTargetStarterId === row.player.player_id;
-                setSwapTargetStarterId(isOpen ? null : row.player.player_id);
-                setSwapChoiceBenchId(null);
-              }}
-            >
-              Swap With Bench
-            </button>
-          )}
-          <button
-            type="button"
-            aria-label={`Transfer ${row.player.web_name}`}
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-            onClick={() => handleOpenTransfer(row.player.player_id)}
-          >
-            Transfer
-          </button>
-        </div>
-
-        {options.showSwap && swapTargetStarterId === row.player.player_id && (
-          <div className="space-y-2">
-            <label className="block">
-              Bench Player
-              <select
-                aria-label={`Bench Player for ${row.player.web_name}`}
-                className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1"
-                value={swapChoiceBenchId ?? ""}
-                onChange={(event) => setSwapChoiceBenchId(Number(event.target.value))}
-              >
-                <option value="">Select bench player</option>
-                {eligibleBenchOptionsForStarter(row.player.player_id).map((benchPlayer) => (
-                  <option key={benchPlayer.player_id} value={benchPlayer.player_id}>
-                    {benchPlayer.web_name} ({benchPlayer.position})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-white hover:bg-emerald-500 disabled:opacity-50"
-              disabled={swapChoiceBenchId === null}
-              onClick={() => {
-                if (swapChoiceBenchId !== null) {
-                  applyStarterBenchSwap(row.player.player_id, swapChoiceBenchId);
-                }
-              }}
-            >
-              Confirm Swap
-            </button>
-          </div>
-        )}
-
-        {transferTargetPlayerId === row.player.player_id && (
-          <div className="space-y-2">
-            <label className="block">
-              Replacement Player
-              <select
-                aria-label={`Replacement Player for ${row.player.web_name}`}
-                className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1"
-                value={transferChoicePlayerId ?? ""}
-                disabled={transferPlayerPool === null}
-                onChange={(event) => setTransferChoicePlayerId(Number(event.target.value))}
-              >
-                <option value="">
-                  {transferPlayerPool === null ? "Loading players..." : "Select replacement"}
-                </option>
-                {eligibleTransferOptions(row.player).map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {candidate.web_name} ({candidate.team_short_name}) £{candidate.current_price.toFixed(1)}m
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-white hover:bg-emerald-500 disabled:opacity-50"
-              disabled={transferChoicePlayerId === null || transferSavingPlayerId === row.player.player_id}
-              onClick={() => void handleConfirmTransfer(row.player.player_id)}
-            >
-              {transferSavingPlayerId === row.player.player_id ? "Saving..." : "Confirm Transfer"}
-            </button>
-            {transferError && <p className="text-red-700">{transferError}</p>}
-          </div>
-        )}
-      </div>
+  const selectedPlayer = selectedPlayerId !== null ? playersById.get(selectedPlayerId) : undefined;
+  const selectedHasNoTargets =
+    selectedPlayerId !== null &&
+    !loadedTeam.players.some(
+      (player) => swapKindFor(selectedPlayerId, player.player_id, userSelections, playersById) !== null
     );
+
+  function selectionProps(playerId: number): {
+    selectionState: SelectionState;
+    onSelect: (() => void) | undefined;
+    selectionDisabled: boolean;
+  } {
+    return {
+      selectionState: selectionStateFor(playerId),
+      onSelect: selectionEnabled ? () => void handleSelect(playerId, loadedTeam) : undefined,
+      selectionDisabled: swapState.type === "saving",
+    };
+  }
+
+  function togglePointsRevealed(): void {
+    if (pointsRevealed) {
+      setViewMode("current");
+    }
+    setPointsRevealed(!pointsRevealed);
   }
 
   return (
@@ -1057,36 +901,25 @@ export function MyTeamBoard(): JSX.Element {
             type="button"
             className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
             onClick={() => void handleRefreshPoints()}
-            disabled={refreshState.type === "running" || editState.type === "saving"}
+            disabled={refreshState.type === "running" || swapState.type === "saving"}
           >
             {refreshState.type === "running" ? "Refreshing xPts..." : "Refresh xPts"}
           </button>
-          {editState.type === "editing" || editState.type === "saving" || editState.type === "error" ? (
-            <>
-              <button
-                type="button"
-                className="rounded-md border border-emerald-300 bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                onClick={() => void handleSaveChanges()}
-                disabled={editState.type === "saving"}
-              >
-                {editState.type === "saving" ? "Saving..." : "Save Changes"}
-              </button>
-              <button
-                type="button"
-                className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
-                onClick={handleCancelEditing}
-                disabled={editState.type === "saving"}
-              >
-                Cancel
-              </button>
-            </>
-          ) : (
+          <button
+            type="button"
+            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
+            onClick={togglePointsRevealed}
+          >
+            {pointsRevealed ? "Hide projected points" : "Show projected points"}
+          </button>
+          {selectedPlayerId !== null && (
             <button
               type="button"
-              className="rounded-md border border-slate-300 bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
-              onClick={() => handleStartEditing(loadedTeam)}
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+              onClick={clearSelection}
+              disabled={swapState.type === "saving"}
             >
-              Edit Team
+              Clear selection
             </button>
           )}
           <span className="rounded-md bg-slate-100 px-3 py-2 text-sm text-slate-700">Cost: {totalCost.toFixed(1)}</span>
@@ -1094,18 +927,20 @@ export function MyTeamBoard(): JSX.Element {
         </div>
       </div>
 
-      <RecommendationSummary
-        state={recommendation}
-        captainName={recommendationCaptainName}
-        viceCaptainName={recommendationViceCaptainName}
-        missingPlayerNames={recommendationMissingPlayerNames}
-        viewMode={viewMode}
-        onViewModeChange={setViewMode}
-        onRefreshProjections={() => void handleRefreshPoints()}
-        refreshing={refreshState.type === "running"}
-      />
+      {pointsRevealed && (
+        <RecommendationSummary
+          state={recommendation}
+          captainName={recommendationCaptainName}
+          viceCaptainName={recommendationViceCaptainName}
+          missingPlayerNames={recommendationMissingPlayerNames}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
+          onRefreshProjections={() => void handleRefreshPoints()}
+          refreshing={refreshState.type === "running"}
+        />
+      )}
 
-      {viewMode === "recommended" ? (
+      {pointsRevealed && viewMode === "recommended" ? (
         recommendation.type === "ready" ? (
           <RecommendedSquadView recommendation={recommendation.data} players={loadedTeam.players} />
         ) : (
@@ -1146,8 +981,7 @@ export function MyTeamBoard(): JSX.Element {
                 value={optimiseMode}
                 onChange={(event) => {
                   setOptimiseMode(event.target.value as OptimiseMode);
-                  setSwapTargetStarterId(null);
-                  setSwapChoiceBenchId(null);
+                  setSelectedPlayerId(null);
                 }}
               >
                 <option value="none">None</option>
@@ -1159,20 +993,32 @@ export function MyTeamBoard(): JSX.Element {
 
           {refreshState.type === "success" && <p className="mb-4 text-sm text-emerald-700">{refreshState.message}</p>}
           {refreshState.type === "error" && <p className="mb-4 text-sm text-red-700">{refreshState.message}</p>}
-          {editState.type === "error" && <p className="mb-4 text-sm text-red-700">{editState.message}</p>}
+          <p
+            aria-live="polite"
+            data-testid="swap-confirmation"
+            className={swapConfirmation ? "mb-4 text-sm text-emerald-700" : "sr-only"}
+          >
+            {swapConfirmation}
+          </p>
+          {swapState.type === "error" && <p className="mb-4 text-sm text-red-700">{swapState.message}</p>}
+          {selectedPlayer && selectedHasNoTargets && (
+            <p className="mb-4 text-sm text-slate-700">No valid swap targets for {selectedPlayer.web_name}.</p>
+          )}
 
-          <div className="mb-5 grid gap-3 sm:grid-cols-3">
-            {projectionCards.map((card) => (
-              <article key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  {card.label}
-                </p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">
-                  {card.value?.toFixed(1) ?? "-"}
-                </p>
-              </article>
-            ))}
-          </div>
+          {pointsRevealed && (
+            <div className="mb-5 grid gap-3 sm:grid-cols-3">
+              {projectionCards.map((card) => (
+                <article key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    {card.label}
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">
+                    {card.value?.toFixed(1) ?? "-"}
+                  </p>
+                </article>
+              ))}
+            </div>
+          )}
 
           <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
             <SquadPitch
@@ -1194,11 +1040,11 @@ export function MyTeamBoard(): JSX.Element {
                     position={row.player.position}
                     badge={badgeLabel(row.selection.is_captain, row.selection.is_vice_captain)}
                     projectedPoints={gwPoints}
+                    showProjectedPoints={pointsRevealed}
                     opponentLabel={opposition}
                     transferHref={`/transfers?out=${row.player.player_id}`}
-                  >
-                    {renderEditControls(row, { showSwap: true })}
-                  </SquadPlayerCard>
+                    {...selectionProps(row.player.player_id)}
+                  />
                 );
               }}
             />
@@ -1221,11 +1067,11 @@ export function MyTeamBoard(): JSX.Element {
                     position={row.player.position}
                     benchOrder={row.selection.bench_order}
                     projectedPoints={gwPoints}
+                    showProjectedPoints={pointsRevealed}
                     opponentLabel={opposition}
                     transferHref={`/transfers?out=${row.player.player_id}`}
-                  >
-                    {renderEditControls(row, { showSwap: false })}
-                  </SquadPlayerCard>
+                    {...selectionProps(row.player.player_id)}
+                  />
                 );
               }}
             />

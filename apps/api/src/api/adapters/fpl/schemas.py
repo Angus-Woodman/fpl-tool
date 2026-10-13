@@ -28,6 +28,10 @@ class FplElementDto(BaseModel):
     now_cost: int
     status: str
 
+    # Absent stays None (unknown); never defaulted to True or derived from status.
+    can_select: bool | None = None
+    can_transact: bool | None = None
+
     # Mutable state captured into player_snapshots. Before a season starts the
     # reported totals still describe the player's previous season.
     selected_by_percent: str | None = None
