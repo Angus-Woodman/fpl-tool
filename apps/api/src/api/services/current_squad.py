@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from typing import Protocol
+
+from fpl_engine.domain import PlayerPosition
+from fpl_engine.rules import SquadSlot, validate_squad
 
 from api.repositories.current_squad_repository import (
     CurrentSquadPlayerSave,
@@ -92,34 +94,18 @@ class UpsertCurrentSquadService:
         if len(player_map) != len(player_ids):
             raise ValueError("Squad contains unknown players")
 
-        starters = [player for player in request.players if player.is_starting]
-        bench = [player for player in request.players if not player.is_starting]
-
-        if len(starters) != 11:
-            raise ValueError("Squad must contain exactly 11 starting players")
-        if len(bench) != 4:
-            raise ValueError("Squad must contain exactly 4 bench players")
-
-        bench_orders = {player.bench_order for player in bench}
-        if bench_orders != {1, 2, 3, 4}:
-            raise ValueError("Bench players must use bench order 1, 2, 3, and 4")
-        if any(player.bench_order is not None for player in starters):
-            raise ValueError("Starting players cannot have a bench order")
-
-        captains = [player for player in request.players if player.is_captain]
-        vice_captains = [player for player in request.players if player.is_vice_captain]
-
-        if len(captains) != 1:
-            raise ValueError("Squad must contain exactly one captain")
-        if len(vice_captains) != 1:
-            raise ValueError("Squad must contain exactly one vice-captain")
-        if captains[0].player_id == vice_captains[0].player_id:
-            raise ValueError("Captain and vice-captain must be different players")
-
-        positions = Counter(player_map[player.player_id].position for player in request.players)
-        if positions != {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}:
-            raise ValueError("Squad must contain 2 GK, 5 DEF, 5 MID, and 3 FWD")
-
-        teams = Counter(player_map[player.player_id].team_id for player in request.players)
-        if any(count > 3 for count in teams.values()):
-            raise ValueError("Squad cannot contain more than three players from one team")
+        # Squad shape, captaincy, club limit and starting formation are the domain's rules.
+        validate_squad(
+            [
+                SquadSlot(
+                    player_id=player.player_id,
+                    position=PlayerPosition(player_map[player.player_id].position),
+                    team_id=player_map[player.player_id].team_id,
+                    is_starting=player.is_starting,
+                    bench_order=player.bench_order,
+                    is_captain=player.is_captain,
+                    is_vice_captain=player.is_vice_captain,
+                )
+                for player in request.players
+            ]
+        )

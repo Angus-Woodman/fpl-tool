@@ -558,6 +558,11 @@ export async function saveMyTeam(payload: SaveMyTeamRequest): Promise<MyTeamResp
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
+    // The API returns a readable `detail` string for rejected squads (for example an illegal formation).
+    const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+    if (typeof body?.detail === "string") {
+      throw new Error(body.detail);
+    }
     throw new Error(`Save my team request failed with status ${response.status}`);
   }
 

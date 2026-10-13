@@ -82,48 +82,154 @@ function buildFullSquadResponse() {
   };
 }
 
+type Squad = ReturnType<typeof buildFullSquadResponse>;
+
+type PutBody = {
+  bank: number;
+  free_transfers: number;
+  players: {
+    player_id: number;
+    is_starting: boolean;
+    bench_order: number | null;
+    is_captain: boolean;
+    is_vice_captain: boolean;
+  }[];
+};
+
+/** Same 15 players, but only `starterIds` start; the rest take bench orders 1-4 in id order. */
+function withStarters(squad: Squad, starterIds: number[]): Squad {
+  let benchOrder = 0;
+  return {
+    ...squad,
+    players: squad.players.map((player) => {
+      const isStarting = starterIds.includes(player.player_id);
+      if (!isStarting) {
+        benchOrder += 1;
+      }
+      return { ...player, is_starting: isStarting, bench_order: isStarting ? null : benchOrder };
+    }),
+  };
+}
+
+type BackendOptions = {
+  squad?: Squad;
+  difficultyTeams?: { id: number; name: string; short_name: string; difficulty: number }[];
+  putResponse?: () => Response | Promise<Response>;
+};
+
+/** Stateful fake API: a successful PUT updates what the next GET returns. */
+function installBackend(options: BackendOptions = {}) {
+  const squad = options.squad ?? buildFullSquadResponse();
+  const putBodies: PutBody[] = [];
+  const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/teams")) {
+      const items = options.difficultyTeams ?? [];
+      return { ok: true, json: async () => ({ items, total: items.length }) } as Response;
+    }
+    if (url.endsWith("/my-team/recommendation")) {
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    }
+    if (url.endsWith("/my-team") && init?.method === "PUT") {
+      const body = JSON.parse(String(init.body)) as PutBody;
+      putBodies.push(body);
+      if (options.putResponse) {
+        return options.putResponse();
+      }
+      squad.bank = body.bank;
+      squad.free_transfers = body.free_transfers;
+      for (const selection of body.players) {
+        const player = squad.players.find((item) => item.player_id === selection.player_id);
+        if (player) {
+          player.is_starting = selection.is_starting;
+          player.bench_order = selection.bench_order;
+          player.is_captain = selection.is_captain;
+          player.is_vice_captain = selection.is_vice_captain;
+        }
+      }
+      return { ok: true, json: async () => squad } as Response;
+    }
+    if (url.endsWith("/my-team")) {
+      return { ok: true, json: async () => squad } as Response;
+    }
+    throw new Error(`Unexpected fetch call: ${url}`);
+  });
+  return { squad, putBodies, fetchMock };
+}
+
+function selectButton(name: string): HTMLElement {
+  return screen.getByRole("button", { name: `Select ${name}` });
+}
+
+function selectionState(name: string): string | null | undefined {
+  return selectButton(name).closest("article")?.getAttribute("data-selection-state");
+}
+
+async function renderBoard(): Promise<void> {
+  render(<MyTeamBoard />);
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "Select GK One" })).toBeInTheDocument();
+  });
+}
+
+function selectionFor(body: PutBody, playerId: number): PutBody["players"][number] {
+  const selection = body.players.find((item) => item.player_id === playerId);
+  if (!selection) {
+    throw new Error(`Player ${playerId} missing from PUT body`);
+  }
+  return selection;
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
 describe("MyTeamBoard", () => {
-  it("renders computed cost/bank and no free transfers panel", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
-      }
-      if (url.endsWith("/my-team/recommendation")) {
-        return { ok: false, status: 404, json: async () => ({}) } as Response;
-      }
-      return { ok: true, json: async () => buildFullSquadResponse() } as Response;
-    });
+  it("displays the saved bank rather than one recomputed from current prices", async () => {
+    const squad = buildFullSquadResponse();
+    squad.bank = 2.3; // 100 - 74.4 would be 25.6; the saved bank is what counts.
+    installBackend({ squad });
 
-    render(<MyTeamBoard />);
+    await renderBoard();
 
-    await waitFor(() => {
-      expect(screen.getByText("Cost: 74.4")).toBeInTheDocument();
-      expect(screen.getByText("Bank: 25.6")).toBeInTheDocument();
-      expect(screen.queryByText("Free Transfers:")).not.toBeInTheDocument();
-      expect(screen.getByText("Gameweek 2")).toBeInTheDocument();
-    });
+    expect(screen.getByText("Cost: 74.4")).toBeInTheDocument();
+    expect(screen.getByText("Bank: 2.3")).toBeInTheDocument();
+    expect(screen.queryByText("Bank: 25.6")).not.toBeInTheDocument();
+    expect(screen.queryByText("Free Transfers:")).not.toBeInTheDocument();
+    expect(screen.getByText("Gameweek 2")).toBeInTheDocument();
+  });
+
+  it("has no Edit Team mode and no inline transfer controls, and does not load the player pool", async () => {
+    const { fetchMock } = installBackend();
+
+    await renderBoard();
+
+    expect(screen.queryByRole("button", { name: "Edit Team" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save Changes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Transfer / })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Replacement Player/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm Transfer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Swap .* with bench/ })).not.toBeInTheDocument();
+    const playerPoolCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/players"));
+    expect(playerPoolCalls).toHaveLength(0);
+  });
+
+  it("keeps the Explore transfers link on every card", async () => {
+    installBackend();
+
+    await renderBoard();
+
+    const links = screen.getAllByRole("link", { name: /Explore transfers/ });
+    expect(links).toHaveLength(15);
+    expect(links[0]).toHaveAttribute("href", expect.stringMatching(/^\/transfers\?out=\d+$/));
   });
 
   it("navigates gameweeks and updates opponent labels", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
-      }
-      if (url.endsWith("/my-team/recommendation")) {
-        return { ok: false, status: 404, json: async () => ({}) } as Response;
-      }
-      return { ok: true, json: async () => buildFullSquadResponse() } as Response;
-    });
+    installBackend();
 
-    render(<MyTeamBoard />);
-
+    await renderBoard();
     await waitFor(() => {
       expect(screen.getAllByText("Opponent: CHE (H)").length).toBeGreaterThan(0);
     });
@@ -136,189 +242,349 @@ describe("MyTeamBoard", () => {
     });
   });
 
-  it("swaps starter with bench and saves updated selection", async () => {
-    const squadResponse = buildFullSquadResponse();
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
-      }
-      if (url.endsWith("/my-team") && !init) {
-        return { ok: true, json: async () => squadResponse } as Response;
-      }
-      if (url.endsWith("/my-team") && init?.method === "PUT") {
-        return { ok: true, json: async () => squadResponse } as Response;
-      }
-      if (url.endsWith("/my-team/recommendation")) {
-        return { ok: false, status: 404, json: async () => ({}) } as Response;
-      }
-      throw new Error(`Unexpected fetch call: ${url}`);
+  describe("direct selection", () => {
+    it("marks the selected player and only its legal swap targets", async () => {
+      installBackend();
+      await renderBoard();
+
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
+      expect(selectionState("GK One")).toBe("idle");
+
+      fireEvent.click(selectButton("GK One"));
+
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "true");
+      expect(selectionState("GK One")).toBe("selected");
+      expect(selectionState("GK Two")).toBe("target");
+      expect(selectionState("DEF Five")).toBe("not-target");
+      expect(selectionState("DEF One")).toBe("not-target");
+
+      // An outfield starter can swap with any bench outfielder that keeps the formation legal.
+      fireEvent.click(selectButton("DEF One"));
+
+      expect(selectionState("DEF One")).toBe("selected");
+      expect(selectionState("DEF Five")).toBe("target");
+      expect(selectionState("MID Five")).toBe("target");
+      expect(selectionState("FWD Three")).toBe("target");
+      expect(selectionState("GK Two")).toBe("not-target");
     });
 
-    render(<MyTeamBoard />);
+    it("replaces the selection when a non-target is chosen, without saving", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Edit Team" })).toBeInTheDocument();
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("DEF One"));
+
+      expect(selectButton("DEF One")).toHaveAttribute("aria-pressed", "true");
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
+      expect(putBodies).toHaveLength(0);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit Team" }));
+    it("cancels the selection by toggling the player or using Clear selection", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Swap GK One with bench" })).toBeInTheDocument();
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("GK One"));
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
+
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
+      expect(screen.queryByRole("button", { name: "Clear selection" })).not.toBeInTheDocument();
+      expect(putBodies).toHaveLength(0);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Swap GK One with bench" }));
-    fireEvent.change(screen.getByLabelText("Bench Player for GK One"), { target: { value: "2" } });
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Swap" }));
-
-    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
-
-    await waitFor(() => {
-      const putCall = fetchMock.mock.calls.find(
-        ([url, init]) => String(url).endsWith("/my-team") && init?.method === "PUT"
+    it("says so when the selected player has no legal swap targets", async () => {
+      const squad = buildFullSquadResponse();
+      // Unusual shape: no bench goalkeeper, so the starting keeper has nobody to swap with.
+      squad.players = squad.players.map((player) =>
+        player.player_id === 2 ? { ...player, position: "MID" } : player,
       );
-      expect(putCall).toBeDefined();
-      const payload = JSON.parse(String(putCall?.[1]?.body));
-      const gkOne = payload.players.find((player: { player_id: number }) => player.player_id === 1);
-      const gkTwo = payload.players.find((player: { player_id: number }) => player.player_id === 2);
-      expect(gkOne?.is_starting).toBe(false);
-      expect(gkTwo?.is_starting).toBe(true);
-      expect(payload.bank).toBe(25.6);
+      installBackend({ squad });
+      await renderBoard();
+
+      fireEvent.click(selectButton("GK One"));
+
+      expect(screen.getByText("No valid swap targets for GK One.")).toBeInTheDocument();
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("keeps the viewed gameweek selected after a successful swap and reload", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
+
+      fireEvent.click(screen.getByRole("button", { name: "Next Game" }));
+      await waitFor(() => {
+        expect(screen.getByText("Gameweek 3")).toBeInTheDocument();
+      });
+
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("GK Two"));
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("swap-confirmation")).toHaveTextContent("Swapped GK One with GK Two.");
+      });
+
+      // The squad was reloaded (GK One is now on the bench) yet the gameweek did not reset to 2.
+      expect(screen.getByText("ARS · GK · Bench 1")).toBeInTheDocument();
+      expect(screen.getByText("Gameweek 3")).toBeInTheDocument();
+      expect(screen.queryByText("Gameweek 2")).not.toBeInTheDocument();
+    });
+
+    it("does not issue overlapping saves while a swap is in flight", async () => {
+      const squad = buildFullSquadResponse();
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { putBodies } = installBackend({
+        squad,
+        putResponse: async () => {
+          await gate;
+          return { ok: true, json: async () => squad } as Response;
+        },
+      });
+      await renderBoard();
+
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("GK Two"));
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+
+      // While the first save is pending, selection is disabled and further clicks do nothing.
+      expect(selectButton("GK Two")).toBeDisabled();
+      expect(selectButton("DEF One")).toBeDisabled();
+      fireEvent.click(selectButton("GK Two"));
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("DEF Five"));
+      expect(putBodies).toHaveLength(1);
+
+      release();
+      await waitFor(() => {
+        expect(screen.getByTestId("swap-confirmation")).toHaveTextContent("Swapped GK One with GK Two.");
+      });
+      expect(putBodies).toHaveLength(1);
+      expect(selectButton("DEF One")).not.toBeDisabled();
+    });
+
+    it("offers a swap that leads to a 5-2-3 formation", async () => {
+      // Starting 5-3-2: swapping MID One for FWD Three gives 5-2-3, legal under the domain rule (MID 2-5).
+      const squad = withStarters(buildFullSquadResponse(), [1, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14]);
+      installBackend({ squad });
+      await renderBoard();
+
+      fireEvent.click(selectButton("MID One"));
+
+      expect(selectionState("FWD Three")).toBe("target");
+    });
+
+    it("disables selection while an optimiser mode is showing and restores it for None", async () => {
+      installBackend({
+        difficultyTeams: [
+          { id: 1, name: "Chelsea", short_name: "CHE", difficulty: 5 },
+          { id: 2, name: "Tottenham", short_name: "TOT", difficulty: 1 },
+        ],
+      });
+      await renderBoard();
+
+      const select = screen.getByLabelText("Optimise starting 11 by") as HTMLSelectElement;
+      expect(select).toHaveValue("none");
+
+      fireEvent.change(select, { target: { value: "difficulty" } });
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: "Select GK One" })).not.toBeInTheDocument();
+      });
+      // Projection-related controls remain available.
+      expect(screen.getByRole("button", { name: "Refresh xPts" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Next Game" })).toBeInTheDocument();
+
+      fireEvent.change(select, { target: { value: "xpts" } });
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: "Select GK One" })).not.toBeInTheDocument();
+      });
+
+      fireEvent.change(select, { target: { value: "none" } });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Select GK One" })).toBeInTheDocument();
+      });
     });
   });
 
-  it("transfers a starter for a replacement from the player pool", async () => {
-    const squadResponse = buildFullSquadResponse();
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
+  describe("swaps and reorders", () => {
+    it("swaps a starter with a bench player in one save and confirms it", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
 
-      if (url.endsWith("/teams")) {
-        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
-      }
-      if (url.endsWith("/my-team") && !init) {
-        return { ok: true, json: async () => squadResponse } as Response;
-      }
-      if (url.endsWith("/my-team") && init?.method === "PUT") {
-        return { ok: true, json: async () => squadResponse } as Response;
-      }
-      if (url.includes("/players?")) {
-        const query = new URLSearchParams(url.split("?")[1]);
-        const position = query.get("position");
-        const items =
-          position === "GK"
-            ? [
-                {
-                  id: 101,
-                  web_name: "GK Three",
-                  first_name: "GK",
-                  second_name: "Three",
-                  team_name: "Bournemouth",
-                  team_short_name: "BOU",
-                  position: "GK",
-                  current_price: 6.0,
-                  status: "a",
-                },
-              ]
-            : [];
-        return { ok: true, json: async () => ({ items, total: items.length, page: 1, page_size: 60 }) } as Response;
-      }
-      if (url.endsWith("/my-team/recommendation")) {
-        return { ok: false, status: 404, json: async () => ({}) } as Response;
-      }
-      throw new Error(`Unexpected fetch call: ${url}`);
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("GK Two"));
+
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      const body = putBodies[0];
+      expect(selectionFor(body, 1)).toMatchObject({ is_starting: false, bench_order: 1 });
+      expect(selectionFor(body, 2)).toMatchObject({ is_starting: true, bench_order: null });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("swap-confirmation")).toHaveAttribute("aria-live", "polite");
+        expect(screen.getByTestId("swap-confirmation")).toHaveTextContent("Swapped GK One with GK Two.");
+      });
+
+      // The reloaded squad reflects the swap, and the selection is cleared.
+      await waitFor(() => {
+        expect(screen.getByText("ARS · GK · Bench 1")).toBeInTheDocument();
+      });
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
     });
 
-    render(<MyTeamBoard />);
+    it("updates the confirmation on a second swap", async () => {
+      installBackend();
+      await renderBoard();
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Edit Team" })).toBeInTheDocument();
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("GK Two"));
+      await waitFor(() => {
+        expect(screen.getByTestId("swap-confirmation")).toHaveTextContent("Swapped GK One with GK Two.");
+      });
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("DEF Five"));
+      await waitFor(() => {
+        expect(screen.getByTestId("swap-confirmation")).toHaveTextContent("Swapped DEF One with DEF Five.");
+      });
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit Team" }));
+    it("swaps in the other direction when a bench player is selected first", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Transfer GK One" })).toBeInTheDocument();
+      fireEvent.click(selectButton("DEF Five"));
+      expect(selectionState("DEF One")).toBe("target");
+      fireEvent.click(selectButton("DEF One"));
+
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      expect(selectionFor(putBodies[0], 7)).toMatchObject({ is_starting: true, bench_order: null });
+      expect(selectionFor(putBodies[0], 3)).toMatchObject({ is_starting: false, bench_order: 2 });
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Transfer GK One" }));
+    it("lets the bench goalkeeper be selected first and swapped with the starting goalkeeper", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
 
-    await waitFor(() => {
-      expect(screen.getByLabelText("Replacement Player for GK One")).not.toBeDisabled();
+      fireEvent.click(selectButton("GK Two"));
+      expect(selectionState("GK One")).toBe("target");
+      fireEvent.click(selectButton("GK One"));
+
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      expect(selectionFor(putBodies[0], 2)).toMatchObject({ is_starting: true, bench_order: null });
+      expect(selectionFor(putBodies[0], 1)).toMatchObject({ is_starting: false, bench_order: 1 });
     });
 
-    fireEvent.change(screen.getByLabelText("Replacement Player for GK One"), {
-      target: { value: "101" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Transfer" }));
+    it("moves the captain badge to the incoming starter when the captain is benched", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
 
-    await waitFor(() => {
-      const putCall = fetchMock.mock.calls.find(
-        ([url, init]) => String(url).endsWith("/my-team") && init?.method === "PUT"
-      );
-      expect(putCall).toBeDefined();
-      const payload = JSON.parse(String(putCall?.[1]?.body));
-      expect(payload.bank).toBe(23.6);
-      const replaced = payload.players.find((player: { player_id: number }) => player.player_id === 101);
-      expect(replaced).toBeDefined();
-      expect(replaced.is_starting).toBe(true);
+      fireEvent.click(selectButton("MID One")); // captain
+      fireEvent.click(selectButton("MID Five"));
+
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      expect(selectionFor(putBodies[0], 8)).toMatchObject({ is_starting: false, is_captain: false });
+      expect(selectionFor(putBodies[0], 12)).toMatchObject({ is_starting: true, is_captain: true });
+    });
+
+    it("reorders two outfield bench players, swapping only their bench order", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
+
+      fireEvent.click(selectButton("DEF Five")); // bench 2
+      expect(selectionState("MID Five")).toBe("target"); // bench 3
+      fireEvent.click(selectButton("MID Five"));
+
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      const body = putBodies[0];
+      expect(selectionFor(body, 7)).toMatchObject({ is_starting: false, bench_order: 3 });
+      expect(selectionFor(body, 12)).toMatchObject({ is_starting: false, bench_order: 2 });
+      expect(selectionFor(body, 2)).toMatchObject({ is_starting: false, bench_order: 1 });
+      expect(selectionFor(body, 15)).toMatchObject({ is_starting: false, bench_order: 4 });
+      expect(body.players.filter((player) => player.is_starting)).toHaveLength(11);
+    });
+
+    it("does not allow the bench goalkeeper to be reordered against outfield subs", async () => {
+      const { putBodies } = installBackend();
+      await renderBoard();
+
+      fireEvent.click(selectButton("GK Two"));
+      expect(selectionState("DEF Five")).toBe("not-target");
+      fireEvent.click(selectButton("DEF Five"));
+
+      expect(selectButton("DEF Five")).toHaveAttribute("aria-pressed", "true");
+      expect(selectionState("GK Two")).toBe("not-target");
+      expect(putBodies).toHaveLength(0);
+    });
+
+    it("preserves the saved bank and free transfers on a swap and on a reorder", async () => {
+      const squad = buildFullSquadResponse();
+      squad.bank = 2.3; // differs from 100 - sum(current_price) = 25.6
+      squad.free_transfers = 3;
+      const { putBodies } = installBackend({ squad });
+      await renderBoard();
+
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("GK Two"));
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      expect(putBodies[0].bank).toBe(2.3);
+      expect(putBodies[0].free_transfers).toBe(3);
+
+      await waitFor(() => {
+        expect(screen.getByText("ARS · GK · Bench 1")).toBeInTheDocument();
+      });
+
+      fireEvent.click(selectButton("DEF Five"));
+      fireEvent.click(selectButton("MID Five"));
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(2);
+      });
+      expect(putBodies[1].bank).toBe(2.3);
+      expect(putBodies[1].free_transfers).toBe(3);
+
+      expect(screen.getByText("Bank: 2.3")).toBeInTheDocument();
+    });
+
+    it("shows the server message and leaves the displayed squad unchanged when a save is rejected", async () => {
+      installBackend({
+        putResponse: () =>
+          ({
+            ok: false,
+            status: 400,
+            json: async () => ({ detail: "Starting XI must contain between 1 and 1 GK" }),
+          }) as Response,
+      });
+      await renderBoard();
+
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("GK Two"));
+
       expect(
-        payload.players.some((player: { player_id: number }) => player.player_id === 1)
-      ).toBe(false);
-    });
-  });
-
-  it("offers a None/xPts/Fixture difficulty optimiser dropdown that hides manual edit controls", async () => {
-    const squadResponse = buildFullSquadResponse();
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/teams")) {
-        return {
-          ok: true,
-          json: async () => ({
-            items: [
-              { id: 1, name: "Chelsea", short_name: "CHE", difficulty: 5 },
-              { id: 2, name: "Tottenham", short_name: "TOT", difficulty: 1 },
-            ],
-            total: 2,
-          }),
-        } as Response;
-      }
-      if (url.endsWith("/my-team/recommendation")) {
-        return { ok: false, status: 404, json: async () => ({}) } as Response;
-      }
-      return { ok: true, json: async () => squadResponse } as Response;
-    });
-
-    render(<MyTeamBoard />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Edit Team" })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Edit Team" }));
-
-    const select = screen.getByLabelText("Optimise starting 11 by") as HTMLSelectElement;
-    expect(select).toHaveValue("none");
-    expect(screen.getByRole("button", { name: "Swap GK One with bench" })).toBeInTheDocument();
-
-    fireEvent.change(select, { target: { value: "difficulty" } });
-
-    await waitFor(() => {
-      expect(select).toHaveValue("difficulty");
-      expect(screen.queryByRole("button", { name: "Swap GK One with bench" })).not.toBeInTheDocument();
-    });
-
-    fireEvent.change(select, { target: { value: "xpts" } });
-
-    await waitFor(() => {
-      expect(select).toHaveValue("xpts");
-      expect(screen.queryByRole("button", { name: "Swap GK One with bench" })).not.toBeInTheDocument();
-    });
-
-    fireEvent.change(select, { target: { value: "none" } });
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Swap GK One with bench" })).toBeInTheDocument();
+        await screen.findByText("Starting XI must contain between 1 and 1 GK"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("swap-confirmation")).toBeEmptyDOMElement();
+      // GK Two is still the bench goalkeeper (bench 1); GK One still starts.
+      expect(screen.getByText("AVL · GK · Bench 1")).toBeInTheDocument();
+      expect(screen.queryByText("ARS · GK · Bench 1")).not.toBeInTheDocument();
     });
   });
 
@@ -504,4 +770,3 @@ describe("MyTeamBoard", () => {
     expect(screen.getByRole("button", { name: "Recommended" })).toBeDisabled();
   });
 });
-

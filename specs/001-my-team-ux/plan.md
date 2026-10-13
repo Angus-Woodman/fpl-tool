@@ -122,6 +122,7 @@ Resolved implementation decisions (see research.md decisions 10-13):
 - Unknown selectability makes Explorer return `selectability_unknown`; a refresh normally resolves it and an upstream omission intentionally keeps the diagnostic.
 - The migration and bootstrap refresh are an operational gate placed immediately after the persistence tasks and before any real-backend verification. US1 can be done and verified before the migration exists.
 - Playwright stays API-stubbed (one non-`a`-but-selectable case); real-stack verification is separate and limited to states present in refreshed data.
+- Known limitation: a lineup save sends the whole squad from the page snapshot, so a stale page can overwrite a concurrent change. Fixing it needs optimistic concurrency/versioning or a narrower mutation endpoint, outside this feature.
 
 ## Project Structure
 
