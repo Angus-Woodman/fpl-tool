@@ -502,6 +502,8 @@ export function MyTeamBoard(): JSX.Element {
   const [swapConfirmation, setSwapConfirmation] = useState("");
   const [recommendation, setRecommendation] = useState<RecommendationState>({ type: "loading" });
   const [viewMode, setViewMode] = useState<ViewMode>("current");
+  // Client-only and deliberately not persisted: figures are hidden again on reload or revisit.
+  const [pointsRevealed, setPointsRevealed] = useState(false);
 
   async function loadRecommendation(): Promise<void> {
     setRecommendation({ type: "loading" });
@@ -880,6 +882,13 @@ export function MyTeamBoard(): JSX.Element {
     };
   }
 
+  function togglePointsRevealed(): void {
+    if (pointsRevealed) {
+      setViewMode("current");
+    }
+    setPointsRevealed(!pointsRevealed);
+  }
+
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
@@ -896,6 +905,13 @@ export function MyTeamBoard(): JSX.Element {
           >
             {refreshState.type === "running" ? "Refreshing xPts..." : "Refresh xPts"}
           </button>
+          <button
+            type="button"
+            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
+            onClick={togglePointsRevealed}
+          >
+            {pointsRevealed ? "Hide projected points" : "Show projected points"}
+          </button>
           {selectedPlayerId !== null && (
             <button
               type="button"
@@ -911,18 +927,20 @@ export function MyTeamBoard(): JSX.Element {
         </div>
       </div>
 
-      <RecommendationSummary
-        state={recommendation}
-        captainName={recommendationCaptainName}
-        viceCaptainName={recommendationViceCaptainName}
-        missingPlayerNames={recommendationMissingPlayerNames}
-        viewMode={viewMode}
-        onViewModeChange={setViewMode}
-        onRefreshProjections={() => void handleRefreshPoints()}
-        refreshing={refreshState.type === "running"}
-      />
+      {pointsRevealed && (
+        <RecommendationSummary
+          state={recommendation}
+          captainName={recommendationCaptainName}
+          viceCaptainName={recommendationViceCaptainName}
+          missingPlayerNames={recommendationMissingPlayerNames}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
+          onRefreshProjections={() => void handleRefreshPoints()}
+          refreshing={refreshState.type === "running"}
+        />
+      )}
 
-      {viewMode === "recommended" ? (
+      {pointsRevealed && viewMode === "recommended" ? (
         recommendation.type === "ready" ? (
           <RecommendedSquadView recommendation={recommendation.data} players={loadedTeam.players} />
         ) : (
@@ -987,18 +1005,20 @@ export function MyTeamBoard(): JSX.Element {
             <p className="mb-4 text-sm text-slate-700">No valid swap targets for {selectedPlayer.web_name}.</p>
           )}
 
-          <div className="mb-5 grid gap-3 sm:grid-cols-3">
-            {projectionCards.map((card) => (
-              <article key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  {card.label}
-                </p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">
-                  {card.value?.toFixed(1) ?? "-"}
-                </p>
-              </article>
-            ))}
-          </div>
+          {pointsRevealed && (
+            <div className="mb-5 grid gap-3 sm:grid-cols-3">
+              {projectionCards.map((card) => (
+                <article key={card.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    {card.label}
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">
+                    {card.value?.toFixed(1) ?? "-"}
+                  </p>
+                </article>
+              ))}
+            </div>
+          )}
 
           <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
             <SquadPitch
@@ -1020,6 +1040,7 @@ export function MyTeamBoard(): JSX.Element {
                     position={row.player.position}
                     badge={badgeLabel(row.selection.is_captain, row.selection.is_vice_captain)}
                     projectedPoints={gwPoints}
+                    showProjectedPoints={pointsRevealed}
                     opponentLabel={opposition}
                     transferHref={`/transfers?out=${row.player.player_id}`}
                     {...selectionProps(row.player.player_id)}
@@ -1046,6 +1067,7 @@ export function MyTeamBoard(): JSX.Element {
                     position={row.player.position}
                     benchOrder={row.selection.bench_order}
                     projectedPoints={gwPoints}
+                    showProjectedPoints={pointsRevealed}
                     opponentLabel={opposition}
                     transferHref={`/transfers?out=${row.player.player_id}`}
                     {...selectionProps(row.player.player_id)}

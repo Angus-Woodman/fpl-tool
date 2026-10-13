@@ -7,6 +7,8 @@ export type SquadPlayerCardProps = {
   teamShortName: string;
   position: Position;
   projectedPoints: number | null;
+  /** When false the "GW xPts" line is omitted; the opponent label is unaffected. */
+  showProjectedPoints?: boolean;
   opponentLabel?: string;
   badge?: "C" | "VC" | null;
   benchOrder?: number | null;
@@ -36,6 +38,7 @@ export function SquadPlayerCard({
   teamShortName,
   position,
   projectedPoints,
+  showProjectedPoints = true,
   opponentLabel,
   badge,
   benchOrder,
@@ -77,9 +80,11 @@ export function SquadPlayerCard({
       {opponentLabel !== undefined && (
         <p className="mt-2 text-xs text-slate-600">Opponent: {opponentLabel}</p>
       )}
-      <p className="mt-1 text-xs text-slate-600">
-        GW xPts: {projectedPoints !== null ? projectedPoints.toFixed(1) : "-"}
-      </p>
+      {showProjectedPoints && (
+        <p className="mt-1 text-xs text-slate-600">
+          GW xPts: {projectedPoints !== null ? projectedPoints.toFixed(1) : "-"}
+        </p>
+      )}
 
       {transferHref && (
         <a href={transferHref} className="mt-2 inline-block text-xs text-slate-700 underline">

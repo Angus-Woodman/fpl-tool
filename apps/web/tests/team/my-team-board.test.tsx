@@ -618,6 +618,154 @@ describe("MyTeamBoard", () => {
     });
   });
 
+  describe("projected points visibility", () => {
+    const PER_PLAYER_XPTS = /^GW xPts:/;
+    const HORIZON_CARD = /^[135] GW xPts$/;
+
+    function installRecommendationBackend(): void {
+      const squad = buildFullSquadResponse();
+      const recommendation = buildRecommendationResponse();
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/teams")) {
+          return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
+        }
+        if (url.endsWith("/my-team/recommendation")) {
+          return { ok: true, json: async () => recommendation } as Response;
+        }
+        return { ok: true, json: async () => squad } as Response;
+      });
+    }
+
+    function revealControl(): HTMLElement {
+      return screen.getByRole("button", { name: "Show projected points" });
+    }
+
+    function expectFiguresHidden(): void {
+      expect(screen.queryAllByText(PER_PLAYER_XPTS)).toHaveLength(0);
+      expect(screen.queryAllByText(HORIZON_CARD)).toHaveLength(0);
+      expect(screen.queryByText("This Gameweek")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Current" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Recommended" })).not.toBeInTheDocument();
+    }
+
+    it("hides per-player xPts, the 1/3/5 GW cards and the recommendation panel by default", async () => {
+      installRecommendationBackend();
+
+      await renderBoard();
+
+      expectFiguresHidden();
+      expect(revealControl()).toBeInTheDocument();
+    });
+
+    it("keeps the optimiser, gameweek navigation, refresh control and opponents visible while hidden", async () => {
+      installRecommendationBackend();
+
+      await renderBoard();
+
+      expect(screen.getByLabelText("Optimise starting 11 by")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Previous Game" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Next Game" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Refresh xPts" })).toBeInTheDocument();
+      expect(screen.getByText("Gameweek 2")).toBeInTheDocument();
+      expect(screen.getAllByText("Opponent: CHE (H)").length).toBeGreaterThan(0);
+    });
+
+    it("reveals all three kinds of figure and hides them again with the same control", async () => {
+      installRecommendationBackend();
+      await renderBoard();
+
+      fireEvent.click(revealControl());
+
+      expect(screen.getAllByText(PER_PLAYER_XPTS)).toHaveLength(15);
+      expect(screen.getAllByText(HORIZON_CARD)).toHaveLength(3);
+      expect(await screen.findByText("This Gameweek")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Recommended" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Hide projected points" }));
+
+      expectFiguresHidden();
+      expect(revealControl()).toBeInTheDocument();
+    });
+
+    it("returns to the Current view when figures are hidden while Recommended is active", async () => {
+      installRecommendationBackend();
+      await renderBoard();
+
+      fireEvent.click(revealControl());
+      fireEvent.click(await screen.findByRole("button", { name: "Recommended" }));
+      expect(await screen.findByText("Recommended Starting XI")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Hide projected points" }));
+
+      expect(screen.queryByText("Recommended Starting XI")).not.toBeInTheDocument();
+      expect(screen.getByText("Starting XI")).toBeInTheDocument();
+
+      fireEvent.click(revealControl());
+      expect(screen.getByRole("button", { name: "Current" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(screen.queryByText("Recommended Starting XI")).not.toBeInTheDocument();
+    });
+
+    it("hides the figures again after unmounting and remounting", async () => {
+      installRecommendationBackend();
+      const first = render(<MyTeamBoard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Select GK One" })).toBeInTheDocument();
+      });
+      fireEvent.click(revealControl());
+      expect(screen.getAllByText(PER_PLAYER_XPTS)).toHaveLength(15);
+
+      first.unmount();
+      await renderBoard();
+
+      expectFiguresHidden();
+      expect(revealControl()).toBeInTheDocument();
+    });
+
+    it("never persists the reveal state in localStorage, sessionStorage or cookies", async () => {
+      installRecommendationBackend();
+      const setItem = vi.spyOn(Storage.prototype, "setItem");
+      await renderBoard();
+
+      fireEvent.click(revealControl());
+      fireEvent.click(screen.getByRole("button", { name: "Hide projected points" }));
+
+      expect(setItem).not.toHaveBeenCalled();
+      expect(window.localStorage.length).toBe(0);
+      expect(window.sessionStorage.length).toBe(0);
+      expect(document.cookie).toBe("");
+    });
+
+    it("still shows the recommendation failure state once figures are revealed", async () => {
+      const squad = buildFullSquadResponse();
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/teams")) {
+          return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
+        }
+        if (url.endsWith("/my-team/recommendation")) {
+          return {
+            ok: false,
+            status: 422,
+            json: async () => ({
+              detail: { code: "missing_player_projections", message: "Projections missing", missing_player_ids: [9] },
+            }),
+          } as Response;
+        }
+        return { ok: true, json: async () => squad } as Response;
+      });
+      await renderBoard();
+      expect(screen.queryByText("Projections missing")).not.toBeInTheDocument();
+
+      fireEvent.click(revealControl());
+
+      expect(await screen.findByText("Projections missing")).toBeInTheDocument();
+    });
+  });
+
   it("refreshes projections and shows status", async () => {
     const squadResponse = buildFullSquadResponse();
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
@@ -709,6 +857,8 @@ describe("MyTeamBoard", () => {
 
     render(<MyTeamBoard />);
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show projected points" }));
+
     await waitFor(() => {
       expect(screen.getByText("GW 2")).toBeInTheDocument();
       expect(screen.getByText(/component_v3 · generated/)).toBeInTheDocument();
@@ -750,6 +900,8 @@ describe("MyTeamBoard", () => {
 
     render(<MyTeamBoard />);
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show projected points" }));
+
     await waitFor(() => {
       expect(screen.getByText("GW 2")).toBeInTheDocument();
     });
@@ -790,6 +942,8 @@ describe("MyTeamBoard", () => {
     });
 
     render(<MyTeamBoard />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Show projected points" }));
 
     await waitFor(() => {
       expect(
