@@ -34,6 +34,9 @@ class Player:
     position: PlayerPosition
     current_price: float
     status: str
+    # Upstream incoming-selectability flags; None means unknown (never eligible).
+    can_select: bool | None = None
+    can_transact: bool | None = None
 
 
 @dataclass(frozen=True)

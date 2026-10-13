@@ -54,6 +54,8 @@ class CandidatePlayerRecord:
     current_price: float
     position: str
     status: str
+    can_select: bool | None
+    can_transact: bool | None
 
 
 class PlayerReadRepository:
@@ -145,6 +147,8 @@ class PlayerReadRepository:
                 PlayerModel.current_price,
                 PlayerModel.position,
                 PlayerModel.status,
+                PlayerModel.can_select,
+                PlayerModel.can_transact,
             )
             .join(TeamModel, TeamModel.id == PlayerModel.team_id)
             .where(PlayerModel.position == position, PlayerModel.status == "a")
@@ -159,6 +163,8 @@ class PlayerReadRepository:
                 current_price=float(row[4]),
                 position=row[5].value if hasattr(row[5], "value") else str(row[5]),
                 status=row[6],
+                can_select=row[7],
+                can_transact=row[8],
             )
             for row in rows
         ]
@@ -173,6 +179,8 @@ class PlayerReadRepository:
                 PlayerModel.current_price,
                 PlayerModel.position,
                 PlayerModel.status,
+                PlayerModel.can_select,
+                PlayerModel.can_transact,
             )
             .join(TeamModel, TeamModel.id == PlayerModel.team_id)
             .where(PlayerModel.id == player_id)
@@ -189,4 +197,6 @@ class PlayerReadRepository:
             current_price=float(row[4]),
             position=row[5].value if hasattr(row[5], "value") else str(row[5]),
             status=row[6],
+            can_select=row[7],
+            can_transact=row[8],
         )

@@ -3,21 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from fpl_engine.domain import PlayerPosition
 from fpl_engine.rules import RuleViolationError
+from fpl_engine.transfers.priced_player import PricedPlayer
 from fpl_engine.transfers.single_transfer import TransferPlayer, evaluate_single_transfer
-
-
-@dataclass(frozen=True)
-class PricedPlayer:
-    """A squad member or transfer-market candidate's static profile:
-    position, club and price. Deliberately excludes projected points, which
-    vary per gameweek (see GameweekProjections) rather than per player."""
-
-    player_id: int
-    position: PlayerPosition
-    team_id: int
-    price: float
 
 
 @dataclass(frozen=True)

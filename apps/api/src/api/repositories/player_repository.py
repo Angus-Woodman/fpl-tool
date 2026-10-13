@@ -39,6 +39,8 @@ class PlayerRepository:
                 "position": DbPlayerPosition(player.position.value),
                 "current_price": player.current_price,
                 "status": player.status,
+                "can_select": player.can_select,
+                "can_transact": player.can_transact,
             }
             for player in players
         ]
@@ -54,6 +56,9 @@ class PlayerRepository:
                 "position": statement.excluded.position,
                 "current_price": statement.excluded.current_price,
                 "status": statement.excluded.status,
+                # Overwritten even when NULL so an absent upstream flag clears a stale value.
+                "can_select": statement.excluded.can_select,
+                "can_transact": statement.excluded.can_transact,
             },
         )
         self._session.execute(statement)

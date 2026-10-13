@@ -98,6 +98,8 @@ class ImportFplDataService:
                     position=player_seed.position,
                     current_price=player_seed.current_price,
                     status=player_seed.status,
+                    can_select=player_seed.can_select,
+                    can_transact=player_seed.can_transact,
                 )
             )
 

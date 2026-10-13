@@ -78,6 +78,8 @@ def _candidate(player_id: int, *, team_id: int, price: float = 5.0) -> Candidate
         current_price=price,
         position="MID",
         status="a",
+        can_select=True,
+        can_transact=True,
     )
 
 

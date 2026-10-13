@@ -87,6 +87,8 @@ def _candidate(
         current_price=price,
         position=position,
         status="a",
+        can_select=True,
+        can_transact=True,
     )
 
 
