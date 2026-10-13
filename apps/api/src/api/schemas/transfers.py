@@ -23,6 +23,12 @@ class RankedTransferCandidateResponse(BaseModel):
     team_gain_by_horizon: dict[int, float]
     direct_xpts_difference: float | None
     gameweeks_evaluated: int
+    # False means the candidate is visible, fully comparable, but currently unavailable to apply.
+    is_legal: bool
+    # The same error codes evaluate_single_transfer produces; empty when is_legal is true.
+    unavailable_reasons: list[str]
+    # Advisory playing status only; never an unavailability reason or an Apply gate.
+    status: str
 
 
 class TransferExplorerResponse(BaseModel):

@@ -64,6 +64,7 @@ class TransferPreviewResult:
     lineup_after: LineupSummary | None
     captain_changed: bool
     vice_captain_changed: bool
+    player_in_status: str
 
 
 @dataclass(frozen=True)
@@ -235,4 +236,5 @@ class GetTransferPreviewService:
             lineup_after=lineup_after,
             captain_changed=captain_changed,
             vice_captain_changed=vice_captain_changed,
+            player_in_status=incoming_profile.status,
         )

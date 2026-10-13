@@ -57,11 +57,11 @@ def test_get_by_id_returns_the_selectability_flags(db_session: Session) -> None:
     assert (never_imported.can_select, never_imported.can_transact) == (None, None)
 
 
-def test_list_available_by_position_returns_the_selectability_flags(db_session: Session) -> None:
+def test_list_by_position_returns_the_selectability_flags(db_session: Session) -> None:
     _seed(db_session)
     repository = PlayerReadRepository(db_session)
 
-    records = repository.list_available_by_position("MID")
+    records = repository.list_by_position("MID")
 
     flags = {record.web_name: (record.can_select, record.can_transact) for record in records}
     assert flags == {

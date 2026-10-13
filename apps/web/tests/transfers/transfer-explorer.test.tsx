@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TransferExplorerResponse } from "@/lib/api";
@@ -76,8 +76,8 @@ function buildExplorerResponse(): TransferExplorerResponse {
       projected_points_by_horizon: { "1": 3.3, "3": 9.0, "5": 15.0 },
     },
     candidates: [
-      { player_id: 201, web_name: "Low1High5", team_short_name: "AVL", price: 5.5, resulting_bank: 1.0, team_gain_by_horizon: { "1": 0.2, "3": 1.0, "5": 5.0 }, direct_xpts_difference: 0.5, gameweeks_evaluated: 5 },
-      { player_id: 202, web_name: "High1Low5", team_short_name: "CHE", price: 5.0, resulting_bank: 1.5, team_gain_by_horizon: { "1": 2.0, "3": 2.5, "5": 2.6 }, direct_xpts_difference: 1.2, gameweeks_evaluated: 5 },
+      { player_id: 201, web_name: "Low1High5", team_short_name: "AVL", price: 5.5, resulting_bank: 1.0, team_gain_by_horizon: { "1": 0.2, "3": 1.0, "5": 5.0 }, direct_xpts_difference: 0.5, gameweeks_evaluated: 5, is_legal: true, unavailable_reasons: [], status: "a" },
+      { player_id: 202, web_name: "High1Low5", team_short_name: "CHE", price: 5.0, resulting_bank: 1.5, team_gain_by_horizon: { "1": 2.0, "3": 2.5, "5": 2.6 }, direct_xpts_difference: 1.2, gameweeks_evaluated: 5, is_legal: true, unavailable_reasons: [], status: "a" },
     ],
     evaluated_gameweek_numbers: [5, 6, 7, 8, 9],
   };
@@ -135,6 +135,7 @@ function buildPreviewResponseBody() {
     },
     captain_changed: true,
     vice_captain_changed: false,
+    player_in_status: "a",
   };
 }
 
@@ -212,7 +213,7 @@ describe("TransferExplorer", () => {
     expect(fetchSpy.mock.calls.length).toBe(callsBeforeSwitch);
   });
 
-  it("shows an empty state when there are no legal candidates", async () => {
+  it("shows an empty state when there are no eligible candidates", async () => {
     useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
     useRouter.mockReturnValue({ push: routerPush });
     mockFetchWith({ ...buildExplorerResponse(), candidates: [] });
@@ -221,7 +222,7 @@ describe("TransferExplorer", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No legal, affordable replacements were found for this player right now."),
+        screen.getByText("No eligible replacements were found for this player right now."),
       ).toBeInTheDocument();
     });
   });
@@ -581,6 +582,183 @@ describe("TransferExplorer", () => {
         return method === "PUT" || method === "POST" || String(url).includes("/apply");
       });
       expect(mutating).toHaveLength(0);
+    });
+  });
+
+  describe("unavailable candidates and advisory playing status", () => {
+    function explorerWithCandidates(candidates: TransferExplorerResponse["candidates"]) {
+      return { ...buildExplorerResponse(), candidates };
+    }
+
+    function mockBackend(options: {
+      explorer: unknown;
+      explorerStatus?: number;
+      preview?: unknown;
+    }) {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/my-team")) {
+          return { ok: true, json: async () => buildSquadResponse() } as Response;
+        }
+        if (url.includes("/preview")) {
+          return { ok: true, json: async () => options.preview } as Response;
+        }
+        return {
+          ok: (options.explorerStatus ?? 200) === 200,
+          status: options.explorerStatus ?? 200,
+          json: async () => options.explorer,
+        } as Response;
+      });
+    }
+
+    function renderExplorer(): void {
+      useSearchParams.mockReturnValue(makeSearchParams({ out: "9" }));
+      useRouter.mockReturnValue({ push: routerPush });
+      render(<TransferExplorer />);
+    }
+
+    const unaffordable = {
+      player_id: 301,
+      web_name: "Premium",
+      team_short_name: "MCI",
+      price: 12.5,
+      resulting_bank: -6.0,
+      team_gain_by_horizon: { "1": 3.0, "3": 6.0, "5": 9.0 },
+      direct_xpts_difference: 2.5,
+      gameweeks_evaluated: 5,
+      is_legal: false,
+      unavailable_reasons: ["insufficient_bank"],
+      status: "a",
+    };
+    const injuredButLegal = {
+      ...unaffordable,
+      player_id: 302,
+      web_name: "Knock",
+      price: 5.0,
+      resulting_bank: 1.5,
+      is_legal: true,
+      unavailable_reasons: [],
+      status: "i",
+    };
+
+    it("keeps an unavailable candidate listed with its reason, figures and an enabled Preview", async () => {
+      mockBackend({ explorer: explorerWithCandidates([unaffordable]) });
+
+      renderExplorer();
+
+      const row = (await screen.findByText("Premium")).closest("tr") as HTMLElement;
+      expect(row).toHaveAttribute("data-availability", "unavailable");
+      expect(row).toHaveTextContent("Insufficient budget");
+      expect(row).not.toHaveTextContent("insufficient_bank");
+      expect(row).toHaveTextContent("-£6.0m");
+      expect(row).toHaveTextContent("+9.0 xPts");
+      expect(within(row).getByRole("button", { name: "Preview transfer" })).toBeEnabled();
+    });
+
+    it("shows the advisory status for an injured but legal candidate and lets it be applied", async () => {
+      mockBackend({
+        explorer: explorerWithCandidates([injuredButLegal]),
+        preview: { ...buildPreviewResponseBody(), player_in_id: 302, player_in_status: "i" },
+      });
+
+      renderExplorer();
+
+      const row = (await screen.findByText("Knock")).closest("tr") as HTMLElement;
+      expect(row).toHaveAttribute("data-availability", "available");
+      expect(row).toHaveTextContent("Injured");
+      fireEvent.click(within(row).getByRole("button", { name: "Preview transfer" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Apply transfer" })).toBeEnabled();
+      });
+    });
+
+    it("shows the incoming status in Preview separately from legality, disabling Apply only for illegality", async () => {
+      mockBackend({
+        explorer: explorerWithCandidates([unaffordable]),
+        preview: {
+          ...buildPreviewResponseBody(),
+          player_in_id: 301,
+          is_legal: false,
+          errors: ["insufficient_bank"],
+          player_in_status: "d",
+          lineup_after: null,
+        },
+      });
+
+      renderExplorer();
+      fireEvent.click(await screen.findByRole("button", { name: "Preview transfer" }));
+
+      const legality = await screen.findByText(/This transfer is not currently legal/);
+      expect(legality).toHaveTextContent("Insufficient budget");
+      expect(legality).not.toHaveTextContent(/doubtful/i);
+      const status = screen.getByText(/Doubtful/);
+      expect(status).not.toBe(legality);
+      expect(screen.getByRole("button", { name: "Apply transfer" })).toBeDisabled();
+    });
+
+    it("never disables Apply because of a status warning when the transfer is legal", async () => {
+      mockBackend({
+        explorer: explorerWithCandidates([injuredButLegal]),
+        preview: { ...buildPreviewResponseBody(), player_in_id: 302, player_in_status: "s" },
+      });
+
+      renderExplorer();
+      fireEvent.click(await screen.findByRole("button", { name: "Preview transfer" }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/Suspended/)).toBeInTheDocument();
+      });
+      expect(screen.queryByText(/This transfer is not currently legal/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Apply transfer" })).toBeEnabled();
+    });
+
+    it("renders a generic advisory label for an unknown status code without disabling Apply", async () => {
+      mockBackend({
+        explorer: explorerWithCandidates([{ ...injuredButLegal, status: "zz" }]),
+        preview: { ...buildPreviewResponseBody(), player_in_id: 302, player_in_status: "zz" },
+      });
+
+      renderExplorer();
+
+      const row = (await screen.findByText("Knock")).closest("tr") as HTMLElement;
+      expect(row).toHaveTextContent("Status unknown");
+      expect(row).not.toHaveTextContent("zz");
+      fireEvent.click(within(row).getByRole("button", { name: "Preview transfer" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Apply transfer" })).toBeEnabled();
+      });
+    });
+
+    it("shows no status label for an available player", async () => {
+      mockBackend({ explorer: explorerWithCandidates([{ ...injuredButLegal, status: "a" }]) });
+
+      renderExplorer();
+
+      const row = (await screen.findByText("Knock")).closest("tr") as HTMLElement;
+      expect(row).not.toHaveTextContent("Available");
+      expect(row).not.toHaveTextContent("Status unknown");
+    });
+
+    it("shows the refresh message for a selectability_unknown Explorer failure", async () => {
+      mockBackend({
+        explorer: {
+          detail: {
+            code: "selectability_unknown",
+            message: "Selectability data is missing for 3 players. Refresh FPL data and try again.",
+            missing_player_ids: [],
+          },
+        },
+        explorerStatus: 422,
+      });
+
+      renderExplorer();
+
+      await waitFor(() => {
+        expect(screen.getByText(/Refresh FPL data and try again/)).toBeInTheDocument();
+      });
+      expect(screen.queryByRole("table")).not.toBeInTheDocument();
     });
   });
 });

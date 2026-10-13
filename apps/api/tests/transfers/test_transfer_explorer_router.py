@@ -50,7 +50,23 @@ def _result() -> TransferExplorerResult:
                 team_gain_by_horizon={1: 0.7, 3: 2.1, 5: 3.5},
                 direct_xpts_difference=0.7,
                 gameweeks_evaluated=3,
-            )
+                is_legal=True,
+                unavailable_reasons=[],
+                status="a",
+            ),
+            RankedTransferCandidate(
+                player_id=203,
+                web_name="Candidate203",
+                team_short_name="C56",
+                price=999.0,
+                resulting_bank=-993.0,
+                team_gain_by_horizon={1: 0.4, 3: 1.2, 5: 2.0},
+                direct_xpts_difference=None,
+                gameweeks_evaluated=3,
+                is_legal=False,
+                unavailable_reasons=["insufficient_bank"],
+                status="i",
+            ),
         ],
         evaluated_gameweek_numbers=[5, 6, 7],
     )
@@ -114,6 +130,49 @@ def test_returns_the_ranked_candidates_and_forwards_the_primary_horizon() -> Non
         assert payload["outgoing"]["player_id"] == 9
         assert payload["candidates"][0]["player_id"] == 202
         assert service.requested == [(9, 3)]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_serialises_legality_reasons_and_advisory_status_for_each_candidate() -> None:
+    app.dependency_overrides[get_transfer_explorer_service] = (
+        lambda: _FakeGetTransferExplorerService(_result())
+    )
+    try:
+        client = TestClient(app)
+        response = client.get("/my-team/transfers/9")
+
+        assert response.status_code == 200
+        legal, illegal = response.json()["candidates"]
+        assert legal["is_legal"] is True
+        assert legal["unavailable_reasons"] == []
+        assert legal["status"] == "a"
+        assert illegal["is_legal"] is False
+        assert illegal["unavailable_reasons"] == ["insufficient_bank"]
+        assert illegal["status"] == "i"
+        # Existing fields keep their types, including the nullable direct xPts difference.
+        assert illegal["direct_xpts_difference"] is None
+        assert illegal["resulting_bank"] == -993.0
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_returns_422_with_structured_detail_when_selectability_is_unknown() -> None:
+    message = "Selectability data is missing for 3 players. Refresh FPL data and try again."
+    failure = TransferExplorerFailure(code="selectability_unknown", message=message)
+    app.dependency_overrides[get_transfer_explorer_service] = (
+        lambda: _FakeGetTransferExplorerService(failure)
+    )
+    try:
+        client = TestClient(app)
+        response = client.get("/my-team/transfers/9")
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == {
+            "code": "selectability_unknown",
+            "message": message,
+            "missing_player_ids": [],
+        }
     finally:
         app.dependency_overrides.clear()
 

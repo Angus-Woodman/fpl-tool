@@ -35,6 +35,8 @@ class TransferPreviewResponse(BaseModel):
     lineup_after: LineupSummaryResponse | None
     captain_changed: bool
     vice_captain_changed: bool
+    # Advisory playing status of the incoming player; never part of `errors` or `is_legal`.
+    player_in_status: str
 
 
 class TransferPreviewUnavailableResponse(BaseModel):

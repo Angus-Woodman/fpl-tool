@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from fpl_engine.rules import RuleViolationError
+from fpl_engine.transfers.candidate_pool import candidate_pool_exclusion
 from fpl_engine.transfers.priced_player import PricedPlayer
 from fpl_engine.transfers.single_transfer import TransferPlayer, evaluate_single_transfer
 
@@ -25,6 +26,10 @@ class RankedReplacement:
     # see gameweeks_evaluated.
     team_gain_by_horizon: Mapping[int, float]
     gameweeks_evaluated: int
+    # False means in the pool and fully comparable, but currently unavailable to apply;
+    # `errors` holds the evaluate_single_transfer legality codes (empty when legal).
+    is_legal: bool
+    errors: tuple[str, ...]
 
 
 def _resolve(profile: PricedPlayer, projected_points: float) -> TransferPlayer:
@@ -47,14 +52,14 @@ def rank_replacement_candidates(
     horizons: Sequence[int],
     primary_horizon: int,
 ) -> list[RankedReplacement]:
-    """Rank legal same-position replacements for one outgoing squad player by
-    their projected team-level gain, summed over each requested horizon.
+    """Rank every in-pool same-position replacement for one outgoing squad player
+    by projected team-level gain, summed over each requested horizon.
 
-    Builds directly on evaluate_single_transfer (Phase 2): legality (same
-    position, club limit, budget) is evaluated once per candidate -- it does
-    not vary by gameweek, since only projected_points does -- and only legal
-    candidates are returned at all ("identify legal replacements" happens
-    here, not as a separate pass the caller must do first).
+    Pool membership comes from candidate_pool_exclusion (position, ownership,
+    selectability). Builds on evaluate_single_transfer: legality (club limit,
+    budget) is evaluated once per candidate -- it does not vary by gameweek,
+    since only projected_points does -- and a candidate that fails it is kept,
+    flagged is_legal=False with its errors, and ranked alongside legal ones.
     """
     squad_by_id = {player.player_id: player for player in squad}
     outgoing = squad_by_id.get(player_out_id)
@@ -68,12 +73,12 @@ def rank_replacement_candidates(
 
     results: list[RankedReplacement] = []
     for candidate in candidates:
-        if candidate.position != outgoing.position or candidate.player_id in squad_by_id:
+        if candidate_pool_exclusion(squad, player_out_id, candidate) is not None:
             continue
 
         per_gameweek_gain: list[float] = []
         resulting_bank = bank
-        is_legal = True
+        errors: tuple[str, ...] = ()
         for gameweek in evaluated_gameweeks:
             points_by_player = gameweek.projected_points_by_player
             evaluation = evaluate_single_transfer(
@@ -85,13 +90,11 @@ def rank_replacement_candidates(
                 player_in=_resolve(candidate, points_by_player.get(candidate.player_id, 0.0)),
                 bank=bank,
             )
-            if not evaluation.is_legal:
-                is_legal = False
-                break
+            errors = evaluation.errors
             per_gameweek_gain.append(evaluation.projected_team_gain)
             resulting_bank = evaluation.resulting_bank
 
-        if not is_legal or not per_gameweek_gain:
+        if not per_gameweek_gain:
             continue
 
         team_gain_by_horizon = {
@@ -106,6 +109,8 @@ def rank_replacement_candidates(
                 resulting_bank=resulting_bank,
                 team_gain_by_horizon=team_gain_by_horizon,
                 gameweeks_evaluated=len(per_gameweek_gain),
+                is_legal=not errors,
+                errors=errors,
             )
         )
 

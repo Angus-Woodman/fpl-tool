@@ -422,3 +422,36 @@ def test_previews_an_unavailable_playing_status_player_when_both_flags_are_true(
     assert not isinstance(result, TransferPreviewFailure)
     assert result is not None
     assert result.is_legal is True
+    assert result.player_in_status == status
+
+
+def test_the_ready_result_carries_the_incoming_players_status() -> None:
+    service = _service(
+        squad=_squad(bank=1.0),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, TransferPreviewFailure)
+    assert result is not None
+    assert result.player_in_status == "a"
+
+
+def test_an_illegal_in_pool_preview_reports_only_legality_errors_never_status() -> None:
+    service = _service(
+        squad=_squad(bank=0.0),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=999.0, status="i")},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, TransferPreviewFailure)
+    assert result is not None
+    assert result.is_legal is False
+    assert result.errors == ("insufficient_bank",)
+    assert result.player_in_status == "i"

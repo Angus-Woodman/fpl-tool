@@ -179,6 +179,11 @@ export type RankedTransferCandidate = {
   team_gain_by_horizon: Record<string, number>;
   direct_xpts_difference: number | null;
   gameweeks_evaluated: number;
+  // false: listed and comparable but currently unavailable to apply.
+  is_legal: boolean;
+  unavailable_reasons: string[];
+  // Advisory playing status code only; never a reason for unavailability.
+  status: string;
 };
 
 export type TransferExplorerResponse = {
@@ -266,6 +271,7 @@ export type TransferPreviewResponse = {
   lineup_after: LineupSummary | null;
   captain_changed: boolean;
   vice_captain_changed: boolean;
+  player_in_status: string;
 };
 
 export type TransferPreviewFetchResult =

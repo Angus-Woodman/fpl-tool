@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
 from api.repositories.current_squad_repository import CurrentSquadPlayerRecord, CurrentSquadRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.player_read_repository import CandidatePlayerRecord
@@ -9,6 +10,7 @@ from api.repositories.projection_run_repository import ProjectionRunRecord
 from api.services.get_transfer_explorer import (
     GetTransferExplorerService,
     TransferExplorerFailure,
+    TransferExplorerResult,
 )
 
 RUN_GENERATED_AT = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.UTC)
@@ -78,6 +80,9 @@ def _candidate(
     *,
     team_id: int,
     price: float = 5.0,
+    status: str = "a",
+    can_select: bool | None = True,
+    can_transact: bool | None = True,
 ) -> CandidatePlayerRecord:
     return CandidatePlayerRecord(
         player_id=player_id,
@@ -86,9 +91,9 @@ def _candidate(
         team_short_name=f"C{team_id}",
         current_price=price,
         position=position,
-        status="a",
-        can_select=True,
-        can_transact=True,
+        status=status,
+        can_select=can_select,
+        can_transact=can_transact,
     )
 
 
@@ -172,11 +177,13 @@ class _FakeProjectionRepository:
     def __init__(self, rows_by_run: dict[int, list[PlayerProjectionFixtureRecord]]) -> None:
         self._rows_by_run = rows_by_run
         self.requested_run_ids: list[int] = []
+        self.requested_player_ids: set[int] = set()
 
     def list_player_fixture_projections_for_run(
         self, player_ids: list[int], run_id: int
     ) -> list[PlayerProjectionFixtureRecord]:
         self.requested_run_ids.append(run_id)
+        self.requested_player_ids.update(player_ids)
         return [row for row in self._rows_by_run.get(run_id, []) if row.player_id in player_ids]
 
 
@@ -190,7 +197,7 @@ class _FakePlayerRepository:
         self._players_by_id = players_by_id or {}
         self.requested_positions: list[str] = []
 
-    def list_available_by_position(self, position: str) -> list[CandidatePlayerRecord]:
+    def list_by_position(self, position: str) -> list[CandidatePlayerRecord]:
         self.requested_positions.append(position)
         return self._candidates
 
@@ -313,7 +320,7 @@ class TestProjectionRunSelection:
 
 
 class TestCandidateFiltering:
-    def test_only_same_position_legal_replacements_are_returned(self) -> None:
+    def test_returns_every_in_pool_candidate_including_illegal_ones(self) -> None:
         service, *_ = _service()
 
         result = service.execute(PLAYER_OUT_ID)
@@ -321,9 +328,9 @@ class TestCandidateFiltering:
         assert not isinstance(result, TransferExplorerFailure)
         assert result is not None
         returned_ids = {candidate.player_id for candidate in result.candidates}
-        # 201 excluded (club limit), 203 excluded (unaffordable), 8 excluded
-        # (already owned), 204 excluded (wrong position).
-        assert returned_ids == {202}
+        # 201 (club limit) and 203 (unaffordable) are in the pool but illegal; 8 (already
+        # owned) and 204 (wrong position) are outside it.
+        assert returned_ids == {201, 202, 203}
 
     def test_requests_candidates_for_the_outgoing_players_position(self) -> None:
         service, _, _, player_repository = _service()
@@ -332,23 +339,46 @@ class TestCandidateFiltering:
 
         assert player_repository.requested_positions == ["MID"]
 
-    def test_excludes_a_candidate_that_would_exceed_the_per_club_limit(self) -> None:
+    def test_a_candidate_that_would_exceed_the_per_club_limit_is_listed_as_unavailable(
+        self,
+    ) -> None:
         service, *_ = _service()
 
         result = service.execute(PLAYER_OUT_ID)
 
         assert not isinstance(result, TransferExplorerFailure)
         assert result is not None
-        assert 201 not in {candidate.player_id for candidate in result.candidates}
+        candidate = next(c for c in result.candidates if c.player_id == 201)
+        assert candidate.is_legal is False
+        assert candidate.unavailable_reasons == ["club_limit_exceeded"]
 
-    def test_excludes_an_unaffordable_candidate(self) -> None:
+    def test_an_unaffordable_candidate_is_listed_with_full_comparison_data(self) -> None:
         service, *_ = _service()
 
         result = service.execute(PLAYER_OUT_ID)
 
         assert not isinstance(result, TransferExplorerFailure)
         assert result is not None
-        assert 203 not in {candidate.player_id for candidate in result.candidates}
+        candidate = next(c for c in result.candidates if c.player_id == 203)
+        assert candidate.is_legal is False
+        assert candidate.unavailable_reasons == ["insufficient_bank"]
+        assert candidate.resulting_bank == 1.0 + 5.0 - 999.0
+        assert set(candidate.team_gain_by_horizon) == {1, 3, 5}
+        assert candidate.gameweeks_evaluated == 3
+        # Unchanged type: a float for a player with projections, never a placeholder.
+        assert candidate.direct_xpts_difference == 2.0 - 3.3
+
+    def test_a_legal_candidate_is_marked_available_with_no_reasons(self) -> None:
+        service, *_ = _service()
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert not isinstance(result, TransferExplorerFailure)
+        assert result is not None
+        candidate = next(c for c in result.candidates if c.player_id == 202)
+        assert candidate.is_legal is True
+        assert candidate.unavailable_reasons == []
+        assert candidate.status == "a"
 
     def test_excludes_an_already_owned_candidate(self) -> None:
         service, *_ = _service()
@@ -398,6 +428,96 @@ class TestAggregationAndReporting:
         assert result.outgoing.current_price == 5.0
         assert result.outgoing.selling_price == 5.0
         assert set(result.outgoing.projected_points_by_horizon) == {1, 3, 5}
+
+
+def _ranked_ids(result: object) -> set[int]:
+    assert isinstance(result, TransferExplorerResult)
+    return {candidate.player_id for candidate in result.candidates}
+
+
+class TestPoolEligibility:
+    def test_selectable_candidates_with_any_playing_status_are_included_with_that_status(
+        self,
+    ) -> None:
+        candidates = [
+            _candidate(202, team_id=55, status="i"),
+            _candidate(203, team_id=56, status="d"),
+            _candidate(204, team_id=57, status="s"),
+        ]
+        rows = _rows_for_gameweek(5, {**_SQUAD_POINTS_GW5, 202: 4.0, 203: 3.0, 204: 2.0})
+        service, *_ = _service(candidates=candidates, rows_by_run={1: rows})
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert isinstance(result, TransferExplorerResult)
+        statuses = {candidate.player_id: candidate.status for candidate in result.candidates}
+        assert statuses == {202: "i", 203: "d", 204: "s"}
+        assert all(candidate.is_legal for candidate in result.candidates)
+
+    @pytest.mark.parametrize(
+        ("can_select", "can_transact"),
+        [(False, False), (False, True), (True, False), (False, None), (None, False)],
+    )
+    def test_known_non_selectable_candidates_are_absent_and_never_trigger_unknown(
+        self, can_select: bool | None, can_transact: bool | None
+    ) -> None:
+        candidates = [
+            _candidate(202, team_id=55),
+            _candidate(
+                205, team_id=58, status="u", can_select=can_select, can_transact=can_transact
+            ),
+        ]
+        rows = _rows_for_gameweek(5, {**_SQUAD_POINTS_GW5, 202: 4.0})
+        service, _, projection_repository, _ = _service(
+            candidates=candidates, rows_by_run={1: rows}
+        )
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert _ranked_ids(result) == {202}
+        assert 205 not in projection_repository.requested_player_ids
+
+    def test_unknown_selectability_fails_before_projections_are_loaded(self) -> None:
+        candidates = [
+            _candidate(202, team_id=55),
+            _candidate(206, team_id=59, can_select=None, can_transact=None),
+            _candidate(207, team_id=60, can_select=True, can_transact=None),
+        ]
+        service, _, projection_repository, _ = _service(candidates=candidates)
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert isinstance(result, TransferExplorerFailure)
+        assert result.code == "selectability_unknown"
+        assert "refresh" in result.message.lower()
+        assert projection_repository.requested_run_ids == []
+
+    def test_structurally_excluded_profiles_with_unknown_flags_do_not_trigger_the_failure(
+        self,
+    ) -> None:
+        candidates = [
+            _candidate(202, team_id=55),
+            _candidate(8, team_id=8, can_select=None, can_transact=None),  # already owned
+            _candidate(204, "DEF", team_id=77, can_select=None, can_transact=None),  # wrong pos
+        ]
+        rows = _rows_for_gameweek(5, {**_SQUAD_POINTS_GW5, 202: 4.0})
+        service, *_ = _service(candidates=candidates, rows_by_run={1: rows})
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert _ranked_ids(result) == {202}
+
+    def test_a_known_false_flag_beside_an_unknown_one_does_not_trigger_the_failure(self) -> None:
+        candidates = [
+            _candidate(202, team_id=55),
+            _candidate(208, team_id=61, can_select=False, can_transact=None),
+        ]
+        rows = _rows_for_gameweek(5, {**_SQUAD_POINTS_GW5, 202: 4.0})
+        service, *_ = _service(candidates=candidates, rows_by_run={1: rows})
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert _ranked_ids(result) == {202}
         assert result.outgoing.projected_points_by_horizon[1] == 3.3
 
     def test_selling_price_is_flagged_as_approximate(self) -> None:

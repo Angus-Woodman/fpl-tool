@@ -331,6 +331,9 @@ def get_transfer_explorer(
                 team_gain_by_horizon=candidate.team_gain_by_horizon,
                 direct_xpts_difference=candidate.direct_xpts_difference,
                 gameweeks_evaluated=candidate.gameweeks_evaluated,
+                is_legal=candidate.is_legal,
+                unavailable_reasons=list(candidate.unavailable_reasons),
+                status=candidate.status,
             )
             for candidate in result.candidates
         ],
@@ -409,6 +412,7 @@ def get_transfer_preview(
         ),
         captain_changed=result.captain_changed,
         vice_captain_changed=result.vice_captain_changed,
+        player_in_status=result.player_in_status,
     )
 
 

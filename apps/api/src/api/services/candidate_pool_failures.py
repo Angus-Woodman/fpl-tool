@@ -46,3 +46,11 @@ def incoming_pool_exclusion(
 
 def pool_exclusion_message(reason: CandidatePoolExclusion, incoming: CandidatePlayerRecord) -> str:
     return _MESSAGES[reason].format(name=incoming.web_name)
+
+
+def selectability_unknown_pool_message(unknown_count: int) -> str:
+    noun = "player" if unknown_count == 1 else "players"
+    return (
+        f"Selectability data has not been imported for {unknown_count} {noun} in this pool. "
+        "Refresh FPL data and try again."
+    )

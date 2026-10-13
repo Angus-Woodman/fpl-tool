@@ -42,10 +42,9 @@ class PlayerQueryResult:
 
 @dataclass(frozen=True)
 class CandidatePlayerRecord:
-    """A transfer-market candidate's static profile. Availability
-    (status == "a") is the only filter applied here -- same-position,
-    already-owned, budget, and club-limit legality are all fpl_engine's
-    responsibility, not this repository's."""
+    """A transfer-market candidate's static profile plus its imported selectability flags
+    (None means unknown). No eligibility filtering happens here: pool membership (position,
+    ownership, selectability), budget and club-limit legality are all fpl_engine's job."""
 
     player_id: int
     web_name: str
@@ -137,7 +136,7 @@ class PlayerReadRepository:
             page_size=query.page_size,
         )
 
-    def list_available_by_position(self, position: str) -> list[CandidatePlayerRecord]:
+    def list_by_position(self, position: str) -> list[CandidatePlayerRecord]:
         rows = self._session.execute(
             select(
                 PlayerModel.id,
@@ -151,7 +150,7 @@ class PlayerReadRepository:
                 PlayerModel.can_transact,
             )
             .join(TeamModel, TeamModel.id == PlayerModel.team_id)
-            .where(PlayerModel.position == position, PlayerModel.status == "a")
+            .where(PlayerModel.position == position)
         ).all()
 
         return [
