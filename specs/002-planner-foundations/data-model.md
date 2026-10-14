@@ -1,0 +1,98 @@
+# Planner Foundations Data Model
+
+Revised after architecture review, 2026-10-14. [spec.md](spec.md) remains fixed. [research.md](research.md) records alternatives and owner-approved legacy/rebase choices; [contracts/planner-api.md](contracts/planner-api.md) defines transport semantics. This is design only.
+
+## One Source Of Progression
+
+**User-authored decisions:** explicit net transfers identified by outgoing player/ownership episode and incoming player; a chip per GW; independent per-GW XI/bench/C/VC choices; starting FT/chip declarations and purchase-price corrections; horizon changes. An empty GW transfer set means no transfer, not a target squad inferred from yesterday's rendering.
+
+**Replay input:** one independent starting boundary, those ordered GW decisions, their frozen price assumptions, and supplied rule metadata. **Replay output:** the full 15-player squad for each GW, ownership/bases/provenance, bank, counts, FT/hits, chip reasons, legal rearrangements, provisional dependencies and validity diagnostics. Outputs never create commands on the next replay.
+
+Existing whole-squad-per-GW presentation is retained, but membership snapshots are output only. Normal writes and GET must never diff old materialized squads to invent decisions. The only snapshot-to-decision conversion is explicit, once-only legacy initialization described below.
+
+`fpl_engine.planning` owns pure typed replay and mutation validation; no FastAPI, SQLAlchemy, external calls or current-price fetch during replay. API code supplies observations only when establishing new/explicitly edited financial inputs. The browser submits intent, not a replacement aggregate.
+
+## Persisted Inputs And Constraints
+
+### Plan And Independent Boundary
+
+Extend `plans` with nonnegative `revision`, `foundation_state` (`legacy_pending`/`ready`), initialization format/version/time, integer `initial_bank_tenths`, nullable `starting_free_transfers` (0..5; N/A at GW1), applicable used-chip declarations and the previous-GW19 FH declaration for a GW20 start. No used chips at GW1 or second-period used chips at GW20. Persist boundary origin (`my_team_capture`, `legacy_first_gameweek_assumed`, `rebased_plan`, `earlier_horizon_assumed`) and any boundary-bank assumption provenance carried by a rebase.
+
+Money uses integer tenths: 50 = GBP 5.0m. Price inputs are positive integers; evaluated bank can be negative. Convert legacy one-decimal floats through checked decimal conversion, never binary-float arithmetic or missing-price zero defaults.
+
+`plan_starting_players` contains exactly 15 entries, unique `(plan_id, player_id)` and `(plan_id, slot_id)`, with stable slot UUID, ownership UUID, purchase basis and provenance. Aggregate cardinality/composition is engine-validated; uniqueness/FKs/basic value constraints are database-enforced. A slot is a stable squad place, not a player, position rule or captaincy rule. It survives a player replacement.
+
+Starting purchase provenance separates original source from `assumed`/`user_confirmed`/`authoritative` confirmation. Currently no authoritative manager purchase source exists: initialize unknown prices from stored latest market as assumed, without blocking confirmation. A rebased planned acquisition retains `basis_kind=planned_acquisition` and its captured source, not a fabricated historical purchase or a new estimated starting purchase. Confirmation is N/A for that scenario acquisition. Preserve carried provisional bank dependencies independently of currently held players.
+
+Persist an initial slot-based lineup seed and a separate slot-based lineup configuration for each GW. Each configuration contains XI/bench priority/C/VC over the 15 slot IDs, not a second player-membership list. Initially copy the seed; an edit affects only its GW. Replacement occupants inherit that GW's slot roles. A rearrangement changes that GW's slot roles and captaincy with My Team semantics; it cannot alter another GW's choices.
+
+### Gameweek Decisions
+
+Use existing `plan_gameweeks` for GW identity/chip; add slot-based lineup storage and `plan_transfer_decisions`. Each transfer record has stable `decision_id`, GW FK, explicit outgoing player/ownership key, incoming player/acquisition ownership key, saved outgoing market assumption, saved incoming acquisition price, observation source/time and assumption origin. Outgoing ownership must exist entering that GW. A same-player basis correction preserves the ownership key; a different acquisition episode does not silently satisfy an old binding.
+
+The GW FK determines plan ownership; avoid independently assignable plan/GW parents. Use plan-scoped unique ownership/slot keys and enforce ownership within aggregate loading/validation. Unique outgoing/incoming players per GW; no same-player out/in, duplicated acquisition, zero-price or same-GW round-trip decisions. All transfers in a GW form an unordered net set evaluated atomically, sorted by stable IDs only for reproducible diagnostics. No within-GW acquisition can become another record's outgoing player.
+
+Persist `selling_price_tenths` as the transaction-price materialization required by FR-035. Its sole formula source is saved market assumption plus replayed cost basis. On affected basis correction update this value atomically with inputs; GET derives the value rather than trusting the stored materialization. Store no independent sale-price override or per-GW financial ownership snapshot.
+
+### What Is Not Persisted As Authority
+
+Do not add accounting/status caches, cache revisions or resolution-origin tables. Derive bank after the starting boundary, FT progression, counts, hits, ownership chains, provisional flags, deficits, earliest failure and affected chains on every replay. Existing float accounting/member snapshot columns/rows are retained only as quarantined legacy data for additive rollout; new engine reads and mutation evaluation never consult them. Do not add new per-GW membership materializations. API whole-squad responses are ephemeral replay output.
+
+### Small Mutation Receipt (`plan_mutations`)
+
+Unique `(plan_id, mutation_id)`, request digest, expected revision, status `validated_pending`/`committed`, evaluator version and rule-metadata fingerprint (excluding live prices). A pending receipt holds only the validated semantic operation, required captured financial inputs and minimal canonical input delta. A committed receipt retains digest/committed revision; quote inputs already live in canonical decision records and need not be duplicated indefinitely.
+
+The pending receipt is private server retry state, not a public prepare phase or historical aggregate. It durably preserves an accepted quote if the subsequent canonical write fails. No old base aggregate or complete candidate snapshot is stored. It can reconstruct a candidate only while its base revision/evaluator/rule metadata remain compatible. Retain IDs/digests and unresolved pending inputs for the plan lifetime; no expiry/cleanup protocol is introduced. Committed receipts can drop duplicate quote payloads. Plan deletion cascades new tables/receipts.
+
+## Deterministic Replay
+
+1. Start with boundary slot occupants, ownership/basis/provenance, bank, FT and declarations. Read GW decisions in ascending GW order. Rule metadata is an explicit input; financial replay does not consult live prices.
+2. For a GW, resolve each outgoing player and ownership key in the entering state. Validate the complete explicit net set, apply replacements to those players' slots and initialize incoming bases from their saved acquisition prices. Derive counts from these validated net changes against the entering squad, including the first GW. Validate final squad and that GW's lineup configuration with existing engine rules.
+3. Ordinary/WC changes advance permanent membership, bank and ownership. WC changes allowance/hits but does not reset retained players' bases. FH evaluates the explicit set on a temporary copy; its playable squad/bank are returned, then permanent membership/bank/ownership are restored before the next GW. FT still progresses across FH.
+4. Derive sales from purchase P and saved market M: M if M <= P, otherwise P + floor((M - P)/2). New/explicitly edited records capture latest known prices once. No other operation refreshes them. Latest market display and observations for newly created sales remain current, including original players restored after FH.
+5. Starting FT means remaining when planning begins. GW1 is unlimited/N/A/hit-free; GW2 has one FT. WC/FH use `min(5, max(N - 1, 0) + 1)`. BB/TC retain ordinary consumption, rollover/cap and hits. Derive chip availability from declarations and explicit planned chips, including GW1 and FH19/20 restrictions.
+6. Return evaluated squads and branch-specific accounting/diagnostics. Never feed rendered membership back into step 2 as a new decision. A structurally blocked transfer stays recorded with its intended identities and a reason; do not substitute a different outgoing player, silently skip it as successful, or invent its bank/counts. Mark dependent evaluation unavailable rather than supplying fictitious valid totals.
+
+### Transition Rules And Concrete Examples
+
+| Edit | Replay effect |
+|------|---------------|
+| Add ordinary A -> B | B replaces A's slot permanently; later GWs with no explicit transfer inherit B. Other GW lineup configurations stay unchanged. |
+| Change A -> B to A -> C, or remove it | Replay from boundary with the changed/deleted decision. B is no longer inherited. A later decision still naming B becomes blocked; it is not retargeted to C/A. Only the explicitly edited record captures new prices. |
+| Enable/disable WC | Preserve the transfer set, bases and saved assumptions. Recompute allowance/hits/chip availability; removing WC can increase a legal hit and does not make acquisitions temporary. |
+| Enable/disable FH | Preserve explicit transfers/quotes but switch their output between temporary and permanent. Reconstruct every following GW from permanent state plus its own decisions, never old output membership. Validate all affected dependencies. |
+| Edit a downstream outgoing player | Explicitly replace/rebind that decision to a currently owned player/episode; capture current prices for that edited record, replay dependent bases and validate the candidate. No automatic repair. |
+
+**Example A:** Boundary contains A. GW8 explicitly has A -> B; GW9 has no transfer. Ordinary replay gives B in both. Change GW8 to FH: B is playable in GW8, A is restored entering GW9 and no GW9 transfer appears. B can return permanently only through an explicit valid GW9-or-later decision introducing B. Removing FH makes the original GW8 acquisition permanent again, with unchanged saved quote inputs.
+
+**Example B:** GW8 A -> B, GW10 B -> C. Propose changing GW8 to A -> D. Replay reaches GW10 with D, not B: return `outgoing_not_owned` for the existing GW10 decision, including expected B/ownership and actual entering squad. Do not generate D -> C, buy B, drop the GW10 decision, or reprice it. Under fixed Q2/FR-027/040 this new structural violation prevents committing the upstream edit alone. Offer an explicit atomic batch: upstream edit plus remove GW10's decision, or upstream edit plus the user's chosen valid replacement (e.g. D -> C). The latter is an explicit transfer edit and uses latest prices; unchanged decisions retain theirs. Candidate diagnostics are an impact/rejection response, not an accepted invalid draft. Legacy unresolved inputs can be diagnosed/repaired without inventing decisions.
+
+## Replay-Derived Financial Invalidity
+
+For each evaluable GW g compute shortfall `S(g) = max(0, -closing_bank_tenths(g))`. Also compute financial dependency edges: permanent bank flows forward, FH temporary bank does not flow into the restored permanent branch. Each negative node marks itself and all financially dependent successors as requiring resolution; a positive descendant does not erase its negative ancestor. Earliest failure is the minimum GW with a negative node; temporary FH failures remain plan issues without infecting restored bank. Reopening recomputes exactly these facts from canonical inputs, with no persisted validity permission/marker.
+
+For ordinary planning edits/repairs, compare previous and candidate replay at each retained GW, **not issue-origin identity**: `S_candidate(g) <= S_previous(g)` everywhere; new GWs have previous shortfall zero. Existing unchanged deficits do not block unrelated legal edits. A partial financial repair reduces at least one affected shortfall, worsens none and introduces no structural violation. Earlier failures may disappear and later failures remain. Deleting a bad future decision resolves its actual effects; moving start later cannot hide an invalid prefix inside a newly certified bank boundary.
+
+Required example in tenths: before GW9=-1, GW10=-3; after GW9=0, GW10=-2. Shortfalls change `(1,3)` to `(0,2)`: accept, derive GW10 as earliest failure and recompute its chain. Do not reject because the earliest GW changed. If any previously valid GW acquires a deficit or an old shortfall increases, reject an ordinary edit. Legal larger points hits alone are not invalid.
+
+Q7 starting purchase-price corrections bypass this financial non-worsening test, not structural/input legality: persist the correction and unchanged decisions even if new/worse deficits appear. Recalculate dependent sales from their saved market assumptions, keep acquisition prices fixed, derive all flags. Example P50 -> P48 with saved M54 and live M56 changes sale52 -> sale51, never to a live-price-based value. Confirmation-only edits change provisional dependencies, not money. A provenance batch contains only purchase corrections/confirmations; reject mixing these with planning mutations. Save corrections first, then validate any transfer/chip/horizon repair against that acknowledged revision. An unrelated new unaffordable transfer must not borrow Q7's exception. Optional correction timestamps/source notes are informational and never determine financial validity.
+
+Structurally blocked legacy decisions have unavailable dependent accounting, not fabricated shortfalls. Allow explicit repairs of existing diagnostics without treating unchanged independent diagnostics as new; do not authorize new unverified transfer edits beyond a blocked dependency. Atomic repair batches can resolve interdependent problems. New normal edits must not create structural blockers, including Example B; Q7 is not a missing-ownership exemption.
+
+## Atomic Mutation And Failure Boundary
+
+One public mutation call applies a field/domain intent (or explicit repair batch) to the expected revision, captures only needed prices, evaluates and attempts persistence. There is no browser-visible prepare/commit handshake. Server-private durable validation and canonical persistence are two bounded transactions: first store a valid pending receipt, then lock/recheck the plan and atomically write canonical decisions, required selling-price materializations, incremented revision and committed receipt. This is not a distributed transaction and must not be described as one atomic transaction spanning both stages.
+
+Acceptance requires a durable valid pending receipt. Failure before that leaves an unaccepted/pending proposal, not falsely accepted/saved work. A known canonical rollback after acceptance leaves the pending receipt and candidate retryable, with no partial canonical change. If database COMMIT itself has an uncertain outcome, return/reconcile `outcome_unknown`; never assert rollback or execute again before checking the same receipt ID. Retry the same ID/digest and captured prices if pending and the base is unchanged. Another revision or incompatible rule context makes the pending receipt stale: report that explicitly, do not reconstruct an old base or silently apply its delta to today's aggregate. Committed IDs are recognized before checking stale expected revision and never execute twice. See the API contract for outcomes/client state.
+
+## Legacy Initialization, Horizon And Rollback
+
+Use additive Alembic schema after the actual current head. Keep original legacy rows/columns untouched during initialization; no per-plan rollback payload is needed. A controlled once-only application backfill runs before new editing is enabled, offline from stored market observations, locking each plan and atomically saving inputs/readiness. GET never initializes or refreshes decisions. Missing prices/unknown players leave explicit retryable initialization diagnostics, not zero prices or partial state.
+
+Use the owner-approved first saved squad as the assumed boundary, old initial bank/FT, no pre-used chips, and an explicitly assumed previous-GW19 FH declaration where needed. Convert each later legacy snapshot's net difference against the current inferred permanent state to explicit decisions once, with deterministic same-position-first/player-ID tie-breaking and `legacy_initialized_estimate` quotes. Map retained players to stable slots; replacement players take paired slots. Copy each saved GW's lineup choices into its slot configuration. FH snapshots do not advance the inferred permanent state. A leading FH's original underlying squad is unrecoverable: the first-squad boundary is explicitly assumed, not historical reconstruction. Preserve all snapshot memberships/chips, including diagnostic invalid inputs; never silently legalize them. Reruns skip initialized plans and never reprice.
+
+**Start later:** evaluate the prefix before trimming. If structurally blocked or financially unresolved, reject rebasing rather than hiding it. Otherwise materialize its permanent exit into the new independent boundary, preserving stable slots, ownership keys, bases and provenance (including bank assumptions); copy needed provenance values, not dangling FKs to deleted acquisition decisions. Keep retained decisions/quotes/lineups unchanged. Derive FT at the new start and carry only used chips in the new start's period; at GW20 use the GW19 FH declaration, not first-period used-chip flags. Discard removed-prefix decisions after this capture.
+
+**Start earlier:** keep the established boundary as hypothetical input, add empty transfer sets and independent seeded lineups for new GWs; retained explicit decisions/quotes stay intact. Validate FT/declarations for the new first period atomically; invent no history. **Extend end:** add empty decisions, using permanent restoration after a final FH. **Trim end:** discard removed decisions and replay retained ones. No snapshot diff creates new movements in any horizon operation.
+
+Upgrade/backfill/downgrade/re-upgrade tests run only on guarded isolated `_test` databases. Before enabling new writes, a downgrade drops additive structures and leaves original legacy rows byte-for-byte/value-for-value unchanged. After new-only edits/plans, an old schema cannot represent the feature: require a normal database backup/export and an explicit conversion/restore procedure; refuse a claimed lossless in-place downgrade. Do not restore old snapshots over later edits or delete post-upgrade plans. No per-plan historical rollback ledger is introduced.

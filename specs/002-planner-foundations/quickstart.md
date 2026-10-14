@@ -1,0 +1,132 @@
+# Planner Foundations Validation Guide
+
+This revised guide describes validation **after implementation**, including architecture-review counterexamples. No proposed code/tests/CLI have been implemented by this documentation revision. No database or browser checks were run. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+
+## Prerequisites And Safety
+
+Use repository-root commands with the mise-pinned toolchain, project-local `.venv`/pnpm workspace dependencies and the existing environment setup in `README.md`. Current versions: Node 22.7.0, Python 3.12.15, uv 0.5.24, pnpm 9.9.0. Existing installed dependencies are sufficient; no new service is planned.
+
+For DB-touching tests, `TEST_DATABASE_URL` must point to the dedicated database whose name ends `_test` (normally `fpl_test`). The existing `ensure_test_database_url` safeguard must run before destructive setup. Never substitute `DATABASE_URL`/development data, weaken the safeguard, or run an Alembic downgrade on the development database. If the test DB is unavailable, use the repository's explicit skip/fail path and report it. Migration round-trip fixtures require an isolated test database/schema and must not collide with concurrently running integration tests.
+
+## Focused Automated Checks
+
+From the repository root, after the corresponding slice/tests exist:
+
+```sh
+mise exec -- uv run --package fpl-engine pytest -q packages/fpl_engine/tests/test_rules.py packages/fpl_engine/tests/test_planning.py
+mise exec -- env PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q apps/api/tests/plans
+mise exec -- pnpm --filter web test:run tests/plans/plan-board.test.tsx tests/team/my-team-board.test.tsx
+```
+
+`test_planning.py` is the proposed new home for focused replay tests; reuse/extend existing modules otherwise. The API suite above uses existing fake boundaries unless explicitly opted into integration; do not mistake it for SQL proof.
+
+With Docker running and the dedicated test URL confirmed:
+
+```sh
+mise exec -- make db-test-up
+mise exec -- make test-integration
+```
+
+`make test-integration` uses `RUN_DB_TESTS=1` and `TEST_DATABASE_URL` through repository tooling. New Planner repository/atomicity/migration cases must join that guarded suite. Upgrade/backfill/downgrade/re-upgrade fixtures must create controlled legacy rows, compare them after rollback and remove only their isolated test resources. Do not replace `make test-integration` with a destructive ad-hoc script on the normal API connection.
+
+## Initialization And Rollout Verification
+
+Provide a proposed `api.scripts.initialize_planner_foundations` entrypoint with `--check` (read-only readiness/diagnostic report) and `--apply` (once-only per-plan transactional initialization), following existing API script/config conventions. These commands do not exist yet. Tests call its service against guarded isolated fixtures; do not run the operator apply procedure on development data merely to test it.
+
+Operational sequence after implementation: take a normal database backup, apply additive schema, run `--check`, explicitly run `--apply`, review its report, then switch the web/API writers together. Pending plans remain explicitly unavailable for editing with retryable diagnostics; there is no legacy write fallback. GET must not initialize them. Before any new application edits, isolated downgrade tests prove old rows untouched without per-plan rollback payloads. After new-only writes, rollback requires explicit backup/export plus conversion/restore; a downgrade must refuse a falsely lossless in-place conversion.
+
+Proposed read-only readiness command, from repository root:
+
+```sh
+cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src mise exec -- uv run --package api python -m api.scripts.initialize_planner_foundations --check
+```
+
+Do not execute this future command during planning. Explicit operator approval/backup is required before using `--apply` against persistent data. Integration fixtures must still use `TEST_DATABASE_URL`/the existing safeguard before initialization or schema setup.
+
+## Expected Domain Scenarios
+
+Use deterministic synthetic player metadata and independent hand-calculated expectations, not the same evaluator as the oracle. Unless a scenario specifies otherwise, select a legal 15-player multi-club squad and legal XI/bench/C/VC.
+
+| Scenario | Expected evidence |
+|----------|-------------------|
+| Starting FT 0..5, default and GW1 | New post-GW1 plan defaults to 1 even when My Team differs. Zero means no transfers remain. GW1 is unlimited/N/A, no pre-used chips; GW2 has exactly 1. |
+| First-GW ordinary transfer | Against independent boundary: one meaningful replacement with starting FT0 yields count1/hit4, then next FT1. WC/FH yields no hit; BB/TC do not waive the hit. |
+| Ordinary chain | Start GW8 FT2; make 1,0,4 transfers in GWs8,9,10: available 2,2,3; GW10 hit4; GW11 FT1. Total hits are correct. |
+| WC/FH rollover | Parameterize available N=0..5 and arbitrary transfer counts: next FT=`min(5,max(N-1,0)+1)`, no hit. WC/FH must never use old `N+1` rule. |
+| BB/TC ordinary | N3 and moves0/1/4 -> next FT4/3/1, hits0/0/4. GW1 still feeds exactly FT1. No 2025/26 top-up. |
+| Chip periods/declarations | Four chip types, once per period, one per GW. Used before and planned elsewhere have distinct reasons. Contradictions reject in both directions with conflicting GW. First-period unused chips lapse. |
+| Boundary restrictions | WC/FH GW1 reject, BB/TC GW1 accept. FH19 plus FH20 rejects in either order; previous-GW19 declaration rejects FH20. Other same-type chips19/20 accept. GW20 has no used second-period declarations. |
+| Sales | Purchase50 with market48/50/51/52/53/54 -> sale48/50/50/51/51/52. Check integer output and bank, not rounded float coincidence. |
+| Save then refresh | Create decision, change stored latest market, GET/reload/lineup save: old assumptions/acquisition/sale/bank unchanged. Explicit edit captures latest only for that decision. |
+| Provenance correction | Purchase50, saved market54, sale52; correct purchase48 while live market56 -> sale51. Incoming acquisition and saved market54 unchanged; bank decreases1. Confirmation-only changes no money and clears only relevant provisional dependency. |
+| Accepted shortfall | Correct basis, preserve decisions/assumptions, derive earliest negative bank/amount/chain on replay and reopen. Later positive bank alone does not erase an earlier negative node. No persisted resolution markers. |
+| Earliest failure moves | Before GW9=-1/GW10=-3; repair to GW9=0/GW10=-2. Accept because every shortfall improves; derive GW10 as earliest. Compare per-GW deficits, not issue IDs. Unrelated legal edits retain unchanged old deficits; new/worse shortfall rejects outside Q7. |
+| Upstream acquisition edit | New acquisition basis changes dependent later sale using that sale's saved market, never its incoming price. If the explicit edit creates insolvency, reject atomically under Q2 rather than Q7. |
+| WC permanence/FH reversion | Start/last FH; FH before/after WC; retained WC player keeps basis; acquired WC player gains permanent basis. FH restores permanent squad/bank/provenance, including corrected/assumed basis and genuine latest-market display. |
+| FH deficit branch | Correction affects temporary FH sales and later permanent sales using each saved assumption. Temporary deficit stays a plan issue; it does not contaminate restored permanent bank. Permanent-origin issues remain dependent through FH. |
+| Sell and buy back | Across different GWs: new acquisition basis/ownership identity and correct count. Same-GW round trips are not a transaction-history feature. |
+| Explicit progression / Example A | GW8 ordinary A->B and no GW9 decision yields B in GW9. Enable FH8: restore A in GW9, zero GW9 transfers; no inferred A->B. Disable FH: B permanent again, quotes unchanged. Materialized old GW9 membership must not affect replay. |
+| Missing outgoing / Example B | GW8 A->B, GW10 B->C. Propose A->D in GW8: GW10 reports `outgoing_not_owned`, never becomes D->C automatically. Q2 rejects this new blocked candidate alone. Explicit atomic batch removes or user-replaces GW10 decision; validate all and save once. Test removal/edit of earlier acquisition and outgoing ownership mismatch too. |
+| Horizon changes | Start-later rebase carries permanent bank/ownership/FT and chip declarations, handles FH19->new start20. Extension after last FH uses permanent state. No unresolved prefix issue erased. Earlier start preserves retained decisions, validates new-period declarations and fabricates no historical data. |
+| Per-GW lineup isolation | XI/bench/C/VC edits stay local; propagated replacement inherits only outgoing slot/role. Same legal targets and captaincy outcome on My Team/Planner. GK never reorders into outfield bench priority. Direct invalid requests reject. |
+
+## Persistence, Migration And Concurrency Proof
+
+API service/router tests cover one typed mutation path, retired-writer responses and a single engine source for replay/accounting. Add real PostgreSQL tests for:
+
+- Slot/decision/receipt uniqueness and plan ownership, exactly 15 boundary/lineup slots, and coherent revision/child reads. Inject failure during canonical input/selling-price/receipt writes and prove complete canonical rollback.
+- One POST automatically evaluates and saves; no public prepare/commit routes. Fail before durable receipt: pending/unaccepted proposal. Fail after valid pending receipt: accepted-not-saved candidate/quotes survive. Retry same ID after live refresh resumes captured inputs; no extra committed revision.
+- Commit succeeds before response/enrichment loss: same ID returns `already_committed`, not a repeat write. Simulate an uncertain database COMMIT outcome and require `outcome_unknown`/same-ID reconciliation, not an assumed rollback. Advance aggregate revision and retry again: return original committed revision plus current plan, not the old candidate.
+- Pending receipt becomes stale after revision/rule-context change: `stale_reprepare_required`; no historical base/candidate reconstruction or silent re-quote. Same ID/different digest rejects. Exercise concurrent duplicate receipt creation and 404 lookup while an original request is still running.
+- Old PUT/PATCH return 410 and cannot change either canonical or quarantined data. Stale expected revision and competing mutations cannot overwrite newer state; no automatic cross-tab merge is claimed.
+- Corrected inputs survive reopen and reproduce financial flags from replay alone; no resolution/cached-status rows. Reject a batch mixing Q7 corrections with unrelated planning mutations, so a new unaffordable transfer cannot borrow the correction exception. Confirm GET is read-only and market refresh leaves saved assumptions/bank unchanged.
+- Legacy plan with ordinary first GW, leading FH, period crossing, incorrect old WC/FH cache, and an old illegal chip/squad. Preserve original rows/decisions and expose estimates/repair issues. No current-My-Team substitution or external FPL call.
+- Once-only snapshot-to-decision conversion and rerun/refresh idempotence; missing prices leave original rows/pending status intact. Verify isolated upgrade/backfill/downgrade/re-upgrade preserves original rows/values without rollback copies, never deletes new plans, and refuses unsafe reversal after new-only edits.
+
+Component tests use stateful realistic fixtures and deferred promises, not static save responses. Queue captain C then vice D before the first response: dispatch the vice-only envelope at the acknowledged new revision and retain C. Assert no complete lineup payload is queued; test a removed target requiring reselection. Cover navigation, rapid edits, late responses, unaccepted failure vs accepted-not-saved, identical retry after ambiguous success, explicit stale reconciliation, retained Q7 context, rejection preserving earlier unsaved work, departure protection and no Save Gameweek control.
+
+## Browser Setup And Journeys
+
+Follow `.github/skills/ui-browser-verification/SKILL.md`. Do not start servers or mutate development state merely to validate this planning document. For implementation browser verification, run existing services in separate terminals; choose unused ports and document any CORS/test-origin adjustment rather than replacing another process. API runs from `apps/api` so its relative environment file resolves correctly.
+
+```sh
+mise exec -- make db-up
+mise exec -- make backend-dev
+```
+
+In another terminal:
+
+```sh
+mise exec -- make frontend-dev
+```
+
+Default URLs: frontend `http://localhost:3000`, API `http://127.0.0.1:8000`. Existing Playwright expects frontend `http://127.0.0.1:3000`; use its configured API origin. Do not use the normal development API for synthetic destructive setup. Durable Planner tests should use deterministic stateful intercepted API fixtures for error/timing/price edge cases, paired with actual API/PostgreSQL tests above for true persistence/atomicity proof. A mocked browser response alone does not prove backend saving.
+
+After adding the proposed journey file:
+
+```sh
+mise exec -- pnpm --filter web e2e tests/e2e/planner-foundations.spec.ts
+```
+
+Protect important journeys with durable Playwright tests:
+
+1. Create a plan/start at GW12, set FT3 and used WC; confirm period-boundary chip reasons, lightweight nonblocking price estimates and first-GW transfer accounting. Reload after acknowledgement.
+2. Change captain C, delay response, choose vice D and switch GW immediately. Verify requests contain field intents/rebased revisions, C is not reset, per-GW choices remain independent and reload retains final acknowledged state. No save action.
+3. Inspect a saved transfer's basis/live/saved prices, simulate refresh, verify bank stability; explicitly edit and observe a new quote. Correct provenance to expose a shortfall, verify earliest issue/amount/chain and saved status, reload, repair and verify cleared flags.
+4. Exercise leading/last FH/WC and Examples A/B. A chip toggle never turns inherited output into a new transfer; a missing outgoing decision names its intended player and is repaired only by explicit remove/replacement in an atomic batch.
+5. Inject canonical-write failure after private receipt acceptance: accepted edit stays visible/not saved across GW selection, identical retry preserves quotes. Test lost successful response/current-revision lookup, stale pending conflict and domain rejection separately. Prior accepted edits/Q7 context survive; departure is guarded and no Save Gameweek control exists.
+6. Use direct rearrangement from starter and bench, cancel/replace selection, reorder outfield priorities, reject GK/outfield reorder, inherit C/VC and verify My Team parity with the same squad.
+7. Open a legacy assumed plan and start-later rebase; verify no fabricated history, dangling deleted acquisition source, old-period chip declaration or lost bank/provenance assumption. Reopen the repaired `(-1,-3)->(0,-2)` case and verify derived GW10 earliest failure without persisted flags.
+
+Inspect actual rendered desktop and narrow mobile viewports (e.g. 1440x900 and 390x844): starting panel, chip states, price inspection, saved/provisional/resolution separation, selection/target/confirmation, long player names, loading/empty/invalid/error/pending states. Capture screenshots; inspect no clipping/overlap, focus/keyboard/announcements and usable tap targets. Record browser/console failures and any local Playwright platform workaround without committing unrelated tracked configuration changes. No 3D/canvas assets are involved.
+
+## Completion Gates
+
+```sh
+mise exec -- make lint
+mise exec -- make typecheck
+mise exec -- make test
+mise exec -- pnpm --filter web build
+```
+
+Also run the guarded SQL/migration and Playwright checks above. Use `.github/skills/code-review/SKILL.md` for independent read-only implementation review, resolve relevant findings, and inspect the final full diff for unintended source/dependency/metadata changes. Report files changed, decisions/trade-offs, SC-001 to SC-009 evidence, actual checks/browser results and anything skipped/unverified. Do not treat an agent's statement, a component-only test, or this plan as runtime verification.
