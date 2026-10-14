@@ -48,12 +48,14 @@ def free_transfers_after(
     """Free transfers carried into the next gameweek, capped at five.
 
     Accumulation only begins after gameweek 1, so gameweek 2 always starts with
-    exactly one. Wildcard and free hit gameweeks leave banked transfers untouched.
+    exactly one. Wildcard/free hit consume the transfer arising for their GW.
     """
     if gameweek_number == FIRST_GAMEWEEK:
         return FREE_TRANSFERS_PER_GAMEWEEK
 
     remaining = (
-        available if chip in UNLIMITED_TRANSFER_CHIPS else max(0, available - transfers_made)
+        max(0, available - 1)
+        if chip in UNLIMITED_TRANSFER_CHIPS
+        else max(0, available - transfers_made)
     )
     return min(MAX_BANKED_FREE_TRANSFERS, remaining + FREE_TRANSFERS_PER_GAMEWEEK)

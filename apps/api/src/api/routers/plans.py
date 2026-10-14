@@ -2,34 +2,43 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Annotated, TypeVar
+from uuid import UUID
 
 from api.db.session import get_db_session
 from api.repositories.current_squad_repository import CurrentSquadRepository
 from api.repositories.my_team_projection_repository import MyTeamProjectionRepository
-from api.repositories.plan_repository import PlanNotFoundError, PlanRecord, PlanRepository
+from api.repositories.plan_repository import (
+    PlanNotFoundError,
+    PlanNotReadyError,
+    PlanRecord,
+    PlanRepository,
+)
 from api.repositories.squad_player_lookup_repository import SquadPlayerLookupRepository
 from api.schemas.plans import (
     CreatePlanRequestBody,
     PlanListResponse,
+    PlanMutationRequestBody,
+    PlanMutationResponse,
+    PlannerErrorResponse,
     PlanResponse,
     PlanSummaryResponse,
-    SavePlanGameweekRequestBody,
-    UpdatePlanRequestBody,
 )
 from api.services.get_plan_view import GetPlanViewService
-from api.services.plan_accounting import PlanPlayerSelection
 from api.services.plans import (
     CreatePlanRequest,
     CreatePlanService,
     DeletePlanService,
     GetPlanService,
     ListPlansService,
-    SavePlanGameweekRequest,
+    PlanMutationService,
+    PlannerMutationError,
+    PlannerMutationOutcome,
     SavePlanGameweekService,
-    UpdatePlanRequest,
     UpdatePlanService,
 )
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.encoders import jsonable_encoder
+from fpl_engine.planning.mutations import MutationRejectedError
 from fpl_engine.rules import RuleViolationError
 from sqlalchemy.orm import Session
 
@@ -42,6 +51,12 @@ def get_plan_repository(
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> PlanRepository:
     return PlanRepository(db_session)
+
+
+def get_plan_mutation_service(
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> PlanMutationService:
+    return PlanMutationService(db_session, SquadPlayerLookupRepository(db_session))
 
 
 def get_plan_view_service(
@@ -129,26 +144,113 @@ def create_plan(
     return _to_response(plan, view_service)
 
 
+@router.post("/{plan_id}/mutations", response_model=PlanMutationResponse)
+def mutate_plan(
+    plan_id: int,
+    body: PlanMutationRequestBody,
+    service: Annotated[PlanMutationService, Depends(get_plan_mutation_service)],
+    repository: Annotated[PlanRepository, Depends(get_plan_repository)],
+    view_service: Annotated[GetPlanViewService, Depends(get_plan_view_service)],
+) -> PlanMutationResponse:
+    return _mutation_call(
+        plan_id, body.mutation_id, lambda: service.mutate(plan_id, body), repository, view_service
+    )
+
+
+@router.get("/{plan_id}/mutations/{mutation_id}", response_model=PlanMutationResponse)
+def get_plan_mutation(
+    plan_id: int,
+    mutation_id: UUID,
+    service: Annotated[PlanMutationService, Depends(get_plan_mutation_service)],
+    repository: Annotated[PlanRepository, Depends(get_plan_repository)],
+    view_service: Annotated[GetPlanViewService, Depends(get_plan_view_service)],
+) -> PlanMutationResponse:
+    return _mutation_call(
+        plan_id, mutation_id, lambda: service.lookup(plan_id, mutation_id), repository, view_service
+    )
+
+
+def _mutation_call(
+    plan_id: int,
+    mutation_id: UUID,
+    action: Callable[[], PlannerMutationOutcome],
+    repository: PlanRepository,
+    view_service: GetPlanViewService,
+) -> PlanMutationResponse:
+    def view(canonical: object) -> PlanResponse | None:
+        from fpl_engine.planning.models import Plan
+
+        if not isinstance(canonical, Plan):
+            return None
+        record = repository.get_for_view(plan_id, canonical=canonical)
+        return _to_response(record, view_service) if record is not None else None
+
+    try:
+        outcome = action()
+    except PlannerMutationError as error:
+        detail = PlannerErrorResponse(
+            code=error.code,
+            message=error.message,
+            mutation_id=mutation_id,
+            plan=view(error.plan),
+            candidate=view(error.candidate),
+            intent_metadata=error.intent_metadata,
+        )
+        raise HTTPException(error.status_code, detail=jsonable_encoder(detail)) from error
+    except PlanNotFoundError as error:
+        raise HTTPException(
+            404, detail={"code": "plan_not_found", "message": "Plan not found"}
+        ) from error
+    except PlanNotReadyError as error:
+        raise HTTPException(
+            409, detail={"code": "plan_not_ready", "message": str(error)}
+        ) from error
+    except MutationRejectedError as error:
+        detail = PlannerErrorResponse(
+            code=error.code,
+            message=error.message,
+            mutation_id=mutation_id,
+            diagnostics=list(error.diagnostics),
+        )
+        raise HTTPException(422, detail=jsonable_encoder(detail)) from error
+    except RuleViolationError as error:
+        raise HTTPException(422, detail={"code": error.code, "message": error.message}) from error
+    except ValueError as error:
+        raise HTTPException(422, detail={"code": "invalid_input", "message": str(error)}) from error
+    try:
+        plan = view(outcome.plan)
+        if plan is None:
+            raise PlanNotFoundError(plan_id)
+        return PlanMutationResponse(
+            status=outcome.status,
+            mutation_id=outcome.mutation_id,
+            committed_revision=outcome.committed_revision,
+            plan=plan,
+            candidate=view(outcome.candidate),
+        )
+    except Exception as error:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "outcome_unknown",
+                "mutation_id": str(mutation_id),
+                "message": "Response unavailable; reconcile the same mutation ID",
+            },
+        ) from error
+
+
 @router.patch("/{plan_id}", response_model=PlanResponse)
 def update_plan(
     plan_id: int,
-    body: UpdatePlanRequestBody,
-    db_session: Annotated[Session, Depends(get_db_session)],
-    service: Annotated[UpdatePlanService, Depends(get_update_plan_service)],
-    view_service: Annotated[GetPlanViewService, Depends(get_plan_view_service)],
 ) -> PlanResponse:
-    plan = _commit(
-        db_session,
-        lambda: service.execute(
-            plan_id,
-            UpdatePlanRequest(
-                name=body.name,
-                start_gameweek=body.start_gameweek,
-                end_gameweek=body.end_gameweek,
-            ),
-        ),
+    raise HTTPException(
+        410,
+        detail={
+            "code": "planner_writer_retired",
+            "message": "Reload the updated Planner",
+            "mutation_url": f"/plans/{plan_id}/mutations",
+        },
     )
-    return _to_response(plan, view_service)
 
 
 @router.delete("/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -165,32 +267,15 @@ def delete_plan(
 def save_plan_gameweek(
     plan_id: int,
     gameweek_number: int,
-    body: SavePlanGameweekRequestBody,
-    db_session: Annotated[Session, Depends(get_db_session)],
-    service: Annotated[SavePlanGameweekService, Depends(get_save_plan_gameweek_service)],
-    view_service: Annotated[GetPlanViewService, Depends(get_plan_view_service)],
 ) -> PlanResponse:
-    plan = _commit(
-        db_session,
-        lambda: service.execute(
-            SavePlanGameweekRequest(
-                plan_id=plan_id,
-                gameweek_number=gameweek_number,
-                chip=body.chip,
-                players=[
-                    PlanPlayerSelection(
-                        player_id=player.player_id,
-                        is_starting=player.is_starting,
-                        bench_order=player.bench_order,
-                        is_captain=player.is_captain,
-                        is_vice_captain=player.is_vice_captain,
-                    )
-                    for player in body.players
-                ],
-            )
-        ),
+    raise HTTPException(
+        410,
+        detail={
+            "code": "planner_writer_retired",
+            "message": "Reload the updated Planner",
+            "mutation_url": f"/plans/{plan_id}/mutations",
+        },
     )
-    return _to_response(plan, view_service)
 
 
 def _commit(db_session: Session, action: Callable[[], T]) -> T:

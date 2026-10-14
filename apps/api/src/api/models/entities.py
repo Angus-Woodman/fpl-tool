@@ -1,8 +1,10 @@
 import datetime as dt
 from enum import Enum
+from uuid import UUID
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -10,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    Uuid,
 )
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.dialects.postgresql import JSONB
@@ -253,6 +256,13 @@ class PlanChip(str, Enum):
 
 class PlanModel(Base):
     __tablename__ = "plans"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="ck_plan_revision"),
+        CheckConstraint(
+            "foundation_state IN ('legacy_pending', 'ready')", name="ck_plan_foundation"
+        ),
+        CheckConstraint("starting_free_transfers BETWEEN 0 AND 5", name="ck_plan_starting_ft"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -260,6 +270,21 @@ class PlanModel(Base):
     end_gameweek: Mapped[int] = mapped_column(Integer, nullable=False)
     initial_bank: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     initial_free_transfers: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    foundation_state: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="legacy_pending"
+    )
+    initialization_version: Mapped[int | None] = mapped_column(Integer)
+    initialized_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    initial_bank_tenths: Mapped[int | None] = mapped_column(Integer)
+    starting_free_transfers: Mapped[int | None] = mapped_column(Integer)
+    boundary_origin: Mapped[str | None] = mapped_column(String(40))
+    boundary_lineup: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB)
+    used_chips: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    free_hit_gameweek_19: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    bank_assumptions: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -283,6 +308,8 @@ class PlanGameweekModel(Base):
     )
     gameweek_number: Mapped[int] = mapped_column(Integer, nullable=False)
     chip: Mapped[PlanChip | None] = mapped_column(SqlEnum(PlanChip))
+    planned_chip: Mapped[str | None] = mapped_column(String(20))
+    slot_lineup: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB)
     bank: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     free_transfers_available: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     transfers_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -306,3 +333,87 @@ class PlanGameweekPlayerModel(Base):
     bench_order: Mapped[int | None] = mapped_column(Integer)
     is_captain: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_vice_captain: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class PlanStartingPlayerModel(Base):
+    __tablename__ = "plan_starting_players"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "player_id", name="uq_plan_starting_player"),
+        UniqueConstraint("plan_id", "slot_id", name="uq_plan_starting_slot"),
+        UniqueConstraint("plan_id", "ownership_id", name="uq_plan_starting_ownership"),
+        CheckConstraint("purchase_price_tenths > 0", name="ck_starting_purchase_price"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id", ondelete="CASCADE"), index=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    slot_id: Mapped[UUID] = mapped_column(Uuid)
+    ownership_id: Mapped[UUID] = mapped_column(Uuid)
+    purchase_price_tenths: Mapped[int] = mapped_column(Integer)
+    provenance: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class PlanTransferDecisionModel(Base):
+    __tablename__ = "plan_transfer_decisions"
+    __table_args__ = (
+        UniqueConstraint("plan_gameweek_id", "decision_id", name="uq_plan_transfer_decision"),
+        UniqueConstraint(
+            "plan_gameweek_id", "outgoing_player_id", name="uq_plan_transfer_outgoing"
+        ),
+        UniqueConstraint(
+            "plan_gameweek_id", "incoming_player_id", name="uq_plan_transfer_incoming"
+        ),
+        UniqueConstraint(
+            "plan_gameweek_id", "incoming_ownership_id", name="uq_plan_transfer_ownership"
+        ),
+        CheckConstraint(
+            "outgoing_market_tenths > 0 AND incoming_price_tenths > 0 AND selling_price_tenths > 0",
+            name="ck_transfer_prices",
+        ),
+        CheckConstraint("outgoing_player_id <> incoming_player_id", name="ck_transfer_players"),
+        CheckConstraint(
+            "outgoing_ownership_id <> incoming_ownership_id", name="ck_transfer_ownership"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_gameweek_id: Mapped[int] = mapped_column(
+        ForeignKey("plan_gameweeks.id", ondelete="CASCADE"), index=True
+    )
+    decision_id: Mapped[UUID] = mapped_column(Uuid)
+    outgoing_player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    outgoing_ownership_id: Mapped[UUID] = mapped_column(Uuid)
+    incoming_player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    incoming_ownership_id: Mapped[UUID] = mapped_column(Uuid)
+    outgoing_market_tenths: Mapped[int] = mapped_column(Integer)
+    incoming_price_tenths: Mapped[int] = mapped_column(Integer)
+    selling_price_tenths: Mapped[int] = mapped_column(Integer)
+    observation_source: Mapped[str] = mapped_column(String(200))
+    observed_at: Mapped[str] = mapped_column(String(50))
+    origin: Mapped[str] = mapped_column(String(40))
+
+
+class PlanMutationModel(Base):
+    __tablename__ = "plan_mutations"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "mutation_id", name="uq_plan_mutation"),
+        CheckConstraint("expected_revision >= 0", name="ck_mutation_expected_revision"),
+        CheckConstraint(
+            "(status = 'validated_pending' AND pending_inputs IS NOT NULL "
+            "AND committed_revision IS NULL) OR (status = 'committed' "
+            "AND pending_inputs IS NULL AND committed_revision IS NOT NULL "
+            "AND committed_revision >= 1)",
+            name="ck_mutation_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id", ondelete="CASCADE"), index=True)
+    mutation_id: Mapped[UUID] = mapped_column(Uuid)
+    digest: Mapped[str] = mapped_column(String(64))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20))
+    evaluator_version: Mapped[str] = mapped_column(String(50))
+    rule_fingerprint: Mapped[str] = mapped_column(String(64))
+    pending_inputs: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    committed_revision: Mapped[int | None] = mapped_column(Integer)

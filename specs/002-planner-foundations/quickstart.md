@@ -1,6 +1,6 @@
 # Planner Foundations Validation Guide
 
-This revised guide describes validation **after implementation**, including architecture-review counterexamples. No proposed code/tests/CLI have been implemented by this documentation revision. No database or browser checks were run. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+This guide retains the full feature's validation scenarios below. The first approved increment, T001-T037 (shared foundations and US1 Starting State), is implemented and verified as recorded here. US2 and later stories are not implemented or certified by this increment. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
 
 ## Prerequisites And Safety
 
@@ -10,6 +10,18 @@ For DB-touching tests, `TEST_DATABASE_URL` must point to the dedicated database 
 
 ## Focused Automated Checks
 
+### Increment 1 Preflight (2026-10-14)
+
+Implementation scope is T001-T037 only (shared foundations and US1). Both
+requirements-quality checklists passed before implementation (16/16 and 35/35).
+`mise current` confirmed Node 22.7.0, Python 3.12.15, uv 0.5.24 and pnpm 9.9.0.
+Run Alembic head inspection from `apps/api`; using `-c apps/api/alembic.ini`
+from the repository root does not resolve the relative script directory:
+
+```sh
+cd apps/api && mise exec -- uv run --package api alembic heads
+```
+
 From the repository root, after the corresponding slice/tests exist:
 
 ```sh
@@ -18,7 +30,7 @@ mise exec -- env PYTHONPATH=packages/fpl_engine/src uv run --package api pytest 
 mise exec -- pnpm --filter web test:run tests/plans/plan-board.test.tsx tests/team/my-team-board.test.tsx
 ```
 
-`test_planning.py` is the proposed new home for focused replay tests; reuse/extend existing modules otherwise. The API suite above uses existing fake boundaries unless explicitly opted into integration; do not mistake it for SQL proof.
+`test_planning.py` contains the focused replay tests. Ordinary API runs skip DB-gated cases; do not mistake fake-boundary or skipped results for SQL proof.
 
 With Docker running and the dedicated test URL confirmed:
 
@@ -31,17 +43,17 @@ mise exec -- make test-integration
 
 ## Initialization And Rollout Verification
 
-Provide a proposed `api.scripts.initialize_planner_foundations` entrypoint with `--check` (read-only readiness/diagnostic report) and `--apply` (once-only per-plan transactional initialization), following existing API script/config conventions. These commands do not exist yet. Tests call its service against guarded isolated fixtures; do not run the operator apply procedure on development data merely to test it.
+The implemented `api.scripts.initialize_planner_foundations` entrypoint provides `--check` (read-only readiness/diagnostic report) and `--apply` (once-only per-plan transactional initialization). Tests call its service against guarded isolated fixtures; do not run the operator apply procedure on development data merely to test it.
 
 Operational sequence after implementation: take a normal database backup, apply additive schema, run `--check`, explicitly run `--apply`, review its report, then switch the web/API writers together. Pending plans remain explicitly unavailable for editing with retryable diagnostics; there is no legacy write fallback. GET must not initialize them. Before any new application edits, isolated downgrade tests prove old rows untouched without per-plan rollback payloads. After new-only writes, rollback requires explicit backup/export plus conversion/restore; a downgrade must refuse a falsely lossless in-place conversion.
 
-Proposed read-only readiness command, from repository root:
+Read-only readiness command, after an operator applies the additive schema:
 
 ```sh
 cd apps/api && PYTHONPATH=src:../../packages/fpl_engine/src mise exec -- uv run --package api python -m api.scripts.initialize_planner_foundations --check
 ```
 
-Do not execute this future command during planning. Explicit operator approval/backup is required before using `--apply` against persistent data. Integration fixtures must still use `TEST_DATABASE_URL`/the existing safeguard before initialization or schema setup.
+Explicit operator approval/backup is required before using `--apply` against persistent data. Integration fixtures must still use `TEST_DATABASE_URL`/the existing safeguard before initialization or schema setup. Initialization readiness does not certify legacy legality: independent diagnostics remain visible and repairable.
 
 ## Expected Domain Scenarios
 
@@ -105,7 +117,7 @@ mise exec -- make frontend-dev
 
 Default URLs: frontend `http://localhost:3000`, API `http://127.0.0.1:8000`. Existing Playwright expects frontend `http://127.0.0.1:3000`; use its configured API origin. Do not use the normal development API for synthetic destructive setup. Durable Planner tests should use deterministic stateful intercepted API fixtures for error/timing/price edge cases, paired with actual API/PostgreSQL tests above for true persistence/atomicity proof. A mocked browser response alone does not prove backend saving.
 
-After adding the proposed journey file:
+Run the implemented first-increment journey file:
 
 ```sh
 mise exec -- pnpm --filter web e2e tests/e2e/planner-foundations.spec.ts
@@ -133,3 +145,100 @@ mise exec -- pnpm --filter web build
 ```
 
 Also run the guarded SQL/migration and Playwright checks above. Use `.github/skills/code-review/SKILL.md` for independent read-only implementation review, resolve relevant findings, and inspect the final full diff for unintended source/dependency/metadata changes. Report files changed, decisions/trade-offs, SC-001 to SC-009 evidence, actual checks/browser results and anything skipped/unverified. Do not treat an agent's statement, a component-only test, or this plan as runtime verification.
+
+## Increment 1 Evidence (2026-10-14)
+
+Scope: shared prerequisites and US1 only. No US2 task was started. The older
+scenario/journey lists are acceptance references for the whole feature, not a
+claim that later story UX is finished.
+
+### Executed Checks
+
+- `mise exec -- make lint`: passed, including Ruff and Next.js ESLint.
+- `mise exec -- make typecheck`: passed (34 engine and 78 API source files,
+	plus strict TypeScript). The final browser fixture also passed TypeScript.
+- `mise exec -- make test`: passed; the full engine and ordinary API suites,
+	and 105 web tests. Ordinary API DB cases explicitly skip without opt-in.
+- `mise exec -- pnpm --filter web build`: passed, including static generation.
+- Focused guarded SQL/API gate: 106 cases passed, including actual receipt
+	races, rollback/uncertain-commit faults, retired-writer zero-write proof,
+	initializer cases and four isolated migration round trips/refusals.
+- Focused client gate: 22 board/coordinator/list cases passed.
+- Safe initializer `--help`: passed; neither operator mode was run against
+	development data.
+
+The focused SQL command from the repository root was:
+
+```sh
+mise exec -- env RUN_DB_TESTS=1 \
+	TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@localhost:5432/fpl_test \
+	PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q \
+	apps/api/tests/plans apps/api/tests/repositories/test_plan_repository.py \
+	apps/api/tests/db/test_planner_foundations_migrations.py
+```
+
+The existing guard verified `fpl_test`; new Planner fixtures create/drop only
+their UUID-named isolated schemas. No development schema, data, migration or
+backfill was changed. Original Alembic head: `3e8b5d1a9c47`; additive revision:
+`c6f91a2d83b0`. There are no dependency, lockfile or toolchain changes.
+
+### Browser Evidence
+
+The durable `planner-foundations.spec.ts` suite passed all eight cases against
+both the development server and the production build at port 3100. It covers
+journey 1 and the US1 portion of journey 7 at desktop 1440x900/mobile 390x844,
+plus GW1/20/25, FT0, loading and read-only legacy readiness.
+
+Observed: automatic FT/declaration/correction/confirmation persistence and
+reload; 15 nonblocking estimates; used-before/planned-elsewhere/named conflict
+reasons; period reset; FH19 restriction; rebased acquisition provenance and
+frozen boundary bank; retained acquisition edited by decision ID, not a new
+round trip; zero PUT/PATCH and no Save Gameweek control. Desktop/mobile
+screenshots under ignored `apps/web/test-results/` were inspected; the tested
+layouts have no document overflow. The primary navigation retains its existing
+horizontal mobile scrolling. Production screenshots have no dev overlay.
+
+Browser API responses are deterministic stateful fixtures, not proof of SQL
+persistence or FPL arithmetic. The matching creation/rebase/reopen/quote and
+transaction cases run through the actual application/repository on PostgreSQL.
+The created-plan browser cases reported no uncaught page errors.
+
+This host reports mac13, for which the installed Playwright version has no
+headless-shell download. A command-local fallback worked; no tracked browser
+configuration was changed:
+
+```sh
+mise exec -- env PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=mac14 \
+	pnpm --filter web exec playwright install chromium --only-shell
+mise exec -- env PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=mac14 \
+	PLANNER_BASE_URL=http://127.0.0.1:3100 pnpm --filter web e2e \
+	tests/e2e/planner-foundations.spec.ts --workers=1 --reporter=line
+```
+
+### Acceptance And Limits
+
+- SC-001: domain boundary matrix, guarded independent creation/default FT1,
+	component modes and browser creation/reload pass. Contradictory declarations
+	name the planned GW and preserve the accepted decision.
+- Relevant SC-005: integer sale steps and SQL P50/M54/live56/correct48 -> sale51
+	pass, preserving saved market/incoming price, original capture and bank.
+	Carried acquisition corrections remain N/A for historical confirmation.
+- Relevant SC-006: delayed captain/vice navigation and latest-revision dispatch
+	pass in component/coordinator tests. Basic same-ID retry, uncertainty and
+	pause behavior have owning-layer tests. Comprehensive departure/failure UX
+	and the later-story browser failure journeys are not certified here.
+- SQL fault proofs are distributed across repository, service and router test
+	modules at their owning boundaries rather than duplicated in one file.
+- Final source/test/documentation diff reviewed for approved scope and
+	architectural boundaries. Review found a SQL-null receipt-constraint gap;
+	the regression failed before the explicit non-null revision fix, then the
+	106-case SQL/API gate, lint and types passed again. Only T001-T037 are checked;
+	all task wording and T038-T090 completion markers remain unchanged.
+- Quarantined legacy accounting helpers remain for initializer/legacy tests;
+	canonical GET/mutations use engine replay and old HTTP writers are 410.
+- This is not approval to deploy a partial feature. Before persistent rollout,
+	take a backup, apply the additive schema, explicitly check/apply initialization
+	and coordinate the matching API/web writer release. No such rollout was run.
+	After new-only writes, downgrade refuses; export/conversion or restore is
+	required. Full story matrices, price-resolution UX and departure protection
+	remain later approved increments.

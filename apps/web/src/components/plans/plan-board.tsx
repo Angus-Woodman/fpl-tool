@@ -1,21 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import {
   PlanChip,
   PlanGameweek,
   PlanPlayer,
   PlanResponse,
-  PlanRuleError,
+  PlanIntent,
   PlayerItem,
-  SaveMyTeamPlayerSelection,
   fetchPlan,
   fetchPlayers,
-  savePlanGameweek,
-  updatePlan,
 } from "@/lib/api";
+import {
+  PlanSaveCoordinator,
+  getPlanSaveCoordinator,
+} from "@/lib/plan-save-coordinator";
+
+const EMPTY_SUBSCRIBE = () => () => {};
+const EMPTY_SNAPSHOT = () => null;
 
 type Position = "GK" | "DEF" | "MID" | "FWD";
 
@@ -26,98 +30,12 @@ type LoadState =
   | { type: "loaded"; plan: PlanResponse };
 
 const POSITION_ORDER: Position[] = ["GK", "DEF", "MID", "FWD"];
-const FORMATION_LIMITS: Record<Position, { min: number; max: number }> = {
-  GK: { min: 1, max: 1 },
-  DEF: { min: 3, max: 5 },
-  MID: { min: 2, max: 5 },
-  FWD: { min: 1, max: 3 },
-};
 const CHIPS: { value: PlanChip; label: string }[] = [
   { value: "WILDCARD", label: "Wildcard" },
   { value: "FREE_HIT", label: "Free Hit" },
   { value: "BENCH_BOOST", label: "Bench Boost" },
   { value: "TRIPLE_CAPTAIN", label: "Triple Captain" },
 ];
-const FIRST_HALF_FINAL_GAMEWEEK = 19;
-
-function seasonHalf(gameweekNumber: number): 1 | 2 {
-  return gameweekNumber <= FIRST_HALF_FINAL_GAMEWEEK ? 1 : 2;
-}
-
-function chipUsedElsewhereInHalf(
-  plan: PlanResponse,
-  chip: PlanChip,
-  gameweekNumber: number,
-): boolean {
-  return plan.gameweeks.some(
-    (gameweek) =>
-      gameweek.chip === chip &&
-      gameweek.gameweek_number !== gameweekNumber &&
-      seasonHalf(gameweek.gameweek_number) === seasonHalf(gameweekNumber),
-  );
-}
-
-function formationIsLegal(players: PlanPlayer[]): boolean {
-  const counts: Record<Position, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
-  for (const player of players.filter((player) => player.is_starting)) {
-    counts[player.position] += 1;
-  }
-  return POSITION_ORDER.every(
-    (position) =>
-      counts[position] >= FORMATION_LIMITS[position].min &&
-      counts[position] <= FORMATION_LIMITS[position].max,
-  );
-}
-
-function swapStarterWithBench(
-  players: PlanPlayer[],
-  starterId: number,
-  benchId: number,
-): PlanPlayer[] {
-  const starter = players.find((player) => player.player_id === starterId);
-  const bench = players.find((player) => player.player_id === benchId);
-  if (!starter || !bench) {
-    return players;
-  }
-
-  return players.map((player) => {
-    if (player.player_id === starterId) {
-      return { ...player, is_starting: false, bench_order: bench.bench_order };
-    }
-    if (player.player_id === benchId) {
-      return { ...player, is_starting: true, bench_order: null };
-    }
-    return player;
-  });
-}
-
-function toSelections(players: PlanPlayer[]): SaveMyTeamPlayerSelection[] {
-  return players.map((player) => ({
-    player_id: player.player_id,
-    is_starting: player.is_starting,
-    bench_order: player.bench_order,
-    is_captain: player.is_captain,
-    is_vice_captain: player.is_vice_captain,
-  }));
-}
-
-function toPlanPlayer(item: PlayerItem): PlanPlayer {
-  return {
-    player_id: item.id,
-    web_name: item.web_name,
-    team_short_name: item.team_short_name,
-    position: item.position,
-    current_price: item.current_price,
-    status: item.status,
-    is_starting: false,
-    bench_order: null,
-    is_captain: false,
-    is_vice_captain: false,
-    projected_points: 0,
-    fixtures: [],
-  };
-}
-
 function opponentLabel(player: PlanPlayer): string {
   if (player.fixtures.length === 0) {
     return "-";
@@ -127,19 +45,223 @@ function opponentLabel(player: PlanPlayer): string {
       if (fixture.opponent_team_short_name === null) {
         return "TBD";
       }
-      const venue = fixture.is_home === null ? "" : fixture.is_home ? " (H)" : " (A)";
+      const venue =
+        fixture.is_home === null ? "" : fixture.is_home ? " (H)" : " (A)";
       return `${fixture.opponent_team_short_name}${venue}`;
     })
     .join(", ");
 }
 
+function StartingStatePanel({
+  plan,
+  coordinator,
+  disabled,
+  onError,
+}: {
+  plan: PlanResponse;
+  coordinator: PlanSaveCoordinator | null;
+  disabled: boolean;
+  onError: (message: string | null) => void;
+}): JSX.Element | null {
+  const boundary = plan.starting_state;
+  if (!boundary) return null;
+  const start = plan.start_gameweek;
+
+  return (
+    <section
+      className="space-y-4 border-y border-slate-200 py-4"
+      aria-labelledby={`starting-${plan.plan_id}`}
+    >
+      <h3 id={`starting-${plan.plan_id}`} className="text-base font-semibold">
+        Starting state at GW{start}
+      </h3>
+      <fieldset disabled={disabled} className="min-w-0 space-y-4">
+        <div className="flex flex-wrap items-end gap-6 text-sm">
+          <div>
+            <span className="block text-slate-600">Starting bank</span>
+            <span>{(boundary.bank_tenths / 10).toFixed(1)}</span>
+          </div>
+          {start === 1 ? (
+            <p>Free transfers: N/A (unlimited)</p>
+          ) : (
+            <label className="flex flex-col gap-1 text-slate-700">
+              Remaining free transfers
+              <input
+                type="number"
+                aria-label="Starting free transfers"
+                min={0}
+                max={5}
+                step={1}
+                key={`ft-${start}-${boundary.free_transfers}`}
+                defaultValue={boundary.free_transfers ?? ""}
+                className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-slate-900"
+                onBlur={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  if (
+                    !event.currentTarget.value ||
+                    !Number.isInteger(value) ||
+                    value < 0 ||
+                    value > 5
+                  ) {
+                    onError(
+                      "Remaining free transfers must be a whole number from 0 to 5",
+                    );
+                    return;
+                  }
+                  onError(null);
+                  if (value !== boundary.free_transfers)
+                    coordinator?.enqueue([
+                      { kind: "set_starting_transfers", value },
+                    ]);
+                }}
+              />
+            </label>
+          )}
+        </div>
+        {![1, 20].includes(start) && (
+          <fieldset className="min-w-0">
+            <legend className="mb-2 text-sm font-medium">
+              Chips used before GW{start} ({start < 20 ? "GW1-19" : "GW20-38"})
+            </legend>
+            <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+              {CHIPS.map((chip) => (
+                <label key={chip.value} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    aria-label={`${chip.label} used before this plan`}
+                    checked={boundary.used_chips.includes(chip.value)}
+                    onChange={(event) => {
+                      onError(null);
+                      coordinator?.enqueue([
+                        {
+                          kind: "set_starting_chip",
+                          chip: chip.value,
+                          used: event.target.checked,
+                        },
+                      ]);
+                    }}
+                  />
+                  {chip.label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+        {start === 20 && (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              aria-label="Free Hit used in GW19"
+              checked={boundary.free_hit_gameweek_19}
+              onChange={(event) => {
+                onError(null);
+                coordinator?.enqueue([
+                  { kind: "set_free_hit_19", used: event.target.checked },
+                ]);
+              }}
+            />
+            Free Hit used in GW19
+          </label>
+        )}
+        <ul
+          aria-label="Starting purchase prices"
+          className="grid gap-x-6 md:grid-cols-2 xl:grid-cols-3"
+        >
+          {boundary.players.map((player) => (
+            <li
+              key={player.ownership_id}
+              className="min-w-0 space-y-1 border-b border-slate-100 py-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0 text-sm">
+                  <span className="break-words font-medium">
+                    {player.web_name}
+                  </span>
+                  <span className="ml-2 text-xs text-slate-600">
+                    {player.provenance.basis_kind === "planned_acquisition"
+                      ? "Planned acquisition"
+                      : player.provenance.confirmation === "assumed"
+                        ? "Estimated"
+                        : player.provenance.confirmation === "authoritative"
+                          ? "Authoritative"
+                          : "Confirmed"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    aria-label={`${player.web_name} purchase price`}
+                    min={0.1}
+                    step={0.1}
+                    key={`${player.ownership_id}-${player.purchase_price_tenths}`}
+                    defaultValue={(player.purchase_price_tenths / 10).toFixed(
+                      1,
+                    )}
+                    className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm"
+                    onBlur={(event) => {
+                      const match = /^(\d+)(?:\.(\d))?$/.exec(
+                        event.currentTarget.value,
+                      );
+                      const price = match
+                        ? Number(match[1]) * 10 + Number(match[2] ?? 0)
+                        : NaN;
+                      if (!Number.isSafeInteger(price) || price <= 0) {
+                        onError(
+                          "Purchase price must be positive with at most one decimal place",
+                        );
+                        return;
+                      }
+                      onError(null);
+                      if (price !== player.purchase_price_tenths)
+                        coordinator?.enqueue([
+                          {
+                            kind: "correct_purchase_price",
+                            ownership_id: player.ownership_id,
+                            price_tenths: price,
+                          },
+                        ]);
+                    }}
+                  />
+                  {player.provenance.confirmation === "assumed" && (
+                    <button
+                      type="button"
+                      aria-label={`Confirm ${player.web_name} purchase price`}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"
+                      onClick={() => {
+                        onError(null);
+                        coordinator?.enqueue([
+                          {
+                            kind: "confirm_purchase_price",
+                            ownership_id: player.ownership_id,
+                          },
+                        ]);
+                      }}
+                    >
+                      Confirm
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p className="break-all text-xs text-slate-600">
+                Original{" "}
+                {(player.provenance.original_price_tenths / 10).toFixed(1)} ·{" "}
+                {player.provenance.source.replaceAll("_", " ")}
+              </p>
+            </li>
+          ))}
+        </ul>
+      </fieldset>
+    </section>
+  );
+}
+
 export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   const [state, setState] = useState<LoadState>({ type: "loading" });
   const [selectedGameweek, setSelectedGameweek] = useState<number | null>(null);
-  const [draft, setDraft] = useState<PlanPlayer[] | null>(null);
-  const [draftChip, setDraftChip] = useState<PlanChip | null>(null);
+  const [coordinator, setCoordinator] = useState<PlanSaveCoordinator | null>(
+    null,
+  );
   const [actionError, setActionError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
   const [swapStarterId, setSwapStarterId] = useState<number | null>(null);
   const [transferOutId, setTransferOutId] = useState<number | null>(null);
   const [transferPool, setTransferPool] = useState<PlayerItem[]>([]);
@@ -160,12 +282,16 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           return;
         }
         setState({ type: "loaded", plan });
-        setSelectedGameweek((current) => current ?? plan.gameweeks[0]?.gameweek_number ?? null);
+        setCoordinator(getPlanSaveCoordinator(plan));
+        setSelectedGameweek(
+          (current) => current ?? plan.gameweeks[0]?.gameweek_number ?? null,
+        );
       } catch (error) {
         if (!cancelled) {
           setState({
             type: "error",
-            message: error instanceof Error ? error.message : "Failed to load plan",
+            message:
+              error instanceof Error ? error.message : "Failed to load plan",
           });
         }
       }
@@ -177,73 +303,56 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     };
   }, [planId]);
 
-  const plan = state.type === "loaded" ? state.plan : null;
+  const snapshot = useSyncExternalStore(
+    coordinator?.subscribe ?? EMPTY_SUBSCRIBE,
+    coordinator?.getSnapshot ?? EMPTY_SNAPSHOT,
+    EMPTY_SNAPSHOT,
+  );
+  const plan =
+    snapshot?.displayPlan ?? (state.type === "loaded" ? state.plan : null);
   const gameweek: PlanGameweek | null = useMemo(() => {
     if (plan === null || selectedGameweek === null) {
       return null;
     }
-    return plan.gameweeks.find((item) => item.gameweek_number === selectedGameweek) ?? null;
+    return (
+      plan.gameweeks.find(
+        (item) => item.gameweek_number === selectedGameweek,
+      ) ?? null
+    );
   }, [plan, selectedGameweek]);
 
   useEffect(() => {
-    if (gameweek === null) {
-      setDraft(null);
-      setDraftChip(null);
-      return;
-    }
-    setDraft(gameweek.players);
-    setDraftChip(gameweek.chip);
     setSwapStarterId(null);
     setTransferOutId(null);
   }, [gameweek]);
 
-  async function reload(next: PlanResponse): Promise<void> {
-    setState({ type: "loaded", plan: next });
+  useEffect(() => {
+    if (
+      plan &&
+      !plan.gameweeks.some((week) => week.gameweek_number === selectedGameweek)
+    ) {
+      setSelectedGameweek(plan.gameweeks[0]?.gameweek_number ?? null);
+    }
+    if (
+      renaming &&
+      snapshot?.status === "saved" &&
+      snapshot.acknowledged.name === renameValue.trim()
+    ) {
+      setRenaming(false);
+    }
+  }, [plan, selectedGameweek, renaming, renameValue, snapshot]);
+
+  function send(intents: PlanIntent[]): void {
+    setActionError(null);
+    coordinator?.enqueue(intents);
   }
 
-  async function handleSave(): Promise<void> {
-    if (plan === null || selectedGameweek === null || draft === null) {
-      return;
-    }
-
-    setSaving(true);
+  function handleHorizonChange(
+    field: "start_gameweek" | "end_gameweek",
+    value: number,
+  ): void {
     setActionError(null);
-    try {
-      const next = await savePlanGameweek(plan.plan_id, selectedGameweek, {
-        chip: draftChip,
-        players: toSelections(draft),
-      });
-      await reload(next);
-    } catch (error) {
-      setActionError(
-        error instanceof PlanRuleError || error instanceof Error
-          ? error.message
-          : "Failed to save gameweek",
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleHorizonChange(field: "start_gameweek" | "end_gameweek", value: number) {
-    if (plan === null) {
-      return;
-    }
-    setActionError(null);
-    try {
-      const next = await updatePlan(plan.plan_id, { [field]: value });
-      await reload(next);
-      if (selectedGameweek !== null) {
-        const stillPresent = next.gameweeks.some(
-          (item) => item.gameweek_number === selectedGameweek,
-        );
-        if (!stillPresent) {
-          setSelectedGameweek(next.gameweeks[0]?.gameweek_number ?? null);
-        }
-      }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Failed to adjust the horizon");
-    }
+    coordinator?.enqueue([{ kind: "set_horizon_bound", field, value }]);
   }
 
   async function handleOpenTransfer(player: PlanPlayer): Promise<void> {
@@ -263,59 +372,59 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
       });
       setTransferPool(response.items);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Failed to load transfer options");
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : "Failed to load transfer options",
+      );
     }
   }
 
   function handleTransfer(outgoing: PlanPlayer, incoming: PlayerItem): void {
-    if (draft === null) {
-      return;
-    }
-
-    setDraft(
-      draft.map((player) =>
-        player.player_id === outgoing.player_id
-          ? {
-              ...toPlanPlayer(incoming),
-              is_starting: player.is_starting,
-              bench_order: player.bench_order,
-              is_captain: player.is_captain,
-              is_vice_captain: player.is_vice_captain,
-            }
-          : player,
-      ),
+    if (!gameweek || !outgoing.ownership_id) return;
+    const acquisition = gameweek.decisions.find(
+      (decision) => decision.decision_id === outgoing.source_decision_id,
     );
+    send([
+      acquisition
+        ? {
+            kind: "edit_transfer",
+            decision_id: acquisition.decision_id,
+            incoming_player_id: incoming.id,
+          }
+        : {
+            kind: "add_transfer",
+            gameweek_number: gameweek.gameweek_number,
+            outgoing_player_id: outgoing.player_id,
+            outgoing_ownership_id: outgoing.ownership_id,
+            incoming_player_id: incoming.id,
+          },
+    ]);
     setTransferOutId(null);
   }
 
   function handleSwap(starterId: number, benchId: number): void {
-    if (draft === null) {
-      return;
-    }
-
-    const next = swapStarterWithBench(draft, starterId, benchId);
-    if (!formationIsLegal(next)) {
-      setActionError("That swap would leave an illegal formation.");
-      return;
-    }
-
-    setActionError(null);
-    setDraft(next);
+    if (!gameweek) return;
+    send([
+      {
+        kind: "swap_lineup_players",
+        gameweek_number: gameweek.gameweek_number,
+        first_player_id: starterId,
+        second_player_id: benchId,
+      },
+    ]);
     setSwapStarterId(null);
   }
 
   function handleCaptain(playerId: number, role: "captain" | "vice"): void {
-    if (draft === null) {
-      return;
-    }
-
-    setDraft(
-      draft.map((player) => ({
-        ...player,
-        is_captain: role === "captain" ? player.player_id === playerId : player.is_captain,
-        is_vice_captain: role === "vice" ? player.player_id === playerId : player.is_vice_captain,
-      })),
-    );
+    if (!gameweek) return;
+    send([
+      {
+        kind: role === "captain" ? "change_captain" : "change_vice_captain",
+        gameweek_number: gameweek.gameweek_number,
+        player_id: playerId,
+      },
+    ]);
   }
 
   if (state.type === "loading") {
@@ -335,7 +444,13 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     );
   }
 
-  const currentPlan = state.plan;
+  const currentPlan = plan ?? state.plan;
+  const draft = gameweek?.players ?? null;
+  const draftChip = gameweek?.chip ?? null;
+  const editingUnavailable =
+    currentPlan.foundation_state !== "ready" ||
+    snapshot?.status === "not_saved" ||
+    snapshot?.status === "conflict";
   const starters = (draft ?? []).filter((player) => player.is_starting);
   const bench = (draft ?? [])
     .filter((player) => !player.is_starting)
@@ -360,13 +475,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                   disabled={renameValue.trim().length === 0}
                   onClick={() =>
-                    void (async () => {
-                      const next = await updatePlan(currentPlan.plan_id, {
-                        name: renameValue.trim(),
-                      });
-                      await reload(next);
-                      setRenaming(false);
-                    })()
+                    send([{ kind: "rename_plan", name: renameValue.trim() }])
                   }
                 >
                   Save
@@ -385,6 +494,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                 <button
                   type="button"
                   aria-label="Rename plan"
+                  disabled={editingUnavailable}
                   className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
                   onClick={() => {
                     setRenameValue(currentPlan.name);
@@ -396,8 +506,8 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               </div>
             )}
             <p className="mt-1 text-sm text-slate-600">
-              Plan xPts: {currentPlan.total_points.toFixed(1)} · Hits taken:{" "}
-              {currentPlan.total_points_hit}
+              Plan xPts: {currentPlan.total_points?.toFixed(1) ?? "Unavailable"}{" "}
+              · Hits taken: {currentPlan.total_points_hit}
             </p>
           </div>
 
@@ -407,12 +517,16 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               <input
                 type="number"
                 aria-label="Plan start gameweek"
+                disabled={editingUnavailable}
                 min={1}
                 max={38}
                 className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
                 value={currentPlan.start_gameweek}
                 onChange={(event) =>
-                  void handleHorizonChange("start_gameweek", Number(event.target.value))
+                  void handleHorizonChange(
+                    "start_gameweek",
+                    Number(event.target.value),
+                  )
                 }
               />
             </label>
@@ -421,12 +535,16 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               <input
                 type="number"
                 aria-label="Plan end gameweek"
+                disabled={editingUnavailable}
                 min={1}
                 max={38}
                 className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
                 value={currentPlan.end_gameweek}
                 onChange={(event) =>
-                  void handleHorizonChange("end_gameweek", Number(event.target.value))
+                  void handleHorizonChange(
+                    "end_gameweek",
+                    Number(event.target.value),
+                  )
                 }
               />
             </label>
@@ -448,83 +566,199 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
             }`}
             onClick={() => setSelectedGameweek(item.gameweek_number)}
           >
-            <span className="block font-semibold">GW {item.gameweek_number}</span>
-            <span className="block">{item.total_points.toFixed(1)} xPts</span>
-            <span className="block">
-              {item.unlimited_transfers ? "Unlimited" : `${item.free_transfers_available} FT`}
-              {item.points_hit > 0 ? ` · -${item.points_hit}` : ""}
+            <span className="block font-semibold">
+              GW {item.gameweek_number}
             </span>
-            {item.chip && <span className="block font-semibold">{item.chip}</span>}
+            <span className="block">
+              {item.total_points?.toFixed(1) ?? "Unavailable"} xPts
+            </span>
+            <span className="block">
+              {item.unlimited_transfers
+                ? "Unlimited"
+                : `${item.free_transfers_available} FT`}
+              {item.points_hit !== null && item.points_hit > 0
+                ? ` · -${item.points_hit}`
+                : ""}
+            </span>
+            {item.chip && (
+              <span className="block font-semibold">{item.chip}</span>
+            )}
           </button>
         ))}
       </nav>
 
-      {actionError && <p className="text-sm text-red-700">{actionError}</p>}
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <p role="status">
+          {currentPlan.foundation_state !== "ready"
+            ? "Initialization required"
+            : snapshot?.status === "saving"
+              ? "Saving..."
+              : snapshot?.status === "not_saved" || snapshot?.status === "error"
+                ? "Not saved"
+                : snapshot?.status === "conflict"
+                  ? "Needs reconciliation"
+                  : "Saved"}
+        </p>
+        {currentPlan.financial_status.provisional && (
+          <span className="text-slate-600">Estimated bases</span>
+        )}
+        {currentPlan.financial_status.requires_resolution && (
+          <span className="text-red-700">Requires resolution</span>
+        )}
+        {snapshot?.status === "not_saved" && (
+          <button
+            type="button"
+            className="rounded-md border px-2 py-1"
+            onClick={() => coordinator?.retry()}
+          >
+            Retry Same Edit
+          </button>
+        )}
+        {snapshot?.status === "conflict" && (
+          <button
+            type="button"
+            className="rounded-md border px-2 py-1"
+            onClick={() => void coordinator?.revalidate()}
+          >
+            Revalidate With Current Data
+          </button>
+        )}
+      </div>
+      {(snapshot?.message || actionError) && (
+        <p role="alert" className="text-sm text-red-700">
+          {snapshot?.message || actionError}
+        </p>
+      )}
+      {currentPlan.foundation_state !== "ready" && (
+        <p className="text-sm text-amber-800">
+          {currentPlan.initialization.reason}
+        </p>
+      )}
+
+      <StartingStatePanel
+        plan={currentPlan}
+        coordinator={coordinator}
+        disabled={editingUnavailable}
+        onError={setActionError}
+      />
 
       {gameweek !== null && draft !== null && (
-        <div className="space-y-5">
+        <fieldset disabled={editingUnavailable} className="min-w-0 space-y-5">
           <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm text-slate-700">
-                <p className="font-semibold text-slate-900">Gameweek {gameweek.gameweek_number}</p>
+                <p className="font-semibold text-slate-900">
+                  Gameweek {gameweek.gameweek_number}
+                </p>
                 <p>
-                  Bank {gameweek.bank.toFixed(1)} · Free transfers{" "}
+                  Bank {gameweek.bank?.toFixed(1) ?? "Unavailable"} · Free
+                  transfers{" "}
                   {gameweek.unlimited_transfers
                     ? "unlimited"
                     : gameweek.free_transfers_available}{" "}
                   · Transfers made {gameweek.transfers_made}
-                  {gameweek.points_hit > 0 ? ` · Hit -${gameweek.points_hit}` : ""}
+                  {gameweek.points_hit !== null && gameweek.points_hit > 0
+                    ? ` · Hit -${gameweek.points_hit}`
+                    : ""}
                 </p>
               </div>
-              <button
-                type="button"
-                className="rounded-md border border-emerald-300 bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                disabled={saving}
-                onClick={() => void handleSave()}
-              >
-                {saving ? "Saving..." : "Save Gameweek"}
-              </button>
             </div>
 
             <div className="mt-4 flex flex-wrap gap-2">
               {CHIPS.map((chip) => {
-                const unavailable = chipUsedElsewhereInHalf(
-                  currentPlan,
-                  chip.value,
-                  gameweek.gameweek_number,
-                );
+                const availability = gameweek.chip_availability[chip.value];
+                const unavailable =
+                  !availability ||
+                  !["available", "planned_here"].includes(availability.state);
                 const active = draftChip === chip.value;
                 return (
-                  <button
-                    key={chip.value}
-                    type="button"
-                    aria-label={chip.label}
-                    aria-pressed={active}
-                    title={
-                      unavailable
-                        ? `${chip.label} is already used in this half of the season`
-                        : undefined
-                    }
-                    disabled={unavailable}
-                    className={`rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40 ${
-                      active
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
-                    }`}
-                    onClick={() => setDraftChip(active ? null : chip.value)}
-                  >
-                    {chip.label}
-                  </button>
+                  <div key={chip.value} className="max-w-64">
+                    <button
+                      type="button"
+                      aria-label={chip.label}
+                      aria-pressed={active}
+                      title={availability?.reason ?? undefined}
+                      disabled={unavailable}
+                      className={`rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40 ${
+                        active
+                          ? "border-slate-900 bg-slate-900 text-white"
+                          : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
+                      }`}
+                      onClick={() =>
+                        send([
+                          {
+                            kind: active ? "remove_chip" : "activate_chip",
+                            gameweek_number: gameweek.gameweek_number,
+                            chip: chip.value,
+                          },
+                        ])
+                      }
+                    >
+                      {chip.label}
+                    </button>
+                    {availability?.reason && (
+                      <p className="mt-1 text-xs text-slate-600">
+                        {availability.reason}
+                      </p>
+                    )}
+                    {availability?.state === "planned_elsewhere" &&
+                      availability.conflicting_gameweek !== null &&
+                      !gameweek.chip && (
+                        <button
+                          type="button"
+                          className="mt-1 text-xs underline"
+                          aria-label={`Move ${chip.label} from GW${availability.conflicting_gameweek} to GW${gameweek.gameweek_number}`}
+                          onClick={() =>
+                            send([
+                              {
+                                kind: "move_chip",
+                                chip: chip.value,
+                                source_gameweek:
+                                  availability.conflicting_gameweek!,
+                                target_gameweek: gameweek.gameweek_number,
+                              },
+                            ])
+                          }
+                        >
+                          Move Here
+                        </button>
+                      )}
+                  </div>
                 );
               })}
             </div>
 
-            {(gameweek.transfers_in.length > 0 || gameweek.transfers_out.length > 0) && (
+            {(gameweek.transfers_in.length > 0 ||
+              gameweek.transfers_out.length > 0) && (
               <p className="mt-3 text-xs text-slate-600">
-                Transfers: {gameweek.transfers_out.map((item) => item.web_name).join(", ") || "-"}{" "}
-                → {gameweek.transfers_in.map((item) => item.web_name).join(", ") || "-"}
+                Transfers:{" "}
+                {gameweek.transfers_out
+                  .map((item) => item.web_name)
+                  .join(", ") || "-"}{" "}
+                →{" "}
+                {gameweek.transfers_in
+                  .map((item) => item.web_name)
+                  .join(", ") || "-"}
               </p>
             )}
+            {gameweek.decisions.map((decision) => (
+              <button
+                key={decision.decision_id}
+                type="button"
+                className="mt-2 mr-3 text-xs underline"
+                aria-label={`Remove transfer ${decision.outgoing_player_id} to ${decision.incoming_player_id}`}
+                onClick={() =>
+                  send([
+                    {
+                      kind: "remove_transfer",
+                      decision_id: decision.decision_id,
+                    },
+                  ])
+                }
+              >
+                Remove Transfer
+              </button>
+            ))}
           </section>
 
           <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
@@ -534,7 +768,9 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               </h3>
               <div className="space-y-5">
                 {POSITION_ORDER.map((position) => {
-                  const rows = starters.filter((player) => player.position === position);
+                  const rows = starters.filter(
+                    (player) => player.position === position,
+                  );
                   if (rows.length === 0) {
                     return null;
                   }
@@ -560,7 +796,8 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                                   {player.current_price.toFixed(1)}
                                 </p>
                               </div>
-                              {(player.is_captain || player.is_vice_captain) && (
+                              {(player.is_captain ||
+                                player.is_vice_captain) && (
                                 <span className="rounded-full bg-slate-900 px-2 py-1 text-[10px] font-semibold text-white">
                                   {player.is_captain ? "C" : "VC"}
                                 </span>
@@ -579,7 +816,9 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                                 className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
                                 onClick={() =>
                                   setSwapStarterId(
-                                    swapStarterId === player.player_id ? null : player.player_id,
+                                    swapStarterId === player.player_id
+                                      ? null
+                                      : player.player_id,
                                   )
                                 }
                               >
@@ -597,7 +836,9 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                                 type="button"
                                 aria-label={`Make ${player.web_name} captain`}
                                 className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() => handleCaptain(player.player_id, "captain")}
+                                onClick={() =>
+                                  handleCaptain(player.player_id, "captain")
+                                }
                               >
                                 C
                               </button>
@@ -605,7 +846,9 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                                 type="button"
                                 aria-label={`Make ${player.web_name} vice-captain`}
                                 className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() => handleCaptain(player.player_id, "vice")}
+                                onClick={() =>
+                                  handleCaptain(player.player_id, "vice")
+                                }
                               >
                                 VC
                               </button>
@@ -613,20 +856,38 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
 
                             {swapStarterId === player.player_id && (
                               <ul className="mt-3 space-y-1 text-xs">
-                                {bench.map((benchPlayer) => (
-                                  <li key={benchPlayer.player_id}>
-                                    <button
-                                      type="button"
-                                      aria-label={`Swap ${player.web_name} for ${benchPlayer.web_name}`}
-                                      className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                      onClick={() =>
-                                        handleSwap(player.player_id, benchPlayer.player_id)
-                                      }
-                                    >
-                                      {benchPlayer.web_name} ({benchPlayer.position})
-                                    </button>
-                                  </li>
-                                ))}
+                                {bench
+                                  .filter((benchPlayer) =>
+                                    gameweek.legal_rearrangements.some(
+                                      (choice) =>
+                                        (choice.first_player_id ===
+                                          player.player_id &&
+                                          choice.second_player_id ===
+                                            benchPlayer.player_id) ||
+                                        (choice.second_player_id ===
+                                          player.player_id &&
+                                          choice.first_player_id ===
+                                            benchPlayer.player_id),
+                                    ),
+                                  )
+                                  .map((benchPlayer) => (
+                                    <li key={benchPlayer.player_id}>
+                                      <button
+                                        type="button"
+                                        aria-label={`Swap ${player.web_name} for ${benchPlayer.web_name}`}
+                                        className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
+                                        onClick={() =>
+                                          handleSwap(
+                                            player.player_id,
+                                            benchPlayer.player_id,
+                                          )
+                                        }
+                                      >
+                                        {benchPlayer.web_name} (
+                                        {benchPlayer.position})
+                                      </button>
+                                    </li>
+                                  ))}
                               </ul>
                             )}
 
@@ -636,7 +897,8 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                                   .filter(
                                     (option) =>
                                       !draft.some(
-                                        (selected) => selected.player_id === option.id,
+                                        (selected) =>
+                                          selected.player_id === option.id,
                                       ),
                                   )
                                   .map((option) => (
@@ -645,9 +907,12 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                                         type="button"
                                         aria-label={`Transfer in ${option.web_name}`}
                                         className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                        onClick={() => handleTransfer(player, option)}
+                                        onClick={() =>
+                                          handleTransfer(player, option)
+                                        }
                                       >
-                                        {option.web_name} · {option.team_short_name} ·{" "}
+                                        {option.web_name} ·{" "}
+                                        {option.team_short_name} ·{" "}
                                         {option.current_price.toFixed(1)}
                                       </button>
                                     </li>
@@ -669,7 +934,10 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               </h3>
               <div className="space-y-3">
                 {bench.map((player) => (
-                  <article key={player.player_id} className="rounded-lg border border-slate-200 p-3">
+                  <article
+                    key={player.player_id}
+                    className="rounded-lg border border-slate-200 p-3"
+                  >
                     <p className="text-sm font-semibold text-slate-900">
                       {player.bench_order}. {player.web_name}
                     </p>
@@ -693,7 +961,9 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                         {transferPool
                           .filter(
                             (option) =>
-                              !draft.some((selected) => selected.player_id === option.id),
+                              !draft.some(
+                                (selected) => selected.player_id === option.id,
+                              ),
                           )
                           .map((option) => (
                             <li key={option.id}>
@@ -715,7 +985,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               </div>
             </section>
           </div>
-        </div>
+        </fieldset>
       )}
     </section>
   );

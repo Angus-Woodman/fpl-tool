@@ -202,7 +202,12 @@ export type TransferExplorerFetchResult =
   | { type: "ok"; data: TransferExplorerResponse }
   | { type: "no_squad" }
   | { type: "player_not_found" }
-  | { type: "unavailable"; code: string; message: string; missingPlayerIds: number[] };
+  | {
+      type: "unavailable";
+      code: string;
+      message: string;
+      missingPlayerIds: number[];
+    };
 
 export async function fetchTransferExplorer(
   playerOutId: number,
@@ -226,7 +231,11 @@ export async function fetchTransferExplorer(
 
   if (response.status === 422) {
     const body = (await response.json()) as {
-      detail?: { code?: string; message?: string; missing_player_ids?: number[] };
+      detail?: {
+        code?: string;
+        message?: string;
+        missing_player_ids?: number[];
+      };
     };
     return {
       type: "unavailable",
@@ -237,10 +246,15 @@ export async function fetchTransferExplorer(
   }
 
   if (!response.ok) {
-    throw new Error(`Transfer explorer request failed with status ${response.status}`);
+    throw new Error(
+      `Transfer explorer request failed with status ${response.status}`,
+    );
   }
 
-  return { type: "ok", data: (await response.json()) as TransferExplorerResponse };
+  return {
+    type: "ok",
+    data: (await response.json()) as TransferExplorerResponse,
+  };
 }
 
 export type LineupSummary = {
@@ -278,7 +292,12 @@ export type TransferPreviewFetchResult =
   | { type: "ok"; data: TransferPreviewResponse }
   | { type: "no_squad" }
   | { type: "player_not_found" }
-  | { type: "unavailable"; code: string; message: string; missingPlayerIds: number[] };
+  | {
+      type: "unavailable";
+      code: string;
+      message: string;
+      missingPlayerIds: number[];
+    };
 
 export async function fetchTransferPreview(
   playerOutId: number,
@@ -302,7 +321,11 @@ export async function fetchTransferPreview(
 
   if (response.status === 422) {
     const body = (await response.json()) as {
-      detail?: { code?: string; message?: string; missing_player_ids?: number[] };
+      detail?: {
+        code?: string;
+        message?: string;
+        missing_player_ids?: number[];
+      };
     };
     return {
       type: "unavailable",
@@ -313,10 +336,15 @@ export async function fetchTransferPreview(
   }
 
   if (!response.ok) {
-    throw new Error(`Transfer preview request failed with status ${response.status}`);
+    throw new Error(
+      `Transfer preview request failed with status ${response.status}`,
+    );
   }
 
-  return { type: "ok", data: (await response.json()) as TransferPreviewResponse };
+  return {
+    type: "ok",
+    data: (await response.json()) as TransferPreviewResponse,
+  };
 }
 
 export type ApplyTransferFetchResult =
@@ -335,11 +363,14 @@ export async function applyTransfer(
   playerOutId: number,
   playerInId: number,
 ): Promise<ApplyTransferFetchResult> {
-  const response = await fetch(`${API_BASE_URL}/my-team/transfers/${playerOutId}/apply`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ player_in_id: playerInId }),
-  });
+  const response = await fetch(
+    `${API_BASE_URL}/my-team/transfers/${playerOutId}/apply`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ player_in_id: playerInId }),
+    },
+  );
 
   if (response.status === 404) {
     const body = (await response.json()) as { detail?: unknown };
@@ -372,13 +403,16 @@ export async function applyTransfer(
   }
 
   if (!response.ok) {
-    throw new Error(`Apply transfer request failed with status ${response.status}`);
+    throw new Error(
+      `Apply transfer request failed with status ${response.status}`,
+    );
   }
 
   return { type: "ok", data: (await response.json()) as MyTeamResponse };
 }
 
-export type PlanChip = "WILDCARD" | "FREE_HIT" | "BENCH_BOOST" | "TRIPLE_CAPTAIN";
+export type PlanChip =
+  "WILDCARD" | "FREE_HIT" | "BENCH_BOOST" | "TRIPLE_CAPTAIN";
 
 export type PlanSummary = {
   plan_id: number;
@@ -412,6 +446,73 @@ export type PlanPlayer = {
   is_vice_captain: boolean;
   projected_points: number;
   fixtures: PlanFixture[];
+  slot_id: string | null;
+  ownership_id: string | null;
+  source_decision_id: string | null;
+  purchase_price_tenths: number | null;
+  provenance: PurchaseProvenance | null;
+};
+
+export type PurchaseProvenance = {
+  source: string;
+  original_price_tenths: number;
+  basis_kind: "starting" | "planned_acquisition";
+  confirmation: "assumed" | "user_confirmed" | "authoritative" | null;
+};
+
+export type StartingOwnership = {
+  slot_id: string;
+  ownership_id: string;
+  player_id: number;
+  web_name: string;
+  purchase_price_tenths: number;
+  provenance: PurchaseProvenance;
+};
+
+export type StartingState = {
+  players: StartingOwnership[];
+  lineup: {
+    slot_id: string;
+    is_starting: boolean;
+    bench_order: number | null;
+    is_captain: boolean;
+    is_vice_captain: boolean;
+  }[];
+  bank_tenths: number;
+  free_transfers: number | null;
+  used_chips: PlanChip[];
+  free_hit_gameweek_19: boolean;
+  origin:
+    | "my_team_capture"
+    | "legacy_first_gameweek_assumed"
+    | "rebased_plan"
+    | "earlier_horizon_assumed";
+  bank_assumptions: string[];
+};
+
+export type PlanDecision = {
+  decision_id: string;
+  outgoing_player_id: number;
+  outgoing_ownership_id: string;
+  incoming_player_id: number;
+  incoming_ownership_id: string;
+  outgoing_market_tenths: number;
+  incoming_price_tenths: number;
+  selling_price_tenths: number | null;
+  observation_source: string;
+  observed_at: string;
+  origin: string;
+};
+
+export type PlanChipAvailability = {
+  state:
+    | "available"
+    | "planned_here"
+    | "planned_elsewhere"
+    | "used_before"
+    | "rule_unavailable";
+  reason: string | null;
+  conflicting_gameweek: number | null;
 };
 
 export type PlanTransfer = {
@@ -422,18 +523,35 @@ export type PlanTransfer = {
 export type PlanGameweek = {
   gameweek_number: number;
   chip: PlanChip | null;
-  bank: number;
-  free_transfers_available: number;
+  bank: number | null;
+  free_transfers_available: number | null;
   unlimited_transfers: boolean;
-  transfers_made: number;
-  points_hit: number;
-  starting_points: number;
-  bench_points: number;
-  captain_bonus_points: number;
-  total_points: number;
+  transfers_made: number | null;
+  points_hit: number | null;
+  starting_points: number | null;
+  bench_points: number | null;
+  captain_bonus_points: number | null;
+  total_points: number | null;
   players: PlanPlayer[];
   transfers_in: PlanTransfer[];
   transfers_out: PlanTransfer[];
+  decisions: PlanDecision[];
+  accounting: {
+    starting_bank_tenths: number | null;
+    closing_bank_tenths: number | null;
+    free_transfers_available: number | null;
+    next_free_transfers: number | null;
+    unlimited_transfers: boolean;
+    transfers_made: number | null;
+    points_hit: number | null;
+  } | null;
+  chip_availability: Partial<Record<PlanChip, PlanChipAvailability>>;
+  legal_rearrangements: {
+    first_player_id: number;
+    second_player_id: number;
+    kind: "substitution" | "bench_priority";
+  }[];
+  evaluation_status: "complete" | "blocked";
 };
 
 export type PlanResponse = {
@@ -443,15 +561,130 @@ export type PlanResponse = {
   end_gameweek: number;
   initial_bank: number;
   initial_free_transfers: number;
-  total_points: number;
-  total_points_hit: number;
+  total_points: number | null;
+  total_points_hit: number | null;
   gameweeks: PlanGameweek[];
+  revision: number;
+  evaluator_version: string;
+  foundation_state: "legacy_pending" | "ready";
+  starting_state: StartingState | null;
+  financial_status: {
+    provisional?: boolean;
+    requires_resolution?: boolean;
+    earliest_shortfall_gameweek?: number | null;
+    gameweeks?: {
+      gameweek_number: number;
+      shortfall_tenths: number | null;
+      affected_chain: number[];
+    }[];
+  };
+  decision_errors: {
+    code: string;
+    message: string;
+    gameweek_number: number;
+    decision_id: string | null;
+    conflicting_gameweek: number | null;
+    player_id: number | null;
+  }[];
+  initialization: {
+    ready: boolean;
+    reason?: string;
+    retryable?: boolean;
+    boundary_origin?: string;
+  };
 };
 
-export type SavePlanGameweekRequest = {
-  chip: PlanChip | null;
-  players: SaveMyTeamPlayerSelection[];
+export type PlanIntent =
+  | { kind: "rename_plan"; name: string }
+  | {
+      kind: "change_horizon";
+      start_gameweek: number;
+      end_gameweek: number;
+      used_chips?: PlanChip[];
+      free_hit_gameweek_19?: boolean;
+    }
+  | { kind: "set_starting_transfers"; value: number | null }
+  | {
+      kind: "set_starting_chips";
+      used_chips: PlanChip[];
+      free_hit_gameweek_19: boolean;
+    }
+  | {
+      kind: "correct_purchase_price";
+      ownership_id: string;
+      price_tenths: number;
+    }
+  | { kind: "confirm_purchase_price"; ownership_id: string }
+  | {
+      kind: "change_captain" | "change_vice_captain";
+      gameweek_number: number;
+      player_id: number;
+    }
+  | {
+      kind: "swap_lineup_players";
+      gameweek_number: number;
+      first_player_id: number;
+      second_player_id: number;
+    }
+  | {
+      kind: "activate_chip" | "remove_chip";
+      gameweek_number: number;
+      chip: PlanChip;
+      expected_chip?: PlanChip | null;
+    }
+  | {
+      kind: "move_chip";
+      source_gameweek: number;
+      target_gameweek: number;
+      chip: PlanChip;
+    }
+  | {
+      kind: "add_transfer";
+      gameweek_number: number;
+      outgoing_player_id: number;
+      outgoing_ownership_id: string;
+      incoming_player_id: number;
+    }
+  | {
+      kind: "edit_transfer";
+      decision_id: string;
+      outgoing_player_id?: number;
+      outgoing_ownership_id?: string;
+      incoming_player_id?: number;
+    }
+  | { kind: "remove_transfer"; decision_id: string };
+
+export type PlanMutationEnvelope = {
+  mutation_id: string;
+  expected_revision: number;
+  intents: PlanIntent[];
 };
+export type PlanMutationResponse = {
+  status: "committed" | "already_committed" | "accepted_not_saved";
+  mutation_id: string;
+  committed_revision: number | null;
+  plan: PlanResponse;
+  candidate: PlanResponse | null;
+};
+export type PlannerErrorDetail = {
+  code: string;
+  message: string;
+  mutation_id?: string;
+  plan?: PlanResponse | null;
+  candidate?: PlanResponse | null;
+  intent_metadata?: unknown;
+  diagnostics?: PlanResponse["decision_errors"];
+};
+
+export class PlannerMutationError extends Error {
+  constructor(
+    readonly status: number,
+    readonly detail: PlannerErrorDetail,
+  ) {
+    super(detail.message);
+    this.name = "PlannerMutationError";
+  }
+}
 
 export class PlanRuleError extends Error {
   readonly code: string;
@@ -463,7 +696,8 @@ export class PlanRuleError extends Error {
   }
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export async function fetchPlayers(params: {
   search?: string;
@@ -499,12 +733,18 @@ export async function fetchFixtureTicker(params?: {
   const query = new URLSearchParams();
   query.set("page", String(params?.page ?? 1));
   query.set("limit", String(params?.limit ?? 20));
-  if (params?.team_id !== undefined) query.set("team_id", String(params.team_id));
-  if (params?.gameweek !== undefined) query.set("gameweek", String(params.gameweek));
+  if (params?.team_id !== undefined)
+    query.set("team_id", String(params.team_id));
+  if (params?.gameweek !== undefined)
+    query.set("gameweek", String(params.gameweek));
 
-  const response = await fetch(`${API_BASE_URL}/fixtures/ticker?${query.toString()}`);
+  const response = await fetch(
+    `${API_BASE_URL}/fixtures/ticker?${query.toString()}`,
+  );
   if (!response.ok) {
-    throw new Error(`Fixture ticker request failed with status ${response.status}`);
+    throw new Error(
+      `Fixture ticker request failed with status ${response.status}`,
+    );
   }
 
   return (await response.json()) as FixtureTickerResponse;
@@ -519,7 +759,10 @@ export async function fetchTeams(): Promise<TeamListResponse> {
   return (await response.json()) as TeamListResponse;
 }
 
-export async function updateTeamDifficulty(teamId: number, difficulty: number): Promise<TeamItem> {
+export async function updateTeamDifficulty(
+  teamId: number,
+  difficulty: number,
+): Promise<TeamItem> {
   const response = await fetch(`${API_BASE_URL}/teams/${teamId}`, {
     method: "PATCH",
     headers: {
@@ -528,7 +771,9 @@ export async function updateTeamDifficulty(teamId: number, difficulty: number): 
     body: JSON.stringify({ difficulty }),
   });
   if (!response.ok) {
-    throw new Error(`Update team difficulty request failed with status ${response.status}`);
+    throw new Error(
+      `Update team difficulty request failed with status ${response.status}`,
+    );
   }
 
   return (await response.json()) as TeamItem;
@@ -555,7 +800,9 @@ export async function fetchMyTeam(): Promise<MyTeamResponse | null> {
   return (await response.json()) as MyTeamResponse;
 }
 
-export async function saveMyTeam(payload: SaveMyTeamRequest): Promise<MyTeamResponse> {
+export async function saveMyTeam(
+  payload: SaveMyTeamRequest,
+): Promise<MyTeamResponse> {
   const response = await fetch(`${API_BASE_URL}/my-team`, {
     method: "PUT",
     headers: {
@@ -565,11 +812,15 @@ export async function saveMyTeam(payload: SaveMyTeamRequest): Promise<MyTeamResp
   });
   if (!response.ok) {
     // The API returns a readable `detail` string for rejected squads (for example an illegal formation).
-    const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+    const body = (await response.json().catch(() => null)) as {
+      detail?: unknown;
+    } | null;
     if (typeof body?.detail === "string") {
       throw new Error(body.detail);
     }
-    throw new Error(`Save my team request failed with status ${response.status}`);
+    throw new Error(
+      `Save my team request failed with status ${response.status}`,
+    );
   }
 
   return (await response.json()) as MyTeamResponse;
@@ -580,7 +831,9 @@ export async function refreshProjections(): Promise<ProjectionRefreshResponse> {
     method: "POST",
   });
   if (!response.ok) {
-    throw new Error(`Projection refresh request failed with status ${response.status}`);
+    throw new Error(
+      `Projection refresh request failed with status ${response.status}`,
+    );
   }
 
   return (await response.json()) as ProjectionRefreshResponse;
@@ -593,7 +846,11 @@ export async function fetchMyTeamRecommendation(): Promise<MyTeamRecommendationR
   }
   if (response.status === 422) {
     const body = (await response.json()) as {
-      detail?: { code?: string; message?: string; missing_player_ids?: number[] };
+      detail?: {
+        code?: string;
+        message?: string;
+        missing_player_ids?: number[];
+      };
     };
     throw new MyTeamRecommendationUnavailableError(
       body.detail?.code ?? "recommendation_unavailable",
@@ -602,15 +859,22 @@ export async function fetchMyTeamRecommendation(): Promise<MyTeamRecommendationR
     );
   }
   if (!response.ok) {
-    throw new Error(`My team recommendation request failed with status ${response.status}`);
+    throw new Error(
+      `My team recommendation request failed with status ${response.status}`,
+    );
   }
 
   return (await response.json()) as MyTeamRecommendationResponse;
 }
 
-async function readPlanResponse(response: Response, action: string): Promise<PlanResponse> {
+async function readPlanResponse(
+  response: Response,
+  action: string,
+): Promise<PlanResponse> {
   if (response.status === 422) {
-    const body = (await response.json()) as { detail?: { code?: string; message?: string } };
+    const body = (await response.json()) as {
+      detail?: { code?: string; message?: string };
+    };
     throw new PlanRuleError(
       body.detail?.code ?? "invalid_plan",
       body.detail?.message ?? "That change is not allowed",
@@ -655,36 +919,63 @@ export async function createPlan(payload: {
   return readPlanResponse(response, "Create plan");
 }
 
-export async function updatePlan(
-  planId: number,
-  payload: { name?: string; start_gameweek?: number; end_gameweek?: number },
-): Promise<PlanResponse> {
-  const response = await fetch(`${API_BASE_URL}/plans/${planId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  return readPlanResponse(response, "Update plan");
-}
-
 export async function deletePlan(planId: number): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/plans/${planId}`, { method: "DELETE" });
+  const response = await fetch(`${API_BASE_URL}/plans/${planId}`, {
+    method: "DELETE",
+  });
   if (!response.ok) {
-    throw new Error(`Delete plan request failed with status ${response.status}`);
+    throw new Error(
+      `Delete plan request failed with status ${response.status}`,
+    );
   }
 }
 
-export async function savePlanGameweek(
-  planId: number,
-  gameweekNumber: number,
-  payload: SavePlanGameweekRequest,
-): Promise<PlanResponse> {
-  const response = await fetch(`${API_BASE_URL}/plans/${planId}/gameweeks/${gameweekNumber}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+async function readPlannerMutation(
+  response: Response,
+): Promise<PlanMutationResponse> {
+  const body = await response.json();
+  if (!response.ok) {
+    const detail = body.detail;
+    throw new PlannerMutationError(
+      response.status,
+      detail && !Array.isArray(detail) && typeof detail.code === "string"
+        ? detail
+        : { code: "invalid_request", message: "Planner request rejected" },
+    );
+  }
+  if (
+    !["committed", "already_committed", "accepted_not_saved"].includes(
+      body.status,
+    ) ||
+    !Number.isInteger(body.plan?.revision) ||
+    typeof body.mutation_id !== "string"
+  ) {
+    throw new PlannerMutationError(503, {
+      code: "outcome_unknown",
+      message: "Invalid response; reconcile the same edit",
+    });
+  }
+  return body as PlanMutationResponse;
+}
 
-  return readPlanResponse(response, "Save plan gameweek");
+export async function mutatePlan(
+  planId: number,
+  envelope: PlanMutationEnvelope,
+): Promise<PlanMutationResponse> {
+  return readPlannerMutation(
+    await fetch(`${API_BASE_URL}/plans/${planId}/mutations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(envelope),
+    }),
+  );
+}
+
+export async function fetchPlanMutation(
+  planId: number,
+  mutationId: string,
+): Promise<PlanMutationResponse> {
+  return readPlannerMutation(
+    await fetch(`${API_BASE_URL}/plans/${planId}/mutations/${mutationId}`),
+  );
 }

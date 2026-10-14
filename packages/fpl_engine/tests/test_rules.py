@@ -261,9 +261,33 @@ class TestTransfers:
         )
 
     @pytest.mark.parametrize("chip", [Chip.WILDCARD, Chip.FREE_HIT])
-    def test_unlimited_chips_preserve_banked_transfers(self, chip: Chip) -> None:
+    @pytest.mark.parametrize(
+        ("available", "expected"), [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)]
+    )
+    def test_unlimited_chips_consume_the_arising_transfer(
+        self, chip: Chip, available: int, expected: int
+    ) -> None:
         assert (
-            free_transfers_after(available=3, transfers_made=8, chip=chip, gameweek_number=9) == 4
+            free_transfers_after(
+                available=available, transfers_made=8, chip=chip, gameweek_number=9
+            )
+            == expected
+        )
+
+    @pytest.mark.parametrize("chip", [Chip.BENCH_BOOST, Chip.TRIPLE_CAPTAIN])
+    @pytest.mark.parametrize(("moves", "next_ft", "hit"), [(0, 4, 0), (1, 3, 0), (4, 1, 4)])
+    def test_scoring_chips_keep_ordinary_transfer_accounting(
+        self, chip: Chip, moves: int, next_ft: int, hit: int
+    ) -> None:
+        assert (
+            free_transfers_after(available=3, transfers_made=moves, chip=chip, gameweek_number=9)
+            == next_ft
+        )
+        assert (
+            points_hit(
+                transfers_made=moves, free_transfers_available=3, chip=chip, gameweek_number=9
+            )
+            == hit
         )
 
 

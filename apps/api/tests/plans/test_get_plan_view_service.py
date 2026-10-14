@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.plan_repository import (
     PlanGameweekRecord,
@@ -126,3 +127,78 @@ def test_double_gameweek_points_are_summed_for_a_player() -> None:
     captain = next(player for player in view.gameweeks[0].players if player.is_captain)
     assert captain.projected_points == 5.0
     assert len(captain.fixtures) == 2
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_canonical_view_uses_replay_not_quarantined_finances(
+    planner_plan, planner_metadata, blocked
+) -> None:
+    from dataclasses import replace
+    from uuid import UUID
+
+    from api.schemas.plans import PlanResponse
+    from fpl_engine.planning.models import TransferDecision
+
+    if blocked:
+        bad = TransferDecision(
+            UUID(int=8000),
+            2,
+            UUID(int=9000),
+            102,
+            UUID(int=8001),
+            54,
+            50,
+            "stored_market",
+            "2026-10-14T12:00:00+00:00",
+            "legacy_initialized_estimate",
+        )
+        planner_plan = replace(
+            planner_plan,
+            gameweeks=(
+                replace(planner_plan.gameweeks[0], transfers=(bad,)),
+                *planner_plan.gameweeks[1:],
+            ),
+        )
+
+    players = [
+        PlanPlayerRecord(
+            identifier,
+            f"P{identifier}",
+            "First",
+            "Second",
+            player.team_id,
+            f"Team {player.team_id}",
+            "TMX",
+            player.position.value,
+            9.9,
+            "a",
+            False,
+            None,
+            False,
+            False,
+        )
+        for identifier, player in planner_metadata.items()
+    ]
+    record = replace(
+        _plan(),
+        canonical_plan=planner_plan,
+        rule_players=players,
+        initial_bank=99.9,
+        initial_free_transfers=5,
+    )
+    view = GetPlanViewService(_FakeProjectionRepository([])).execute(record)
+    response = PlanResponse.model_validate(view).model_dump(mode="json")
+    assert response["foundation_state"] == "ready"
+    assert response["starting_state"]["bank_tenths"] == 10
+    assert response["gameweeks"][0]["accounting"]["closing_bank_tenths"] == (
+        None if blocked else 10
+    )
+    assert response["gameweeks"][0]["free_transfers_available"] == 1
+    if blocked:
+        assert not response["gameweeks"][0]["players"]
+        assert response["gameweeks"][0]["total_points"] is None
+        assert response["total_points"] is None
+        assert response["gameweeks"][1]["accounting"]["closing_bank_tenths"] is None
+    else:
+        assert response["gameweeks"][0]["players"][0]["ownership_id"] is not None
+    assert response["gameweeks"][0]["chip_availability"]["WILDCARD"]["state"] == "available"

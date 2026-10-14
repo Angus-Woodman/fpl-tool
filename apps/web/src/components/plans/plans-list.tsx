@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   PlanRuleError,
@@ -9,8 +9,13 @@ import {
   createPlan,
   deletePlan,
   fetchPlans,
-  updatePlan,
+  fetchPlan,
 } from "@/lib/api";
+import {
+  PlanSaveCoordinator,
+  PlanSaveSnapshot,
+  getPlanSaveCoordinator,
+} from "@/lib/plan-save-coordinator";
 
 type LoadState =
   | { type: "loading" }
@@ -29,6 +34,14 @@ export function PlansList(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renameCoordinator, setRenameCoordinator] =
+    useState<PlanSaveCoordinator | null>(null);
+  const [renameSnapshot, setRenameSnapshot] = useState<PlanSaveSnapshot | null>(
+    null,
+  );
+  const renameSubscription = useRef<() => void>(() => {});
+
+  useEffect(() => () => renameSubscription.current(), []);
 
   async function load(): Promise<void> {
     try {
@@ -37,7 +50,8 @@ export function PlansList(): JSX.Element {
     } catch (error) {
       setState({
         type: "error",
-        message: error instanceof Error ? error.message : "Failed to load plans",
+        message:
+          error instanceof Error ? error.message : "Failed to load plans",
       });
     }
   }
@@ -63,6 +77,43 @@ export function PlansList(): JSX.Element {
     }
   }
 
+  async function saveRename(planId: number): Promise<void> {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const plan = await fetchPlan(planId);
+      if (!plan) throw new Error("Plan no longer exists");
+      const coordinator = getPlanSaveCoordinator(plan);
+      const baseRevision = coordinator.getSnapshot().acknowledged.revision;
+      renameSubscription.current();
+      setRenameCoordinator(coordinator);
+      const observe = () => {
+        const snapshot = coordinator.getSnapshot();
+        setRenameSnapshot(snapshot);
+        setBusy(snapshot.status === "saving");
+        setActionError(snapshot.message);
+        if (
+          snapshot.status === "saved" &&
+          snapshot.acknowledged.revision > baseRevision &&
+          snapshot.pendingCount === 0 &&
+          !snapshot.inFlight
+        ) {
+          renameSubscription.current();
+          setRenamingId(null);
+          setRenameCoordinator(null);
+          setRenameSnapshot(null);
+          void load();
+        }
+      };
+      renameSubscription.current = coordinator.subscribe(observe);
+      coordinator.enqueue([{ kind: "rename_plan", name: renameValue.trim() }]);
+      observe();
+    } catch (error) {
+      setBusy(false);
+      setActionError(error instanceof Error ? error.message : "Rename failed");
+    }
+  }
+
   if (state.type === "loading") {
     return <p className="text-sm text-slate-600">Loading plans...</p>;
   }
@@ -76,7 +127,8 @@ export function PlansList(): JSX.Element {
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold">New plan</h2>
         <p className="mt-1 text-sm text-slate-600">
-          A plan starts from your saved team and lets you work gameweek by gameweek.
+          A plan starts from your saved team and lets you work gameweek by
+          gameweek.
         </p>
         <div className="mt-4 flex flex-wrap items-end gap-3">
           <label className="flex flex-col gap-1 text-sm text-slate-700">
@@ -132,7 +184,34 @@ export function PlansList(): JSX.Element {
             Create Plan
           </button>
         </div>
-        {actionError && <p className="mt-3 text-sm text-red-700">{actionError}</p>}
+        {actionError && (
+          <p role="alert" className="mt-3 text-sm text-red-700">
+            {actionError}
+          </p>
+        )}
+        {renameSnapshot?.status === "not_saved" && (
+          <button
+            type="button"
+            className="mt-2 rounded-md border px-2 py-1 text-sm"
+            onClick={() => renameCoordinator?.retry()}
+          >
+            Retry Rename
+          </button>
+        )}
+        {renameSnapshot?.status === "conflict" && (
+          <button
+            type="button"
+            className="mt-2 rounded-md border px-2 py-1 text-sm"
+            onClick={() => void renameCoordinator?.revalidate()}
+          >
+            Revalidate With Current Data
+          </button>
+        )}
+        {renameSnapshot?.status === "saving" && (
+          <p role="status" className="mt-2 text-sm">
+            Saving rename...
+          </p>
+        )}
       </section>
 
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -158,13 +237,12 @@ export function PlansList(): JSX.Element {
                     <button
                       type="button"
                       className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                      disabled={busy || renameValue.trim().length === 0}
-                      onClick={() =>
-                        void run(async () => {
-                          await updatePlan(plan.plan_id, { name: renameValue.trim() });
-                          setRenamingId(null);
-                        })
+                      disabled={
+                        busy ||
+                        Boolean(renameSnapshot?.inFlight) ||
+                        renameValue.trim().length === 0
                       }
+                      onClick={() => void saveRename(plan.plan_id)}
                     >
                       Save
                     </button>
@@ -172,6 +250,7 @@ export function PlansList(): JSX.Element {
                       type="button"
                       className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
                       onClick={() => setRenamingId(null)}
+                      disabled={Boolean(renameSnapshot?.inFlight)}
                     >
                       Cancel
                     </button>
@@ -193,6 +272,7 @@ export function PlansList(): JSX.Element {
                   <button
                     type="button"
                     aria-label={`Rename ${plan.name}`}
+                    disabled={busy || Boolean(renameSnapshot?.inFlight)}
                     className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
                     onClick={() => {
                       setRenamingId(plan.plan_id);

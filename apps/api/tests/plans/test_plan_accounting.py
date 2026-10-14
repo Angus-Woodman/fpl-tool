@@ -84,7 +84,7 @@ class TestRecalculateAccounting:
         result = _recalculate([_state(1, squad), _state(2, after, Chip.WILDCARD), _state(3, after)])
 
         assert result[1].points_hit == 0
-        assert result[2].free_transfers_available == 2
+        assert result[2].free_transfers_available == 1
 
     def test_free_hit_squad_reverts_the_following_gameweek(self) -> None:
         squad = build_squad()
