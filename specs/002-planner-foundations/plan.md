@@ -145,6 +145,8 @@ Queue captain/vice/swap/chip/transfer/correction intents, not captured complete 
 
 Extract only useful My Team selection/cancel/target/announcement behaviour and presentation primitives. Remove Planner's separate dropdown/formation logic. Have both surfaces consume legal target pairs from the shared engine rearrangement helper (an additive My Team response field may be needed); preserve My Team's current save behaviour and captaincy inheritance. Do not share page state or introduce a general state-management framework. Verify bench visual order actually matches substitute priority, including GK exclusion. Preserve the established visual language; no broad redesign.
 
+Price inspection must explicitly state the saved-price convention: latest known prices are captured for a new/explicitly edited transfer, ordinary refresh does not reprice it, and provenance corrections use the saved market assumption. Numeric live/saved labels alone do not satisfy FR-035's visible-policy requirement. Component/browser coverage must include this explanation, editable completed GWs and ordinary starting-state/transfer edits after a start-later rebase, in addition to the accounting cases below.
+
 ## Delivery Boundaries
 
 These are reviewable architectural slices, not generated tasks. Each implementation slice must gain its owning tests and focused validation before the next integration boundary.
