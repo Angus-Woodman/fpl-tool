@@ -273,12 +273,209 @@ def test_guarded_http_contracts_and_canonical_get(guarded_client):
     )
 
 
+@pytest.mark.parametrize(
+    ("start", "setup", "attempt", "reason"),
+    [
+        *[
+            (
+                17,
+                [{"kind": "activate_chip", "gameweek_number": 18, "chip": chip}],
+                {"kind": "activate_chip", "gameweek_number": 19, "chip": chip},
+                "Planned for gameweek 18",
+            )
+            for chip in ("WILDCARD", "FREE_HIT", "BENCH_BOOST", "TRIPLE_CAPTAIN")
+        ],
+        (
+            17,
+            [{"kind": "set_starting_chips", "used_chips": ["FREE_HIT"]}],
+            {"kind": "activate_chip", "gameweek_number": 18, "chip": "FREE_HIT"},
+            "Used before this plan",
+        ),
+        (
+            17,
+            [{"kind": "activate_chip", "gameweek_number": 18, "chip": "WILDCARD"}],
+            {"kind": "activate_chip", "gameweek_number": 18, "chip": "BENCH_BOOST"},
+            "Remove the existing chip",
+        ),
+        (
+            17,
+            [
+                {"kind": "activate_chip", "gameweek_number": 18, "chip": "WILDCARD"},
+                {"kind": "activate_chip", "gameweek_number": 19, "chip": "BENCH_BOOST"},
+            ],
+            {"kind": "move_chip", "source_gameweek": 18, "target_gameweek": 19, "chip": "WILDCARD"},
+            "source/target has changed",
+        ),
+        *[
+            (
+                1,
+                [],
+                {"kind": "activate_chip", "gameweek_number": 1, "chip": chip},
+                "unavailable in gameweek 1",
+            )
+            for chip in ("WILDCARD", "FREE_HIT")
+        ],
+        *[
+            (
+                19,
+                [{"kind": "activate_chip", "gameweek_number": first, "chip": "FREE_HIT"}],
+                {"kind": "activate_chip", "gameweek_number": second, "chip": "FREE_HIT"},
+                f"Free Hit conflicts with gameweek {first}",
+            )
+            for first, second in ((19, 20), (20, 19))
+        ],
+        (
+            20,
+            [{"kind": "set_starting_chips", "used_chips": [], "free_hit_gameweek_19": True}],
+            {"kind": "activate_chip", "gameweek_number": 20, "chip": "FREE_HIT"},
+            "Free Hit conflicts with gameweek 19",
+        ),
+        (
+            20,
+            [{"kind": "activate_chip", "gameweek_number": 20, "chip": "FREE_HIT"}],
+            {"kind": "set_starting_chips", "used_chips": [], "free_hit_gameweek_19": True},
+            "Free Hit conflicts with gameweek 19",
+        ),
+    ],
+)
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_chip_http_bypass_rejects_with_engine_reason_and_zero_writes(
+    guarded_client, planner_session, start, setup, attempt, reason
+):
+    from api.models.entities import PlanModel
+    from sqlalchemy import select
+    from test_plan_services import mutation_body
+
+    client, plan_id = guarded_client
+    horizon = client.post(
+        f"/plans/{plan_id}/mutations",
+        json=mutation_body(
+            100, 0, [{"kind": "change_horizon", "start_gameweek": start, "end_gameweek": 22}]
+        ).model_dump(mode="json"),
+    )
+    assert horizon.status_code == 200, horizon.text
+    revision = 1
+    if setup:
+        response = client.post(
+            f"/plans/{plan_id}/mutations",
+            json=mutation_body(101, revision, setup).model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+        revision += 1
+    tables = [table for name, table in PlanModel.metadata.tables.items() if name.startswith("plan")]
+
+    def snapshot():
+        return [
+            list(
+                planner_session.execute(
+                    select(table).order_by(*table.primary_key.columns)
+                ).mappings()
+            )
+            for table in tables
+        ]
+
+    before = snapshot()
+    planner_session.rollback()
+    current = client.get(f"/plans/{plan_id}").json()
+    response = client.post(
+        f"/plans/{plan_id}/mutations",
+        json=mutation_body(102, revision, [attempt]).model_dump(mode="json"),
+    )
+    assert response.status_code == 422, response.text
+    assert reason in response.json()["detail"]["message"]
+    assert snapshot() == before
+    assert client.get(f"/plans/{plan_id}").json() == current
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_chip_http_clear_move_reset_and_reopen_use_only_canonical_chip(
+    guarded_client, planner_session
+):
+    from api.models.entities import PlanChip, PlanGameweekModel, PlayerModel
+    from sqlalchemy import select
+    from test_plan_services import mutation_body
+
+    client, plan_id = guarded_client
+    revision = 0
+
+    def mutate(intents):
+        nonlocal revision
+        response = client.post(
+            f"/plans/{plan_id}/mutations",
+            json=mutation_body(200 + revision, revision, intents).model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+        revision += 1
+        return response.json()["plan"]
+
+    mutate([{"kind": "change_horizon", "start_gameweek": 17, "end_gameweek": 22}])
+    mutate([{"kind": "set_starting_chips", "used_chips": ["FREE_HIT"]}])
+    boundary = client.get(f"/plans/{plan_id}").json()["starting_state"]
+    outgoing = next(player for player in boundary["players"] if player["player_id"] == 2)
+    captured = mutate(
+        [
+            {
+                "kind": "add_transfer",
+                "gameweek_number": 18,
+                "outgoing_player_id": 2,
+                "outgoing_ownership_id": outgoing["ownership_id"],
+                "incoming_player_id": 102,
+            }
+        ]
+    )
+    frozen = captured["gameweeks"][1]["decisions"]
+    planner_session.get(PlayerModel, 102).current_price = 9.0
+    legacy = planner_session.scalar(
+        select(PlanGameweekModel).where(
+            PlanGameweekModel.plan_id == plan_id, PlanGameweekModel.gameweek_number == 18
+        )
+    )
+    legacy.chip = PlanChip.WILDCARD
+    planner_session.commit()
+    planned = mutate([{"kind": "activate_chip", "gameweek_number": 18, "chip": "WILDCARD"}])
+    assert planned["gameweeks"][0]["chip_availability"]["WILDCARD"]["conflicting_gameweek"] == 18
+    assert planned["gameweeks"][0]["chip_availability"]["FREE_HIT"]["state"] == "used_before"
+    assert planned["gameweeks"][3]["chip_availability"]["FREE_HIT"]["state"] == "available"
+    assert planned["gameweeks"][3]["chip_availability"]["WILDCARD"]["state"] == "available"
+    moved = mutate(
+        [{"kind": "move_chip", "source_gameweek": 18, "target_gameweek": 19, "chip": "WILDCARD"}]
+    )
+    assert moved["gameweeks"][1]["chip"] is None
+    assert (
+        moved["gameweeks"][0]["chip_availability"]["WILDCARD"]["reason"]
+        == "Planned for gameweek 19"
+    )
+    cleared = mutate(
+        [
+            {
+                "kind": "remove_chip",
+                "gameweek_number": 19,
+                "chip": "WILDCARD",
+                "expected_chip": "WILDCARD",
+            }
+        ]
+    )
+    reopened = client.get(f"/plans/{plan_id}").json()
+    assert reopened == cleared
+    assert all(week["chip"] is None for week in reopened["gameweeks"])
+    assert all(
+        week["chip_availability"]["WILDCARD"]["state"] == "available"
+        for week in reopened["gameweeks"]
+    )
+    assert reopened["gameweeks"][1]["decisions"] == frozen
+    assert all(
+        not week["decisions"] for week in reopened["gameweeks"] if week["gameweek_number"] != 18
+    )
+    assert planner_session.get(PlanGameweekModel, legacy.id).chip == PlanChip.WILDCARD
+
+
+@pytest.mark.parametrize("journey", ["horizon", "chips"])
 @pytest.mark.skipif(
     __import__("os").getenv("RUN_PLANNER_BROWSER_TESTS") != "1",
     reason="Requires guarded SQL, installed Playwright and a running frontend",
 )
-def test_horizon_chip_history_through_actual_browser_and_api(
-    guarded_client, planner_session, planner_plan, planner_metadata
+def test_planner_story_through_actual_browser_and_api(
+    guarded_client, planner_session, planner_plan, planner_metadata, journey
 ):
     import os
     import socket
@@ -294,19 +491,50 @@ def test_horizon_chip_history_through_actual_browser_and_api(
     from fpl_engine.planning.models import GameweekDecision
     from fpl_engine.rules import Chip
 
-    _, plan_id = guarded_client
+    client, plan_id = guarded_client
     repository = PlanRepository(planner_session)
+    start, end = (25, 26) if journey == "horizon" else (17, 22)
     plan = replace(
         planner_plan,
-        start_gameweek=25,
-        end_gameweek=26,
-        boundary=replace(planner_plan.boundary, used_chips=frozenset({Chip.WILDCARD})),
+        start_gameweek=start,
+        end_gameweek=end,
+        boundary=replace(
+            planner_plan.boundary,
+            used_chips=frozenset({Chip.WILDCARD if journey == "horizon" else Chip.FREE_HIT}),
+        ),
         gameweeks=tuple(
-            GameweekDecision(number, planner_plan.boundary.lineup) for number in (25, 26)
+            GameweekDecision(number, planner_plan.boundary.lineup)
+            for number in range(start, end + 1)
         ),
     )
     repository.save_canonical(plan_id, plan, evaluate_plan(plan, planner_metadata))
     planner_session.commit()
+    frozen = []
+    if journey == "chips":
+        from api.models.entities import PlayerModel
+        from test_plan_services import mutation_body
+
+        outgoing = next(player for player in plan.boundary.players if player.player_id == 2)
+        response = client.post(
+            f"/plans/{plan_id}/mutations",
+            json=mutation_body(
+                900,
+                0,
+                [
+                    {
+                        "kind": "add_transfer",
+                        "gameweek_number": 18,
+                        "outgoing_player_id": 2,
+                        "outgoing_ownership_id": str(outgoing.ownership_id),
+                        "incoming_player_id": 102,
+                    }
+                ],
+            ).model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+        frozen = response.json()["plan"]["gameweeks"][1]["decisions"]
+        planner_session.get(PlayerModel, 102).current_price = 9.0
+        planner_session.commit()
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
@@ -325,7 +553,7 @@ def test_horizon_chip_history_through_actual_browser_and_api(
                     "e2e",
                     "tests/e2e/planner-foundations.spec.ts",
                     "--grep",
-                    "real API horizon",
+                    "real API horizon" if journey == "horizon" else "US2 real API chips",
                     "--workers=1",
                     "--reporter=line",
                 ],
@@ -346,9 +574,18 @@ def test_horizon_chip_history_through_actual_browser_and_api(
             thread.join(timeout=10)
             assert not thread.is_alive()
     reopened = repository.load_canonical(plan_id)
-    assert reopened.start_gameweek == 19
+    assert reopened.start_gameweek == (19 if journey == "horizon" else 1)
     assert not reopened.boundary.used_chips
     assert all(week.chip is None for week in reopened.gameweeks)
+    if journey == "chips":
+        current = client.get(f"/plans/{plan_id}").json()
+        assert (
+            next(week for week in current["gameweeks"] if week["gameweek_number"] == 18)[
+                "decisions"
+            ]
+            == frozen
+        )
+        assert sum(len(week["decisions"]) for week in current["gameweeks"]) == 1
 
 
 @pytest.mark.parametrize("failure", ["missing_gameweek", "invalid_price", "invalid_bank"])
