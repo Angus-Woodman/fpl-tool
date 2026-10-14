@@ -273,6 +273,172 @@ def test_guarded_http_contracts_and_canonical_get(guarded_client):
     )
 
 
+@pytest.mark.skipif(
+    __import__("os").getenv("RUN_PLANNER_BROWSER_TESTS") != "1",
+    reason="Requires guarded SQL, installed Playwright and a running frontend",
+)
+def test_horizon_chip_history_through_actual_browser_and_api(
+    guarded_client, planner_session, planner_plan, planner_metadata
+):
+    import os
+    import socket
+    import subprocess
+    from dataclasses import replace
+    from pathlib import Path
+    from threading import Thread
+
+    import httpx
+    import uvicorn
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import GameweekDecision
+    from fpl_engine.rules import Chip
+
+    _, plan_id = guarded_client
+    repository = PlanRepository(planner_session)
+    plan = replace(
+        planner_plan,
+        start_gameweek=25,
+        end_gameweek=26,
+        boundary=replace(planner_plan.boundary, used_chips=frozenset({Chip.WILDCARD})),
+        gameweeks=tuple(
+            GameweekDecision(number, planner_plan.boundary.lineup) for number in (25, 26)
+        ),
+    )
+    repository.save_canonical(plan_id, plan, evaluate_plan(plan, planner_metadata))
+    planner_session.commit()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_level="error"))
+        thread = Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+        thread.start()
+        try:
+            response = httpx.get(f"http://127.0.0.1:{port}/plans/{plan_id}")
+            assert response.status_code == 200, response.text
+            result = subprocess.run(
+                [
+                    "pnpm",
+                    "--filter",
+                    "web",
+                    "e2e",
+                    "tests/e2e/planner-foundations.spec.ts",
+                    "--grep",
+                    "real API horizon",
+                    "--workers=1",
+                    "--reporter=line",
+                ],
+                cwd=Path(__file__).parents[4],
+                env={
+                    **os.environ,
+                    "PLANNER_TEST_API_URL": f"http://127.0.0.1:{port}",
+                    "PLANNER_TEST_PLAN_ID": str(plan_id),
+                },
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+        finally:
+            server.should_exit = True
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+    reopened = repository.load_canonical(plan_id)
+    assert reopened.start_gameweek == 19
+    assert not reopened.boundary.used_chips
+    assert all(week.chip is None for week in reopened.gameweeks)
+
+
+@pytest.mark.parametrize("failure", ["missing_gameweek", "invalid_price", "invalid_bank"])
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_pending_get_exposes_retryable_initialization_reason_without_writes(
+    guarded_client, planner_session, planner_plan, failure
+):
+    from api.models.entities import PlanModel, PlanStartingPlayerModel, PlayerModel
+    from api.repositories.plan_repository import PlanPlayerSave, PlanRepository
+    from api.repositories.squad_player_lookup_repository import SquadPlayerLookupRepository
+    from api.services.initialize_planner_foundations import InitializePlannerFoundationsService
+    from sqlalchemy import func, select
+
+    client, _ = guarded_client
+    repository = PlanRepository(planner_session)
+    plan_id = repository.create(
+        name="Retry initialization",
+        start_gameweek=8,
+        end_gameweek=10,
+        initial_bank=1.0,
+        initial_free_transfers=1,
+    )
+
+    def save_week(number):
+        repository.save_gameweek(
+            plan_id,
+            number,
+            chip=None,
+            bank=1.0,
+            free_transfers_available=1,
+            transfers_made=0,
+            points_hit=0,
+            players=[
+                PlanPlayerSave(
+                    player.player_id,
+                    role.is_starting,
+                    role.bench_order,
+                    role.is_captain,
+                    role.is_vice_captain,
+                )
+                for player, role in zip(
+                    planner_plan.boundary.players, planner_plan.boundary.lineup, strict=True
+                )
+            ],
+        )
+
+    for number in (8, 9, 10):
+        if number != 9 or failure != "missing_gameweek":
+            save_week(number)
+    if failure == "invalid_price":
+        planner_session.get(PlayerModel, 1).current_price = 5.55
+    if failure == "invalid_bank":
+        planner_session.get(PlanModel, plan_id).initial_bank = 1.11
+    planner_session.commit()
+    initializer = InitializePlannerFoundationsService(
+        planner_session, SquadPlayerLookupRepository(planner_session)
+    )
+    report = initializer.execute(plan_id, apply=True)
+    assert report.status == "legacy_pending"
+    response = client.get(f"/plans/{plan_id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["initialization"] == {
+        "ready": False,
+        "reason": "; ".join(report.diagnostics)
+        + ". Repair stored plan/player data and retry initialization.",
+        "retryable": True,
+    }
+    row = planner_session.get(PlanModel, plan_id)
+    assert row.foundation_state == "legacy_pending"
+    assert row.revision == 0
+    assert (
+        planner_session.scalar(
+            select(func.count())
+            .select_from(PlanStartingPlayerModel)
+            .where(PlanStartingPlayerModel.plan_id == plan_id)
+        )
+        == 0
+    )
+    save_week(9)
+    planner_session.get(PlayerModel, 1).current_price = 5.0
+    row.initial_bank = 1.0
+    planner_session.commit()
+    repaired = client.get(f"/plans/{plan_id}")
+    assert repaired.status_code == 200
+    assert repaired.json()["initialization"]["reason"] == "Explicit initialization required"
+    assert repaired.json()["foundation_state"] == "legacy_pending"
+    assert initializer.execute(plan_id, apply=True).status == "initialized"
+    assert client.get(f"/plans/{plan_id}").json()["initialization"]["ready"] is True
+
+
 @pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
 def test_guarded_committed_response_loss_is_reconciled_without_second_write(
     guarded_client, monkeypatch

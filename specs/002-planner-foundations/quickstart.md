@@ -242,3 +242,45 @@ mise exec -- env PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=mac14 \
 	After new-only writes, downgrade refuses; export/conversion or restore is
 	required. Full story matrices, price-resolution UX and departure protection
 	remain later approved increments.
+
+## Independent Review Remediation (2026-10-14)
+
+- Earlier horizon defaults clear chip history when crossing periods or moving
+	to GW1/GW20, and clear an inapplicable FH19 declaration without inventing a
+	planned chip. Same-period assumptions and explicit replacements remain
+	supported. Seven new engine cases reproduced the defects and passed after
+	repair.
+- Downgrade also refuses unresolved `validated_pending` receipts before any
+	schema drops. The regression commits the pending receipt on a revision-zero
+	legacy-origin plan, then verifies refusal and retention of its retry payload.
+	All five migration cases pass.
+- Pending-plan GET reuses the initializer's read-only check and exposes its
+	failure with repair/retry guidance through the existing initialization read
+	model. No diagnostic column or GET initialization writes were added. Three
+	real HTTP cases cover missing gameweeks, invalid prices/bank, data repair and
+	explicit initialization/reopen.
+- A guarded API test launches an ephemeral FastAPI server using the isolated
+	test schema and runs the durable real-API Playwright case against the actual
+	frontend. Desktop/mobile horizon edits send no replacement declarations;
+	GW25 -> GW19 -> GW25 -> GW19 and reload preserve the correct cleared history.
+	API responses are forwarded, not mocked. The mobile screenshot was inspected.
+
+With a freshly built frontend running at port 3100, the complete guarded gate is:
+
+```sh
+mise exec -- env RUN_DB_TESTS=1 RUN_PLANNER_BROWSER_TESTS=1 \
+	TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@localhost:5432/fpl_test \
+	PYTHONPATH=packages/fpl_engine/src PLANNER_BASE_URL=http://127.0.0.1:3100 \
+	PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=mac14 uv run --package api pytest -q \
+	apps/api/tests/plans apps/api/tests/repositories/test_plan_repository.py \
+	apps/api/tests/db/test_planner_foundations_migrations.py
+```
+
+Result: 111 passed, including the real browser/API journey. Without the browser
+opt-in, that case explicitly skips; the standalone browser case also skips
+without its guarded API URL/plan ID. `make lint`, `make typecheck`, `make test`
+(including 105 web tests) and the production build passed. Uvicorn's existing
+WebSocket imports emit two dependency deprecation warnings in the browser
+harness. The stale preview was rebuilt before final browser verification.
+Final source/test diff reviewed: no T038/US2, task/spec/plan, dependency or
+toolchain changes. No persistent database migration/initialization was run.

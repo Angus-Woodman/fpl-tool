@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol, cast
@@ -141,11 +141,22 @@ class ListPlansService:
 
 
 class GetPlanService:
-    def __init__(self, repository: PlanRepositoryPort) -> None:
+    def __init__(
+        self,
+        repository: PlanRepositoryPort,
+        initialization_check: Callable[[int], str | None] | None = None,
+    ) -> None:
         self._repository = repository
+        self._initialization_check = initialization_check
 
     def execute(self, plan_id: int) -> PlanRecord | None:
-        return self._repository.get_for_view(plan_id)
+        plan = self._repository.get_for_view(plan_id)
+        if plan is not None and plan.canonical_plan is None and self._initialization_check:
+            reason = self._initialization_check(plan_id)
+            plan = self._repository.get_for_view(plan_id)
+            if plan is not None:
+                return replace(plan, initialization_reason=reason)
+        return plan
 
 
 class DeletePlanService:

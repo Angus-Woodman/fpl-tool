@@ -539,6 +539,44 @@ def test_core_hypothetical_earlier_start_and_trim_preserve_retained_decisions() 
     assert changed.gameweeks[1:] == plan.gameweeks[:3]
 
 
+@pytest.mark.parametrize(
+    ("start", "target", "expected_used"),
+    [
+        (25, 19, False),
+        (25, 20, False),
+        (12, 1, False),
+        (25, 24, True),
+        (12, 11, True),
+        (18, 25, False),
+    ],
+)
+def test_horizon_defaults_do_not_reinterpret_chip_period_history(
+    start: int, target: int, expected_used: bool
+) -> None:
+    from fpl_engine.planning.models import ChangeHorizon
+    from fpl_engine.planning.mutations import apply_intents
+    from fpl_engine.rules import Chip
+
+    plan = build_plan(start, 26)
+    plan = replace(plan, boundary=replace(plan.boundary, used_chips=frozenset({Chip.WILDCARD})))
+    changed = apply_intents(plan, (ChangeHorizon(target, 26),), metadata()).plan
+    assert changed.boundary.used_chips == (
+        frozenset({Chip.WILDCARD}) if expected_used else frozenset()
+    )
+    assert all(week.chip is None for week in changed.gameweeks)
+
+
+def test_earlier_start_drops_fh19_declaration_without_inventing_a_decision() -> None:
+    from fpl_engine.planning.models import ChangeHorizon
+    from fpl_engine.planning.mutations import apply_intents
+
+    plan = build_plan(20, 21)
+    plan = replace(plan, boundary=replace(plan.boundary, free_hit_gameweek_19=True))
+    changed = apply_intents(plan, (ChangeHorizon(19, 21),), metadata()).plan
+    assert not changed.boundary.free_hit_gameweek_19
+    assert changed.gameweeks[0].chip is None
+
+
 def test_earlier_hypothetical_boundary_preserves_zero_free_transfers() -> None:
     from fpl_engine.planning.models import ChangeHorizon
     from fpl_engine.planning.mutations import apply_intents

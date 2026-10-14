@@ -208,6 +208,13 @@ def _change_horizon(
         boundary = replace(
             boundary,
             origin="earlier_horizon_assumed",
+            used_chips=(
+                boundary.used_chips
+                if season_half(plan.start_gameweek) == season_half(intent.start_gameweek)
+                and intent.start_gameweek not in (1, 20)
+                else frozenset()
+            ),
+            free_hit_gameweek_19=False,
             free_transfers=(
                 None
                 if intent.start_gameweek == 1

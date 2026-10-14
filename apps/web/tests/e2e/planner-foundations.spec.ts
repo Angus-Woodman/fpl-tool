@@ -517,6 +517,79 @@ for (const start of [1, 20, 25]) {
   });
 }
 
+test("US1 real API horizon changes never reinterpret chip history", async ({
+  page,
+}, info) => {
+  const api = process.env.PLANNER_TEST_API_URL;
+  const planId = process.env.PLANNER_TEST_PLAN_ID;
+  test.skip(!api || !planId, "Run through the guarded API browser regression");
+  const horizons: PlanIntent[] = [];
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: HEADERS });
+    expect(["GET", "POST"]).toContain(request.method());
+    if (request.method() === "POST") {
+      for (const intent of request.postDataJSON().intents as PlanIntent[])
+        if (intent.kind === "change_horizon") horizons.push(intent);
+    }
+    const url = new URL(request.url());
+    const response = await route.fetch({
+      url: `${api}${url.pathname}${url.search}`,
+    });
+    await route.fulfill({
+      response,
+      headers: { ...response.headers(), ...HEADERS },
+    });
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/plans/${planId}`);
+  const used = page.getByLabel("Wildcard used before this plan", {
+    exact: true,
+  });
+  await expect(used).toBeChecked();
+  for (const target of [19, 25, 19]) {
+    if (target === 19 && horizons.length > 0) {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await used.click();
+      await saved(page);
+    }
+    await page
+      .getByLabel("Plan start gameweek", { exact: true })
+      .fill(String(target));
+    await expect(
+      page.getByRole("heading", {
+        name: `Starting state at GW${target}`,
+        exact: true,
+      }),
+    ).toBeVisible();
+    await saved(page);
+    await expect(used).not.toBeChecked();
+    await page.reload();
+    await expect(used).not.toBeChecked();
+    if (target === 19 && horizons.length === 1) {
+      await used.click();
+      await saved(page);
+    }
+  }
+  expect(horizons).toEqual(
+    [19, 25, 19].map((start_gameweek) => ({
+      kind: "change_horizon",
+      start_gameweek,
+      end_gameweek: 26,
+    })),
+  );
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: info.outputPath("real-api-earlier-horizon.png"),
+    fullPage: true,
+  });
+});
+
 test("foundation loading and uninitialized plans remain read-only", async ({
   page,
 }) => {

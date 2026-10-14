@@ -24,6 +24,7 @@ from api.schemas.plans import (
     PlanSummaryResponse,
 )
 from api.services.get_plan_view import GetPlanViewService
+from api.services.initialize_planner_foundations import InitializePlannerFoundationsService
 from api.services.plans import (
     CreatePlanRequest,
     CreatePlanService,
@@ -73,8 +74,20 @@ def get_list_plans_service(
 
 def get_get_plan_service(
     repository: Annotated[PlanRepository, Depends(get_plan_repository)],
+    db_session: Annotated[Session, Depends(get_db_session)],
 ) -> GetPlanService:
-    return GetPlanService(repository)
+    def check_initialization(plan_id: int) -> str | None:
+        report = InitializePlannerFoundationsService(
+            db_session, SquadPlayerLookupRepository(db_session)
+        ).execute(plan_id, apply=False)
+        if report.status == "legacy_pending":
+            return (
+                "; ".join(report.diagnostics)
+                + ". Repair stored plan/player data and retry initialization."
+            )
+        return None
+
+    return GetPlanService(repository, check_initialization)
 
 
 def get_create_plan_service(

@@ -87,6 +87,7 @@ class PlanRecord:
     gameweeks: list[PlanGameweekRecord]
     canonical_plan: Plan | None = None
     rule_players: list[PlanPlayerRecord] = field(default_factory=list)
+    initialization_reason: str | None = None
 
 
 @dataclass(frozen=True)

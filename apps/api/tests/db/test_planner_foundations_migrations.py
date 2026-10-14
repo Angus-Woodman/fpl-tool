@@ -115,7 +115,7 @@ def test_isolated_upgrade_downgrade_reupgrade_preserves_legacy_values(
             )
 
 
-@pytest.mark.parametrize("new_write", ["revision", "new_plan"])
+@pytest.mark.parametrize("new_write", ["revision", "new_plan", "pending_receipt"])
 def test_downgrade_refuses_loss_of_new_only_data(planner_session: Session, new_write: str) -> None:
     engine = planner_session.get_bind()
     schema = engine.get_execution_options()["schema_translate_map"][None]
@@ -130,12 +130,33 @@ def test_downgrade_refuses_loss_of_new_only_data(planner_session: Session, new_w
             ),
             {
                 "revision": 1 if new_write == "revision" else 0,
-                "origin": "legacy_first_gameweek_assumed"
-                if new_write == "revision"
-                else "my_team_capture",
+                "origin": "my_team_capture"
+                if new_write == "new_plan"
+                else "legacy_first_gameweek_assumed",
             },
         )
+        if new_write == "pending_receipt":
+            connection.execute(
+                text(
+                    "INSERT INTO plan_mutations (plan_id, mutation_id, digest, "
+                    "expected_revision, status, evaluator_version, rule_fingerprint, "
+                    "pending_inputs) VALUES (1, '00000000-0000-0000-0000-000000000001', "
+                    ":digest, 0, 'validated_pending', 'test', :fingerprint, "
+                    "CAST(:inputs AS jsonb))"
+                ),
+                {
+                    "digest": "a" * 64,
+                    "fingerprint": "b" * 64,
+                    "inputs": '{"intents": [{"kind": "rename_plan", "name": "Accepted"}]}',
+                },
+            )
+    with engine.begin() as connection:
+        connection.execute(select(func.set_config("search_path", schema, True)))
         with Operations.context(MigrationContext.configure(connection)):
             with pytest.raises(RuntimeError, match="Back up/export"):
                 migration_module().downgrade()
         assert connection.execute(text("SELECT name FROM plans WHERE id=1")).scalar_one() == "New"
+        if new_write == "pending_receipt":
+            assert connection.execute(
+                text("SELECT pending_inputs FROM plan_mutations WHERE plan_id=1")
+            ).scalar_one() == {"intents": [{"kind": "rename_plan", "name": "Accepted"}]}

@@ -228,7 +228,7 @@ class GetPlanViewService:
             gameweeks=gameweeks,
             initialization={
                 "ready": False,
-                "reason": "Explicit initialization required",
+                "reason": plan.initialization_reason or "Explicit initialization required",
                 "retryable": True,
             },
         )

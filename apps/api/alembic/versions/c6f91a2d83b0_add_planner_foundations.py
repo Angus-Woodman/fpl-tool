@@ -133,14 +133,16 @@ def downgrade() -> None:
             sa.text(
                 "SELECT EXISTS (SELECT 1 FROM plans WHERE revision > 0 "
                 "OR (foundation_state = 'ready' "
-                "AND boundary_origin <> 'legacy_first_gameweek_assumed'))"
+                "AND boundary_origin <> 'legacy_first_gameweek_assumed')) "
+                "OR EXISTS (SELECT 1 FROM plan_mutations WHERE status = 'validated_pending')"
             )
         )
         .scalar_one()
     )
     if new_writes:
         raise RuntimeError(
-            "Planner has new-only writes. Back up/export and explicitly convert or restore "
+            "Planner has new-only writes or unresolved accepted mutations. "
+            "Reconcile pending mutations first. Back up/export and explicitly convert or restore "
             "before downgrade; an in-place downgrade would lose data."
         )
     for table in ("plan_mutations", "plan_transfer_decisions", "plan_starting_players"):
