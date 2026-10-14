@@ -66,6 +66,20 @@ def validate_candidate(
         error for error in after.diagnostics if _diagnostic_key(error) not in existing
     )
     if introduced:
+        previous_chips = {week.gameweek_number: week.chip for week in previous.gameweeks}
+        changed_chips = {
+            week.gameweek_number
+            for week in candidate.gameweeks
+            if week.chip is not None and week.chip != previous_chips.get(week.gameweek_number)
+        }
+        introduced = tuple(
+            sorted(
+                introduced,
+                key=lambda error: not (
+                    error.code.startswith("chip_") and error.gameweek_number in changed_chips
+                ),
+            )
+        )
         raise MutationRejectedError(introduced)
     if not purchase_correction:
         old_weeks = {week.gameweek_number: week for week in before.gameweeks}

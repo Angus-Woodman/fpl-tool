@@ -65,6 +65,136 @@ def build_squad(
     return slots
 
 
+class TestPlannerChipPeriods:
+    def test_exactly_four_chips_and_unused_first_period_lapses(self) -> None:
+        from fpl_engine.rules.chips import chip_states
+
+        assert {chip.value for chip in Chip} == {
+            "WILDCARD",
+            "FREE_HIT",
+            "BENCH_BOOST",
+            "TRIPLE_CAPTAIN",
+        }
+        for chip in Chip:
+            assert chip_states(20, {}, start_gameweek=17)[chip].state == "available"
+            assert chip_states(38, {20: chip}, start_gameweek=17)[chip].state == "planned_elsewhere"
+
+    @pytest.mark.parametrize("chip", list(Chip))
+    @pytest.mark.parametrize(("first", "second"), [(17, 19), (20, 38)])
+    def test_once_per_period_names_the_existing_gameweek(self, chip, first, second) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        plan = apply_intents(build_plan(17, 38), (SetChip(first, chip, None),), metadata()).plan
+        with pytest.raises(RuleViolationError, match=f"Planned for gameweek {first}"):
+            apply_intents(plan, (SetChip(second, chip, None),), metadata())
+        assert next(week for week in plan.gameweeks if week.gameweek_number == second).chip is None
+
+    @pytest.mark.parametrize("chip", list(Chip))
+    def test_used_before_is_not_planned_elsewhere_and_resets_at_20(self, chip) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from fpl_engine.rules.chips import chip_states
+        from test_planning import build_plan, metadata
+
+        plan = build_plan(17, 22)
+        plan = replace(plan, boundary=replace(plan.boundary, used_chips=frozenset({chip})))
+        state = chip_states(18, {}, start_gameweek=17, used_chips=plan.boundary.used_chips)[chip]
+        assert (state.state, state.reason, state.conflicting_gameweek) == (
+            "used_before",
+            "Used before this plan",
+            None,
+        )
+        with pytest.raises(RuleViolationError, match="Used before this plan"):
+            apply_intents(plan, (SetChip(18, chip, None),), metadata())
+        changed = apply_intents(plan, (SetChip(20, chip, None),), metadata()).plan
+        assert changed.gameweeks[3].chip == chip
+
+    @pytest.mark.parametrize("chip", list(Chip))
+    def test_gameweek_one_restrictions(self, chip) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        plan = build_plan(1, 2)
+        if chip in {Chip.WILDCARD, Chip.FREE_HIT}:
+            with pytest.raises(RuleViolationError, match="unavailable in gameweek 1"):
+                apply_intents(plan, (SetChip(1, chip, None),), metadata())
+        else:
+            assert (
+                apply_intents(plan, (SetChip(1, chip, None),), metadata()).plan.gameweeks[0].chip
+                == chip
+            )
+
+    @pytest.mark.parametrize(("first", "second"), [(19, 20), (20, 19)])
+    @pytest.mark.parametrize("chip", list(Chip))
+    def test_cross_boundary_use_in_either_order(self, chip, first, second) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        plan = apply_intents(build_plan(19, 20), (SetChip(first, chip, None),), metadata()).plan
+        if chip == Chip.FREE_HIT:
+            with pytest.raises(
+                RuleViolationError, match=f"Free Hit conflicts with gameweek {first}"
+            ):
+                apply_intents(plan, (SetChip(second, chip, None),), metadata())
+        else:
+            assert all(
+                week.chip == chip
+                for week in apply_intents(
+                    plan, (SetChip(second, chip, None),), metadata()
+                ).plan.gameweeks
+            )
+
+    @pytest.mark.parametrize("declaration_first", [False, True])
+    def test_free_hit_19_declaration_conflicts_in_either_direction(self, declaration_first) -> None:
+        from fpl_engine.planning.models import SetChip, SetStartingChips
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        declaration = SetStartingChips(frozenset(), True)
+        activation = SetChip(20, Chip.FREE_HIT, None)
+        first, second = (
+            (declaration, activation) if declaration_first else (activation, declaration)
+        )
+        plan = apply_intents(build_plan(20, 21), (first,), metadata()).plan
+        with pytest.raises(RuleViolationError, match="Free Hit conflicts with gameweek 19"):
+            apply_intents(plan, (second,), metadata())
+
+    def test_atomic_chip_moves_removals_and_occupied_targets_preserve_quotes(self) -> None:
+        from fpl_engine.planning.models import MoveChip, SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from fpl_engine.rules.chips import chip_states
+        from test_planning import build_plan, build_transfer, metadata, with_week
+
+        decision = build_transfer()
+        plan = with_week(build_plan(17, 22), 18, chip=Chip.WILDCARD, transfers=(decision,))
+        plan = with_week(plan, 19, chip=Chip.BENCH_BOOST)
+        with pytest.raises(RuleViolationError, match="source/target has changed"):
+            apply_intents(plan, (MoveChip(18, 19, Chip.WILDCARD),), metadata())
+        with pytest.raises(RuleViolationError, match="Remove the existing chip"):
+            apply_intents(plan, (SetChip(18, Chip.TRIPLE_CAPTAIN, Chip.WILDCARD),), metadata())
+        moved = apply_intents(
+            plan, (SetChip(19, None, Chip.BENCH_BOOST), MoveChip(18, 19, Chip.WILDCARD)), metadata()
+        ).plan
+        assert [week.chip for week in moved.gameweeks] == [
+            None,
+            None,
+            Chip.WILDCARD,
+            None,
+            None,
+            None,
+        ]
+        assert moved.gameweeks[1].transfers == (decision,)
+        cleared = apply_intents(moved, (SetChip(19, None, Chip.WILDCARD),), metadata()).plan
+        chips = {week.gameweek_number: week.chip for week in cleared.gameweeks}
+        assert chip_states(17, chips, start_gameweek=17)[Chip.WILDCARD].state == "available"
+        assert cleared.gameweeks[1].transfers == (decision,)
+        assert all(not week.transfers for week in cleared.gameweeks if week.gameweek_number != 18)
+
+
 class TestSquadValidation:
     def test_valid_squad_passes(self) -> None:
         validate_squad(build_squad())

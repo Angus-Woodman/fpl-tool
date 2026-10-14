@@ -264,6 +264,205 @@ afterEach(() => {
 });
 
 describe("PlanBoard", () => {
+  it.each([
+    ["available", null, null, false, false],
+    ["planned_here", null, null, false, true],
+    ["planned_elsewhere", "Planned for gameweek 18", 18, true, false],
+    ["used_before", "Used before this plan", null, true, false],
+    [
+      "rule_unavailable",
+      "Free Hit conflicts with gameweek 19",
+      19,
+      true,
+      false,
+    ],
+  ] as const)(
+    "US2 renders the server's %s chip state",
+    async (state, reason, conflict, disabled, pressed) => {
+      const plan = buildPlannerPlan(17, 22);
+      plan.gameweeks[0].chip = pressed ? "FREE_HIT" : null;
+      plan.gameweeks[0].chip_availability.FREE_HIT = {
+        state,
+        reason,
+        conflicting_gameweek: conflict,
+      };
+      mockFetch(plan);
+      render(<PlanBoard planId={plan.plan_id} />);
+      const button = await screen.findByRole("button", {
+        name: "Free Hit",
+      });
+      expect(button).toHaveAttribute("aria-pressed", String(pressed));
+      if (disabled) expect(button).toBeDisabled();
+      else expect(button).toBeEnabled();
+      if (reason) {
+        expect(screen.getByText(reason, { exact: true })).toBeVisible();
+        expect(button).toHaveAttribute("title", reason);
+      }
+      expect(
+        screen.queryByRole("button", {
+          name: "Move Free Hit from GW18 to GW17",
+        }) !== null,
+      ).toBe(state === "planned_elsewhere");
+    },
+  );
+
+  it("US2 updates named chip reasons only after acknowledged move and clear", async () => {
+    const plan = buildPlannerPlan(17, 22);
+    plan.starting_state!.used_chips = ["FREE_HIT"];
+    plan.gameweeks[1].chip = "WILDCARD";
+    for (const week of plan.gameweeks.slice(0, 3)) {
+      week.chip_availability.FREE_HIT = {
+        state: "used_before",
+        reason: "Used before this plan",
+        conflicting_gameweek: null,
+      };
+      week.chip_availability.WILDCARD =
+        week.gameweek_number === 18
+          ? { state: "planned_here", reason: null, conflicting_gameweek: null }
+          : {
+              state: "planned_elsewhere",
+              reason: "Planned for gameweek 18",
+              conflicting_gameweek: 18,
+            };
+    }
+    const gate = deferred<void>();
+    const server = createPlannerFixture(
+      plan,
+      (current, intents: PlanIntent[]) => {
+        for (const intent of intents) {
+          if (intent.kind === "move_chip") {
+            current.gameweeks[1].chip = null;
+            current.gameweeks[0].chip = "WILDCARD";
+            current.gameweeks[0].chip_availability.WILDCARD = {
+              state: "planned_here",
+              reason: null,
+              conflicting_gameweek: null,
+            };
+            for (const week of current.gameweeks.slice(1, 3))
+              week.chip_availability.WILDCARD = {
+                state: "planned_elsewhere",
+                reason: "Planned for gameweek 17",
+                conflicting_gameweek: 17,
+              };
+          } else if (intent.kind === "remove_chip") {
+            current.gameweeks[0].chip = null;
+            for (const week of current.gameweeks.slice(0, 3))
+              week.chip_availability.WILDCARD = {
+                state: "available",
+                reason: null,
+                conflicting_gameweek: null,
+              };
+          } else throw new Error("Unexpected chip fixture intent");
+        }
+        return current;
+      },
+    );
+    vi.spyOn(global, "fetch").mockImplementation(async (_input, init) => {
+      if (init?.method === "POST") {
+        const envelope = JSON.parse(String(init.body));
+        await gate.promise;
+        return Response.json({
+          ...server.mutate(envelope),
+          mutation_id: envelope.mutation_id,
+          candidate: null,
+        });
+      }
+      return Response.json(server.read());
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Move Wildcard from GW18 to GW17",
+      }),
+    );
+    expect(
+      screen.getByText("Planned for gameweek 18", { exact: true }),
+    ).toBeVisible();
+    gate.resolve();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Wildcard" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
+    );
+    expect(
+      screen.queryByText("Planned for gameweek 18", { exact: true }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Wildcard" }));
+    await waitFor(() => expect(server.read().revision).toBe(2));
+    expect(screen.getByRole("button", { name: "Wildcard" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Free Hit" })).toBeDisabled();
+    expect(
+      screen.getByText("Used before this plan", { exact: true }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByLabelText("Gameweek 20", { exact: true }));
+    expect(screen.getByRole("button", { name: "Free Hit" })).toBeEnabled();
+    expect(server.requests.map((request) => request.intents)).toEqual([
+      [
+        {
+          kind: "move_chip",
+          chip: "WILDCARD",
+          source_gameweek: 18,
+          target_gameweek: 17,
+        },
+      ],
+      [{ kind: "remove_chip", gameweek_number: 17, chip: "WILDCARD" }],
+    ]);
+  });
+
+  it.each([
+    ["BENCH_BOOST", "Bench Boost"],
+    ["TRIPLE_CAPTAIN", "Triple Captain"],
+  ] as const)(
+    "US2 %s activation alone preserves the server bank and allowance",
+    async (chip, label) => {
+      const plan = buildPlannerPlan(17, 18);
+      const accounting = structuredClone(
+        plan.gameweeks.map((week) => week.accounting),
+      );
+      const server = createPlannerFixture(
+        plan,
+        (current, intents: PlanIntent[]) => {
+          expect(intents).toEqual([
+            { kind: "activate_chip", gameweek_number: 17, chip },
+          ]);
+          current.gameweeks[0].chip = chip;
+          current.gameweeks[0].chip_availability[chip] = {
+            state: "planned_here",
+            reason: null,
+            conflicting_gameweek: null,
+          };
+          return current;
+        },
+      );
+      vi.spyOn(global, "fetch").mockImplementation(async (_input, init) => {
+        if (init?.method === "POST") {
+          const envelope = JSON.parse(String(init.body));
+          return Response.json({
+            ...server.mutate(envelope),
+            mutation_id: envelope.mutation_id,
+            candidate: null,
+          });
+        }
+        return Response.json(server.read());
+      });
+      render(<PlanBoard planId={plan.plan_id} />);
+      fireEvent.click(await screen.findByRole("button", { name: label }));
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: label })).toHaveAttribute(
+          "aria-pressed",
+          "true",
+        ),
+      );
+      expect(
+        screen.getByText(/Bank 1.0 · Free transfers 1 · Transfers made 0/),
+      ).toBeVisible();
+      expect(server.read().gameweeks.map((week) => week.accounting)).toEqual(
+        accounting,
+      );
+    },
+  );
+
   it.each([1, 12, 20, 25])(
     "shows the applicable starting-state controls at GW%s",
     async (start) => {

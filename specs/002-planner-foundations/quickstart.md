@@ -1,6 +1,6 @@
 # Planner Foundations Validation Guide
 
-This guide retains the full feature's validation scenarios below. The first approved increment, T001-T037 (shared foundations and US1 Starting State), is implemented and verified as recorded here. US2 and later stories are not implemented or certified by this increment. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State) and T038-T044 (US2 Plan Chips Across Both Periods) are implemented and verified as recorded here. US3 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
 
 ## Prerequisites And Safety
 
@@ -284,3 +284,73 @@ WebSocket imports emit two dependency deprecation warnings in the browser
 harness. The stale preview was rebuilt before final browser verification.
 Final source/test diff reviewed: no T038/US2, task/spec/plan, dependency or
 toolchain changes. No persistent database migration/initialization was run.
+
+## Increment 2: US2 Evidence (2026-10-14)
+
+Scope: T038-T044 only. T045/US3 and all later tasks remain unchecked. Both
+requirements-quality checklists passed before work (16/16 and 35/35).
+
+### Acceptance Evidence
+
+- SC-003: 28 new engine cases cover exactly WC/FH/BB/TC, once per period,
+	first-period lapse/reset, used-before declarations, one chip per GW,
+	occupied-target atomic move rejection, explicit remove/move, WC/FH GW1
+	refusal and BB/TC acceptance, FH19/20 in both orders and both declaration
+	directions. Other same-type chips can occupy both GW19 and GW20.
+- SC-004: eight new component cases cover all five server-provided states,
+	visible conflicting GW, acknowledged move/clear reason updates, period reset
+	and no client-side BB/TC bank/allowance changes. Actual browser/API controls
+	also verify used-before versus planned-elsewhere, planned-here, reset,
+	rule-specific disabled choices and clear/move after acknowledgement.
+- Chip-specific SC-009: 13 direct HTTP bypass cases reject with the engine's
+	reason and leave all canonical, receipt and quarantined plan tables unchanged.
+	A further HTTP clear/move/reopen case proves canonical null is authoritative
+	even with a populated quarantined legacy chip, and saved decisions/quotes
+	remain unchanged after the live incoming price changes from 5.0 to 9.0.
+	This does not certify later-story lineup/squad/repair matrices.
+- T043's actual PostgreSQL-backed browser journey runs at desktop 1440x900 and
+	mobile 390x844 through the existing isolated-schema harness. It exercises
+	GW17-22 with used FH/WC18, move/clear, both-period WC use, FH/WC toggles,
+	both FH19/20 conflict directions, and GW1 WC/FH refusal plus BB/TC acceptance.
+	FH activation restores the permanent squad downstream; clearing it restores
+	the explicit replacement. Every chip toggle preserves the sole decision's
+	ID and captured quotes despite the changed live price; no downstream transfer
+	is fabricated. Reload and final SQL reopen retain cleared chips and that
+	unchanged decision. API responses are forwarded, not mocked.
+
+### Checks And Browser Observations
+
+- Focused gates: 28 engine cases, 14 SQL-backed HTTP cases and eight component
+	cases passed. The entire board suite passed all 23 cases.
+- `mise exec -- make lint`, `mise exec -- make typecheck`,
+	`mise exec -- make test` and `mise exec -- pnpm --filter web build`: passed.
+	Full web regression total: 113 tests; ordinary API runs explicitly skip
+	database/browser opt-ins.
+- The complete guarded command in the preceding section passed 126 cases,
+	including both actual API/browser journeys and isolated migration tests.
+	Dedicated `fpl_test` and the existing `_test` safeguard were retained.
+- The standalone durable browser command above passed eight fixture cases;
+	its two real-API cases explicitly skip without the guarded API URL/plan ID.
+	Both passed through the pytest harness, not through static save responses.
+- Desktop/mobile chip screenshots were inspected: named reasons remain visible
+	with no overlapping chip controls or document overflow in the tested states.
+	No uncaught page errors occurred. Existing mobile navigation scrolling remains.
+	The command-local mac14 Playwright workaround and two existing WebSocket
+	deprecation warnings are unchanged.
+
+### Decisions And Limits
+
+The only production change prioritizes a newly changed chip's authoritative
+diagnostic over the diagnostic on the previously accepted chip. Duplicate/FH
+conflict messages now name the already accepted GW consistently with the
+availability read model. No diagnostic is removed and no second rules path is
+added. Existing chip handlers, API mapping and board controls passed the new
+matrix unchanged; T041/T042 require fixes only for demonstrated defects.
+
+Final source/test/documentation diff reviewed for scope: no US3 implementation,
+new dependencies, migrations, infrastructure, xPts changes or frontend chip
+authority. No persistent development-data initialization or rollout was run.
+Only T038-T044 completion markers were added; task wording is unchanged.
+No known US2 defect blocks US3. Later-story transfer accounting/repair UX,
+price-resolution UX, comprehensive save-failure/departure UX and lineup parity
+are not certified here.

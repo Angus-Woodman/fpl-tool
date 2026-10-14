@@ -103,16 +103,16 @@ description: "Dependency-ordered implementation tasks for Planner Foundations"
 
 ### Tests
 
-- [ ] T038 [P] [US2] Extend `packages/fpl_engine/tests/test_rules.py` for exactly WC/FH/BB/TC, once per period, one per GW, unused first-period lapse, WC/FH GW1 rejection and BB/TC acceptance, FH19/20 rejection in either order/declaration direction, chip moves/removals and named conflicts (FR-009-FR-018; R-01-R-04).
-- [ ] T039 [P] [US2] Add bypass/move/remove/read-model cases in `apps/api/tests/plans/test_plans_router.py` for the same rule messages and canonical `planned_chip=null` despite populated quarantined `chip`; assert rejection writes nothing.
-- [ ] T040 [P] [US2] Add chip-state component cases in `apps/web/tests/plans/plan-board.test.tsx` for available/planned-here/planned-elsewhere/used-before/rule-unavailable and visible conflicting GW; BB/TC activation alone changes neither allowance nor bank.
+- [X] T038 [P] [US2] Extend `packages/fpl_engine/tests/test_rules.py` for exactly WC/FH/BB/TC, once per period, one per GW, unused first-period lapse, WC/FH GW1 rejection and BB/TC acceptance, FH19/20 rejection in either order/declaration direction, chip moves/removals and named conflicts (FR-009-FR-018; R-01-R-04).
+- [X] T039 [P] [US2] Add bypass/move/remove/read-model cases in `apps/api/tests/plans/test_plans_router.py` for the same rule messages and canonical `planned_chip=null` despite populated quarantined `chip`; assert rejection writes nothing.
+- [X] T040 [P] [US2] Add chip-state component cases in `apps/web/tests/plans/plan-board.test.tsx` for available/planned-here/planned-elsewhere/used-before/rule-unavailable and visible conflicting GW; BB/TC activation alone changes neither allowance nor bank.
 
 ### Implementation And Verification
 
-- [ ] T041 [US2] Harden the T011 chip handlers in `packages/fpl_engine/src/fpl_engine/rules/chips.py` and `packages/fpl_engine/src/fpl_engine/planning/mutations.py` against T038/T039's full two-period matrix, atomic moves to an occupied GW and reversed FH19/20 conflicts; fix only demonstrated gaps, preserving contradictory decisions and frozen quotes. Core availability/reasons and activate/remove/move already work before T028; do not implement a second rule path.
-- [ ] T042 [US2] Harden the T024/T028 chip mapping/presentation in `apps/api/src/api/services/get_plan_view.py` and `apps/web/src/components/plans/plan-board.tsx` using T039/T040's clear/move/period-reset scenarios: verify reason updates after acknowledgement, canonical null without legacy fallback and distinct used-before/planned-elsewhere states. Fix only additional integration defects; core controls/reasons were required before T037, with no frontend rule authority or projected-points changes.
-- [ ] T043 [US2] Extend `apps/web/tests/e2e/planner-foundations.spec.ts` with period-reset, forbidden GW1/FH19-20, planned/used reasons, clear/move and FH/WC toggle journeys; assert no phantom downstream transfer or quote refresh (journeys1/4).
-- [ ] T044 [US2] Run chip rule/router/component cases and T043's browser cases and record SC-003/004 plus direct-request SC-009 results in `specs/002-planner-foundations/quickstart.md`.
+- [X] T041 [US2] Harden the T011 chip handlers in `packages/fpl_engine/src/fpl_engine/rules/chips.py` and `packages/fpl_engine/src/fpl_engine/planning/mutations.py` against T038/T039's full two-period matrix, atomic moves to an occupied GW and reversed FH19/20 conflicts; fix only demonstrated gaps, preserving contradictory decisions and frozen quotes. Core availability/reasons and activate/remove/move already work before T028; do not implement a second rule path.
+- [X] T042 [US2] Harden the T024/T028 chip mapping/presentation in `apps/api/src/api/services/get_plan_view.py` and `apps/web/src/components/plans/plan-board.tsx` using T039/T040's clear/move/period-reset scenarios: verify reason updates after acknowledgement, canonical null without legacy fallback and distinct used-before/planned-elsewhere states. Fix only additional integration defects; core controls/reasons were required before T037, with no frontend rule authority or projected-points changes.
+- [X] T043 [US2] Extend `apps/web/tests/e2e/planner-foundations.spec.ts` with period-reset, forbidden GW1/FH19-20, planned/used reasons, clear/move and FH/WC toggle journeys; assert no phantom downstream transfer or quote refresh (journeys1/4).
+- [X] T044 [US2] Run chip rule/router/component cases and T043's browser cases and record SC-003/004 plus direct-request SC-009 results in `specs/002-planner-foundations/quickstart.md`.
 
 **Checkpoint**: All chip states are understandable and enforced by the engine through direct requests, independently of transfer-exploration features.
 

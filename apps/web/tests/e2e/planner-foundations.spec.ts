@@ -590,6 +590,166 @@ test("US1 real API horizon changes never reinterpret chip history", async ({
   });
 });
 
+test("US2 real API chips across periods, clear/move and frozen FH/WC toggles", async ({
+  page,
+}, info) => {
+  const api = process.env.PLANNER_TEST_API_URL;
+  const planId = process.env.PLANNER_TEST_PLAN_ID;
+  test.skip(!api || !planId, "Run through the guarded API browser regression");
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: HEADERS });
+    expect(["GET", "POST"]).toContain(request.method());
+    const url = new URL(request.url());
+    const response = await route.fetch({
+      url: `${api}${url.pathname}${url.search}`,
+    });
+    expect(response.ok()).toBe(true);
+    await route.fulfill({
+      response,
+      headers: { ...response.headers(), ...HEADERS },
+    });
+  });
+  const read = async (): Promise<PlanResponse> => {
+    const response = await page.request.get(`${api}/plans/${planId}`);
+    expect(response.ok()).toBe(true);
+    return response.json();
+  };
+  const initial = await read();
+  const frozen = initial.gameweeks[1].decisions;
+  const preserved = async () => {
+    const current = await read();
+    expect(
+      current.gameweeks.find((week) => week.gameweek_number === 18)!.decisions,
+    ).toEqual(frozen);
+    expect(current.gameweeks.flatMap((week) => week.decisions)).toHaveLength(1);
+  };
+  const select = async (number: number) =>
+    page.getByLabel(`Gameweek ${number}`, { exact: true }).click();
+  const chipButton = (name: string) =>
+    page.getByRole("button", { name, exact: true });
+  const toggle = async (name: string) => {
+    const response = page.waitForResponse(
+      (item) =>
+        item.url().endsWith("/mutations") && item.request().method() === "POST",
+    );
+    await chipButton(name).click();
+    expect((await response).status()).toBe(200);
+    await saved(page);
+    await preserved();
+  };
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/plans/${planId}`);
+  await expect(
+    page.getByText("Used before this plan", { exact: true }),
+  ).toBeVisible();
+  await expect(chipButton("Free Hit")).toBeDisabled();
+  await select(18);
+  await toggle("Wildcard");
+  await expect(chipButton("Wildcard")).toHaveAttribute("aria-pressed", "true");
+  await select(17);
+  await expect(
+    page.getByText("Planned for gameweek 18", { exact: true }),
+  ).toBeVisible();
+  await expect(chipButton("Wildcard")).toBeDisabled();
+  await page.screenshot({
+    path: info.outputPath("chips-desktop.png"),
+    fullPage: true,
+  });
+  await page
+    .getByRole("button", {
+      name: "Move Wildcard from GW18 to GW17",
+      exact: true,
+    })
+    .click();
+  await expect(chipButton("Wildcard")).toHaveAttribute("aria-pressed", "true");
+  await saved(page);
+  await toggle("Wildcard");
+  await expect(
+    page.getByText("Planned for gameweek 18", { exact: true }),
+  ).toHaveCount(0);
+  await select(18);
+  await toggle("Wildcard");
+  await select(20);
+  await expect(chipButton("Wildcard")).toBeEnabled();
+  await expect(chipButton("Free Hit")).toBeEnabled();
+  await toggle("Wildcard");
+  await select(18);
+  await toggle("Wildcard");
+  await select(20);
+  await toggle("Wildcard");
+  await page
+    .getByLabel("Free Hit used before this plan", { exact: true })
+    .click();
+  await saved(page);
+  await select(18);
+  await toggle("Free Hit");
+  expect(
+    (await read()).gameweeks
+      .find((week) => week.gameweek_number === 19)!
+      .players.map((player) => player.player_id),
+  ).toContain(2);
+  await toggle("Free Hit");
+  expect(
+    (await read()).gameweeks
+      .find((week) => week.gameweek_number === 19)!
+      .players.map((player) => player.player_id),
+  ).toContain(102);
+  await toggle("Wildcard");
+  await toggle("Wildcard");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await select(19);
+  await toggle("Free Hit");
+  await select(20);
+  await expect(chipButton("Free Hit")).toBeDisabled();
+  await expect(
+    page.getByText("Free Hit conflicts with gameweek 19", { exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: info.outputPath("chips-mobile.png"),
+    fullPage: true,
+  });
+  await select(19);
+  await toggle("Free Hit");
+  await select(20);
+  await toggle("Free Hit");
+  await select(19);
+  await expect(chipButton("Free Hit")).toBeDisabled();
+  await expect(
+    page.getByText("Free Hit conflicts with gameweek 20", { exact: true }),
+  ).toBeVisible();
+  await select(20);
+  await toggle("Free Hit");
+  await page.getByLabel("Plan start gameweek", { exact: true }).fill("1");
+  await expect(
+    page.getByRole("heading", { name: "Starting state at GW1", exact: true }),
+  ).toBeVisible();
+  await select(1);
+  await expect(chipButton("Wildcard")).toBeDisabled();
+  await expect(chipButton("Free Hit")).toBeDisabled();
+  await toggle("Bench Boost");
+  await toggle("Bench Boost");
+  await toggle("Triple Captain");
+  await toggle("Triple Captain");
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Starting state at GW1", exact: true }),
+  ).toBeVisible();
+  await preserved();
+  expect((await read()).gameweeks.every((week) => week.chip === null)).toBe(
+    true,
+  );
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test("foundation loading and uninitialized plans remain read-only", async ({
   page,
 }) => {
