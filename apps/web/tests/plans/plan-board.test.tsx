@@ -17,6 +17,7 @@ import type {
   PlanResponse,
 } from "@/lib/api";
 import {
+  applyPlannerIntents,
   buildPlannerPlan,
   createPlannerFixture,
   deferred,
@@ -1485,5 +1486,383 @@ describe("PlanBoard", () => {
     expect(
       await screen.findByText("Gameweek 1 goes over budget"),
     ).toBeInTheDocument();
+  });
+});
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status });
+
+type Envelope = {
+  mutation_id: string;
+  expected_revision: number;
+  intents: PlanIntent[];
+};
+
+function plannerServer(
+  plan: PlanResponse,
+  hooks: {
+    apply?: (plan: PlanResponse, intents: PlanIntent[]) => PlanResponse;
+    post?: (
+      envelope: Envelope,
+      call: number,
+      server: ReturnType<typeof createPlannerFixture<PlanResponse, PlanIntent>>,
+    ) => Promise<Response | undefined>;
+    receipt?: (id: string) => Response | undefined;
+  } = {},
+) {
+  const server = createPlannerFixture<PlanResponse, PlanIntent>(
+    plan,
+    hooks.apply ?? applyPlannerIntents,
+  );
+  const posts: Envelope[] = [];
+  const receipts: string[] = [];
+  vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (init?.method === "POST") {
+      const envelope = JSON.parse(String(init.body)) as Envelope;
+      posts.push(envelope);
+      const override = await hooks.post?.(envelope, posts.length, server);
+      if (override) return override;
+      return json({
+        ...server.mutate(envelope),
+        mutation_id: envelope.mutation_id,
+        candidate: null,
+      });
+    }
+    if (url.includes("/mutations/")) {
+      const id = url.split("/mutations/")[1];
+      receipts.push(id);
+      return (
+        hooks.receipt?.(id) ??
+        json(
+          {
+            detail: {
+              code: "mutation_not_found",
+              message: "Mutation receipt is not known",
+            },
+          },
+          404,
+        )
+      );
+    }
+    return json(server.read());
+  });
+  return { server, posts, receipts };
+}
+
+const badge = (name: string): string | null =>
+  screen
+    .getAllByText(name)
+    .map((node) => node.closest("article"))
+    .find((card) => card !== null)
+    ?.querySelector("span.rounded-full")?.textContent ?? null;
+
+const statusText = () => screen.getByRole("status").textContent;
+
+describe("PlanBoard US5 persistence", () => {
+  it("keeps pending intent separate from the accepted plan and from financial flags, with no Save Gameweek", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    plan.financial_status = { provisional: true, requires_resolution: true };
+    const gate = deferred<void>();
+    const { posts } = plannerServer(plan, {
+      post: async (_envelope, call) => {
+        if (call === 1) await gate.promise;
+        return undefined;
+      },
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    await waitFor(() => expect(statusText()).toBe("Saving..."));
+    expect(posts).toHaveLength(1);
+    expect(badge("P10")).toBe("C");
+    expect(badge("P4")).toBeNull();
+    expect(screen.getByText("Requires resolution")).toBeVisible();
+    expect(screen.getByText("Estimated bases")).toBeVisible();
+    gate.resolve();
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    expect(badge("P4")).toBe("C");
+    expect(badge("P10")).toBeNull();
+    expect(screen.getByText("Requires resolution")).toBeVisible();
+    expect(screen.queryByText(/save gameweek/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /save gameweek/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a rejected edit as Saved with its reason, retains Q7 resolution context and the accepted plan", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    plan.financial_status = {
+      provisional: true,
+      requires_resolution: true,
+      earliest_shortfall_gameweek: 12,
+      earliest_shortfall_tenths: 1,
+      earliest_shortfall_reason: "Bank is £0.1m below zero in gameweek 12",
+      gameweeks: [
+        { gameweek_number: 12, shortfall_tenths: 1, affected_chain: [12] },
+      ],
+    };
+    const { posts, server } = plannerServer(plan, {
+      post: async () =>
+        json(
+          {
+            detail: {
+              code: "formation",
+              message: "Illegal formation",
+              diagnostics: [],
+            },
+          },
+          422,
+        ),
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Illegal formation",
+    );
+    expect(statusText()).toBe("Saved");
+    expect(
+      screen.queryByRole("button", { name: "Retry Same Edit" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Financial resolution" }),
+    ).toBeVisible();
+    expect(screen.getByText("Requires resolution")).toBeVisible();
+    expect(badge("P10")).toBe("C");
+    expect(badge("P4")).toBeNull();
+    expect(posts).toHaveLength(1);
+    expect(server.read().revision).toBe(0);
+  });
+
+  it("keeps an accepted-but-unsaved candidate across gameweek selection and retries the same ID", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const candidate = applyPlannerIntents(structuredClone(plan), [
+      { kind: "change_captain", gameweek_number: 12, player_id: 4 },
+    ]);
+    const { posts, server } = plannerServer(plan, {
+      post: async (_envelope, call) =>
+        call === 1
+          ? json(
+              {
+                detail: {
+                  code: "accepted_not_saved",
+                  message:
+                    "Accepted edit is not saved; retry the same mutation ID",
+                  plan,
+                  candidate,
+                },
+              },
+              503,
+            )
+          : undefined,
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    await waitFor(() => expect(statusText()).toBe("Not saved"));
+    expect(badge("P4")).toBe("C");
+    expect(screen.getByLabelText("Make P5 captain")).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("Gameweek 13"));
+    fireEvent.click(screen.getByLabelText("Gameweek 12"));
+    expect(statusText()).toBe("Not saved");
+    expect(badge("P4")).toBe("C");
+    expect(server.read().revision).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Retry Same Edit" }));
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    expect(posts).toHaveLength(2);
+    expect(posts[1]).toEqual(posts[0]);
+    expect(server.read().revision).toBe(1);
+  });
+
+  it("reconciles a lost success with the same ID instead of posting again", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const { posts, receipts, server } = plannerServer(plan, {
+      post: async (envelope, call, fake) => {
+        if (call === 1) {
+          fake.mutate(envelope);
+          throw new TypeError("Network response lost");
+        }
+        return undefined;
+      },
+      receipt: (id) =>
+        json({
+          status: "already_committed",
+          mutation_id: id,
+          committed_revision: 1,
+          plan: server.read(),
+          candidate: null,
+        }),
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    await waitFor(() => expect(statusText()).toBe("Not saved"));
+    fireEvent.click(screen.getByRole("button", { name: "Check Save Status" }));
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    expect(receipts).toEqual([posts[0].mutation_id]);
+    expect(posts).toHaveLength(1);
+    expect(badge("P4")).toBe("C");
+    expect(server.read().revision).toBe(1);
+  });
+
+  it("treats an unknown receipt as inconclusive and keeps the same ID retryable", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const { posts, receipts } = plannerServer(plan, {
+      post: async (_envelope, call) => {
+        if (call === 1) throw new TypeError("Network response lost");
+        return undefined;
+      },
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    await waitFor(() => expect(statusText()).toBe("Not saved"));
+    fireEvent.click(screen.getByRole("button", { name: "Check Save Status" }));
+    await waitFor(() => expect(receipts).toHaveLength(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /not confirmed/i,
+    );
+    expect(statusText()).toBe("Not saved");
+    expect(
+      screen.queryByRole("button", { name: "Revalidate With Current Data" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry Same Edit" }));
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    expect(posts[1]).toEqual(posts[0]);
+  });
+
+  it("stops writing and says so when the plan no longer exists", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const { posts } = plannerServer(plan, {
+      post: async () =>
+        json(
+          { detail: { code: "plan_not_found", message: "Plan not found" } },
+          404,
+        ),
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    await waitFor(() => expect(statusText()).toBe("Plan missing"));
+    expect(screen.getByRole("alert")).toHaveTextContent(/no longer exists/i);
+    expect(screen.getByLabelText("Make P5 captain")).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Retry Same Edit" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Revalidate With Current Data" }),
+    ).not.toBeInTheDocument();
+    expect(posts).toHaveLength(1);
+  });
+
+  it("requires explicit revalidation with a new ID after stale pending metadata", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const advanced = { ...structuredClone(plan), revision: 2 };
+    const { posts, server } = plannerServer(advanced, {
+      post: async (_envelope, call) =>
+        call === 1
+          ? json(
+              {
+                detail: {
+                  code: "stale_reprepare_required",
+                  message:
+                    "Accepted inputs need explicit revalidation with a new ID",
+                  plan: advanced,
+                  candidate: null,
+                },
+              },
+              409,
+            )
+          : undefined,
+    });
+    vi.mocked(global.fetch).mockImplementationOnce(async () => json(plan));
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    await waitFor(() => expect(statusText()).toBe("Needs reconciliation"));
+    expect(posts).toHaveLength(1);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Revalidate With Current Data" }),
+    );
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    expect(posts[1].mutation_id).not.toBe(posts[0].mutation_id);
+    expect(posts[1]).toMatchObject({
+      expected_revision: 2,
+      intents: posts[0].intents,
+    });
+    expect(server.read().revision).toBe(3);
+  });
+
+  it("tells the user a queued edit was not applied when its target disappeared, without stalling", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const gate = deferred<void>();
+    const { posts } = plannerServer(plan, {
+      apply: (current, intents) => {
+        const next = applyPlannerIntents(current, intents);
+        for (const week of next.gameweeks)
+          week.players = week.players.map((player) =>
+            player.player_id === 5
+              ? { ...player, player_id: 205, web_name: "P205" }
+              : player,
+          );
+        return next;
+      },
+      post: async (_envelope, call) => {
+        if (call === 1) await gate.promise;
+        return undefined;
+      },
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    fireEvent.click(screen.getByLabelText("Make P5 captain"));
+    gate.resolve();
+    expect(await screen.findByText(/Edit not applied/)).toHaveTextContent(
+      /select the intended player again/i,
+    );
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    expect(posts).toHaveLength(1);
+  });
+
+  it("guards native and in-app departure only while work is unsaved", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const gate = deferred<void>();
+    plannerServer(plan, {
+      post: async (_envelope, call) => {
+        if (call === 1) await gate.promise;
+        return undefined;
+      },
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const link = document.createElement("a");
+    link.href = "/my-team";
+    link.textContent = "Elsewhere";
+    const reached: boolean[] = [];
+    link.addEventListener("click", (event) => {
+      reached.push(event.defaultPrevented);
+      event.preventDefault();
+    });
+    document.body.appendChild(link);
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Make P4 captain"));
+    await waitFor(() => expect(statusText()).toBe("Saving..."));
+    const unload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+    link.click();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(reached).toEqual([]);
+    const mail = document.createElement("a");
+    mail.href = "mailto:support@example.com";
+    mail.addEventListener("click", (event) => event.preventDefault());
+    document.body.appendChild(mail);
+    mail.click();
+    mail.remove();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    confirm.mockReturnValue(true);
+    link.click();
+    expect(reached).toEqual([false]);
+    gate.resolve();
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    const calm = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(calm);
+    expect(calm.defaultPrevented).toBe(false);
+    link.click();
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(reached).toEqual([false, false]);
+    link.remove();
   });
 });

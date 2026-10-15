@@ -1082,6 +1082,275 @@ test("US4 real API pricing inspection, correction shortfall, repair and rebased 
   expect(errors).toEqual([]);
 });
 
+test("US5 real API persistence, failure, reconciliation, conflict, rejection and departure", async ({
+  page,
+}, info) => {
+  test.setTimeout(150_000);
+  const api = process.env.PLANNER_TEST_API_URL;
+  const planId = process.env.PLANNER_TEST_PLAN_ID;
+  const faultFile = process.env.PLANNER_FAULT_FILE;
+  test.skip(
+    !api || !planId || !faultFile,
+    "Run through the guarded API browser regression",
+  );
+  const errors: string[] = [];
+  const posts: {
+    mutation_id: string;
+    expected_revision: number;
+    intents: PlanIntent[];
+  }[] = [];
+  const responses: number[] = [];
+  const dialogs: { type: string; message: string }[] = [];
+  let hold: Promise<void> | null = null;
+  let dropNext = false;
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: HEADERS });
+    expect(["GET", "POST"]).toContain(request.method());
+    const post = request.method() === "POST";
+    if (post) posts.push(request.postDataJSON());
+    const gate = post ? hold : null;
+    if (gate) {
+      hold = null;
+      await gate;
+    }
+    const url = new URL(request.url());
+    const response = await route.fetch({
+      url: `${api}${url.pathname}${url.search}`,
+    });
+    if (post) responses.push(response.status());
+    expect([200, 404, 409, 422, 503]).toContain(response.status());
+    if (post && dropNext) {
+      dropNext = false;
+      return route.abort("failed");
+    }
+    // The final navigation can dispose an in-flight forwarded response.
+    await route
+      .fulfill({ response, headers: { ...response.headers(), ...HEADERS } })
+      .catch((error: Error) => {
+        if (!/disposed|closed/i.test(error.message)) throw error;
+      });
+  });
+  const fs = await import("node:fs");
+  const read = async (): Promise<PlanResponse> =>
+    (await page.request.get(`${api}/plans/${planId}`)).json();
+  const otherTab = async (name: string) => {
+    const current = await read();
+    const response = await page.request.post(
+      `${api}/plans/${planId}/mutations`,
+      {
+        data: {
+          mutation_id: crypto.randomUUID(),
+          expected_revision: current.revision,
+          intents: [{ kind: "rename_plan", name }],
+        },
+      },
+    );
+    expect(response.status()).toBe(200);
+  };
+  const select = async (number: number) =>
+    page.getByLabel(`Gameweek ${number}`, { exact: true }).click();
+  const status = (text: string) =>
+    page.getByRole("status").filter({ hasText: new RegExp(`^${text}$`) });
+  const roles = async (number: number) => {
+    const week = (await read()).gameweeks.find(
+      (item) => item.gameweek_number === number,
+    )!;
+    return [
+      week.players.find((player) => player.is_captain)?.player_id,
+      week.players.find((player) => player.is_vice_captain)?.player_id,
+    ];
+  };
+  const badge = (name: string) =>
+    page
+      .locator("article")
+      .filter({ has: page.getByText(name, { exact: true }) })
+      .locator("span.rounded-full");
+  const noSaveButton = async () => {
+    await expect(
+      page.getByRole("button", { name: /save gameweek/i }),
+    ).toHaveCount(0);
+    await expect(page.getByText(/save gameweek/i)).toHaveCount(0);
+  };
+  fs.rmSync(faultFile!, { force: true });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/plans/${planId}`);
+  await select(9);
+  await noSaveButton();
+  expect(await roles(9)).toEqual([2, 3]);
+
+  // A: delayed captain C, vice D, immediate gameweek switch, then reload.
+  let release!: () => void;
+  hold = new Promise<void>((resolve) => (release = resolve));
+  await page.getByLabel("Make P4 captain", { exact: true }).click();
+  await page.getByLabel("Make P5 vice-captain", { exact: true }).click();
+  await select(10);
+  await expect(status("Saving...")).toBeVisible();
+  expect(posts).toHaveLength(1);
+  expect(await roles(9)).toEqual([2, 3]);
+  release();
+  await expect(status("Saved")).toBeVisible();
+  expect(posts.map((post) => [post.expected_revision, post.intents])).toEqual([
+    [0, [{ kind: "change_captain", gameweek_number: 9, player_id: 4 }]],
+    [1, [{ kind: "change_vice_captain", gameweek_number: 9, player_id: 5 }]],
+  ]);
+  expect(posts[0].mutation_id).not.toBe(posts[1].mutation_id);
+  expect(await roles(9)).toEqual([4, 5]);
+  expect(await roles(10)).toEqual([2, 3]);
+  await select(9);
+  await expect(badge("P4")).toHaveText("C");
+  await expect(badge("P5")).toHaveText("VC");
+  await page.reload();
+  await select(9);
+  await expect(badge("P4")).toHaveText("C");
+  await expect(badge("P5")).toHaveText("VC");
+  await page.screenshot({
+    path: info.outputPath("persistence-saved-desktop.png"),
+    fullPage: true,
+  });
+
+  // B: canonical write fails after the durable receipt; retry the same ID.
+  fs.writeFileSync(faultFile!, "fail");
+  const beforeFailure = posts.length;
+  await page.getByLabel("Make P6 captain", { exact: true }).click();
+  await expect(status("Not saved")).toBeVisible();
+  expect(responses.at(-1)).toBe(503);
+  await expect(badge("P6")).toHaveText("C");
+  expect((await read()).revision).toBe(2);
+  expect(await roles(9)).toEqual([4, 5]);
+  await expect(
+    page.getByLabel("Make P7 captain", { exact: true }),
+  ).toBeDisabled();
+  await select(10);
+  await select(9);
+  await expect(status("Not saved")).toBeVisible();
+  await expect(badge("P6")).toHaveText("C");
+  await page.screenshot({
+    path: info.outputPath("persistence-not-saved-desktop.png"),
+    fullPage: true,
+  });
+  fs.rmSync(faultFile!, { force: true });
+  await page
+    .getByRole("button", { name: "Retry Same Edit", exact: true })
+    .click();
+  await expect(status("Saved")).toBeVisible();
+  expect(posts.slice(beforeFailure)).toHaveLength(2);
+  expect(posts[beforeFailure + 1]).toEqual(posts[beforeFailure]);
+  expect((await read()).revision).toBe(3);
+  expect(await roles(9)).toEqual([6, 5]);
+
+  // C: success is lost, another tab advances the plan, then reconcile by ID.
+  dropNext = true;
+  const beforeLost = posts.length;
+  await page.getByLabel("Make P7 captain", { exact: true }).click();
+  await expect(status("Not saved")).toBeVisible();
+  expect((await read()).revision).toBe(4);
+  await otherTab("Other tab");
+  await page
+    .getByRole("button", { name: "Check Save Status", exact: true })
+    .click();
+  await expect(status("Saved")).toBeVisible();
+  expect(posts).toHaveLength(beforeLost + 1);
+  await expect(
+    page.getByRole("heading", { name: "Other tab", exact: true }),
+  ).toBeVisible();
+  await expect(badge("P7")).toHaveText("C");
+  expect((await read()).revision).toBe(5);
+
+  // D: stale revision conflict, explicit revalidation with a new ID.
+  await otherTab("Second tab");
+  const beforeStale = posts.length;
+  await page.getByLabel("Make P8 captain", { exact: true }).click();
+  await expect(status("Needs reconciliation")).toBeVisible();
+  expect(responses.at(-1)).toBe(409);
+  await expect(
+    page.getByRole("heading", { name: "Second tab", exact: true }),
+  ).toBeVisible();
+  expect((await read()).revision).toBe(6);
+  await page
+    .getByRole("button", { name: "Revalidate With Current Data", exact: true })
+    .click();
+  await expect(status("Saved")).toBeVisible();
+  const [stale, retried] = posts.slice(beforeStale);
+  expect(retried.mutation_id).not.toBe(stale.mutation_id);
+  expect([stale.expected_revision, retried.expected_revision]).toEqual([5, 6]);
+  expect(retried.intents).toEqual(stale.intents);
+  expect((await read()).revision).toBe(7);
+  expect(await roles(9)).toEqual([8, 5]);
+
+  // E: a new rule violation is rejected, shown as saved, and leaves retry state intact.
+  await page.getByLabel("Transfer P2", { exact: true }).click();
+  await page.getByLabel("Transfer in P102", { exact: true }).click();
+  await expect(
+    page.locator("p[role=alert]").filter({ hasText: /shortfall/i }),
+  ).toBeVisible();
+  expect(responses.at(-1)).toBe(422);
+  await expect(status("Saved")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry Same Edit" }),
+  ).toHaveCount(0);
+  expect((await read()).revision).toBe(7);
+  expect((await read()).gameweeks.flatMap((week) => week.decisions)).toEqual(
+    [],
+  );
+  expect(await roles(9)).toEqual([8, 5]);
+  await page.getByLabel("Make P9 vice-captain", { exact: true }).click();
+  await expect(status("Saved")).toBeVisible();
+  expect((await read()).revision).toBe(8);
+  expect(await roles(9)).toEqual([8, 9]);
+
+  // F: departure is guarded only while the latest edit is unsaved.
+  page.on("dialog", async (dialog) => {
+    dialogs.push({ type: dialog.type(), message: dialog.message() });
+    await dialog.dismiss();
+  });
+  let unblock!: () => void;
+  hold = new Promise<void>((resolve) => (unblock = resolve));
+  await page.getByLabel("Make P10 captain", { exact: true }).click();
+  await expect(status("Saving...")).toBeVisible();
+  expect(
+    await page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    }),
+  ).toBe(true);
+  const nav = page.getByRole("navigation", { name: "Primary" });
+  await nav.getByRole("link", { name: "Players", exact: true }).click();
+  await expect.poll(() => dialogs.length).toBe(1);
+  expect(dialogs[0].type).toBe("confirm");
+  expect(dialogs[0].message).toMatch(/not saved/i);
+  await expect(page).toHaveURL(new RegExp(`/plans/${planId}$`));
+  unblock();
+  await expect(status("Saved")).toBeVisible();
+  expect(
+    await page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    }),
+  ).toBe(false);
+  expect((await read()).revision).toBe(9);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(badge("P10")).toHaveText("C");
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: info.outputPath("persistence-saved-mobile.png"),
+    fullPage: true,
+  });
+  await nav.getByRole("link", { name: "Players", exact: true }).click();
+  await expect(page).toHaveURL(/\/players$/);
+  expect(dialogs).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
 test("US2 real API chips across periods, clear/move and frozen FH/WC toggles", async ({
   page,
 }, info) => {

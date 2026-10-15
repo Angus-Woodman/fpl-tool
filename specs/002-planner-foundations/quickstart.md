@@ -1,6 +1,6 @@
 # Planner Foundations Validation Guide
 
-This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) and T054-T065 (US4 Official Selling Prices And Financial Resolution) are implemented and verified as recorded here. US5 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) and T054-T065 (US4 Official Selling Prices And Financial Resolution) and T066-T075 (US5 Persistence And Navigation Safety) are implemented and verified as recorded here. US6 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
 
 ## Prerequisites And Safety
 
@@ -614,3 +614,53 @@ overflow and no page errors. API responses were forwarded, not mocked.
 Comprehensive save-failure/departure UX (US5), lineup-rearrangement parity (US6)
 and completion tasks are not certified. The edit-then-refresh display shows the
 latest price only as information; no speculative future price is accepted.
+
+## Increment 5: US5 Evidence (2026-10-15)
+
+Scope: T066-T075 only. T076/US6 and later tasks remain unchecked. Both
+requirements-quality checklists passed before work (35/35 and 16/16) and were
+not edited. No extension hooks are registered. Server and engine source were
+not changed: the receipt/idempotency contract already satisfied US5, so T068
+and T072 pin existing behaviour.
+
+### Behaviour Evidence (SC-006 / SC-007)
+
+- Single writer path: a static guard fails if any Planner component or client
+  helper writes outside the coordinator; plan-list rename issues zero
+  PATCH/PUT and a vanished plan shows a missing-plan state. Legacy PUT/PATCH
+  remain 410 and there is no Save Gameweek control.
+- Receipt lookup 404 `mutation_not_found` is inconclusive: the same mutation
+  ID is retried or reconciled ("Retry Same Edit" / "Check Save Status"). Only
+  409/410 conflicts use a new ID after explicit revalidation. 404
+  `plan_not_found` stops writes ("Plan missing").
+- A queued intent whose target vanished is recorded as skipped and later
+  intents still drain (no stranded queue); a rejected (422) edit keeps its
+  message and shows saved state, not "Not saved".
+- Departure guard: `beforeunload` plus in-app http(s) link confirmation while
+  work is unsaved; `mailto:`, new-tab, modifier-click, download and same-URL
+  links are not intercepted.
+- Real frontend to API to PostgreSQL journey: injected 503 then reload shows
+  the last committed state, the retried same-ID edit commits once, and SQL
+  reopen asserts exactly one committed revision.
+
+### Verification Run
+
+- Root `make lint typecheck test`: ruff clean, ESLint clean, mypy 34 and 78
+  source files clean, web 158 tests in 12 files passed.
+- Planner client suites: 75 passed (coordinator 16, board 36, list 4, static
+  guard 3, plus pre-existing cases in those files).
+- Guarded (isolated `fpl_test` schemas, owned preview on 3101): 187 passed
+  across plans services/router/accounting, plan repository (24) and
+  migrations (5); fixture browser journeys 8 passed; the real-API persistence
+  journey passed. Cleanup confirmed: preview exited, port 3101 free,
+  `.next-copilot` absent.
+- Defects found by failing tests first and fixed: receipt-404 treated as a
+  conflict; missing plan not distinct; vanished target stranded the queue;
+  rejection message wiped on next dispatch; rejected edit shown as "Not
+  saved"; no reconcile control or departure guard; `mailto:` wrongly prompted.
+
+### Known Limits
+
+- The guard covers `beforeunload` and link clicks, not Next router
+  back/forward or programmatic navigation.
+- No cross-tab merge; no unload-time persistence is promised.

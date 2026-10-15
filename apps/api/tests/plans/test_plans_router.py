@@ -477,13 +477,13 @@ def test_chip_http_clear_move_reset_and_reopen_use_only_canonical_chip(
     assert planner_session.get(PlanGameweekModel, legacy.id).chip == PlanChip.WILDCARD
 
 
-@pytest.mark.parametrize("journey", ["horizon", "chips", "transfers", "pricing"])
+@pytest.mark.parametrize("journey", ["horizon", "chips", "transfers", "pricing", "persistence"])
 @pytest.mark.skipif(
     __import__("os").getenv("RUN_PLANNER_BROWSER_TESTS") != "1",
     reason="Requires guarded SQL, installed Playwright and a running frontend",
 )
 def test_planner_story_through_actual_browser_and_api(
-    guarded_client, planner_session, planner_plan, planner_metadata, journey
+    guarded_client, planner_session, planner_plan, planner_metadata, journey, tmp_path, monkeypatch
 ):
     import os
     import socket
@@ -506,6 +506,7 @@ def test_planner_story_through_actual_browser_and_api(
         "chips": (17, 22),
         "transfers": (8, 12),
         "pricing": (8, 11),
+        "persistence": (8, 10),
     }[journey]
     plan = replace(
         planner_plan,
@@ -515,7 +516,7 @@ def test_planner_story_through_actual_browser_and_api(
             planner_plan.boundary,
             free_transfers=2 if journey == "transfers" else planner_plan.boundary.free_transfers,
             used_chips=frozenset()
-            if journey in ("transfers", "pricing")
+            if journey in ("transfers", "pricing", "persistence")
             else frozenset({Chip.WILDCARD if journey == "horizon" else Chip.FREE_HIT}),
         ),
         gameweeks=tuple(
@@ -561,6 +562,22 @@ def test_planner_story_through_actual_browser_and_api(
         planner_session.get(PlayerModel, 105).current_price = 8.0
         planner_session.get(PlayerModel, 113).current_price = 5.2
         planner_session.commit()
+    fault_file = tmp_path / "canonical-write-fault"
+    if journey == "persistence":
+        from api.models.entities import PlayerModel
+        from api.repositories.plan_repository import PlanRepository as FaultRepository
+        from sqlalchemy.exc import SQLAlchemyError
+
+        planner_session.get(PlayerModel, 102).current_price = 9.0
+        planner_session.commit()
+        real_save = FaultRepository.save_canonical
+
+        def save_unless_faulted(*args, **kwargs):
+            if fault_file.exists():
+                raise SQLAlchemyError("Injected canonical write failure after receipt")
+            return real_save(*args, **kwargs)
+
+        monkeypatch.setattr(FaultRepository, "save_canonical", save_unless_faulted)
     if journey == "pricing":
         from api.models.entities import PlayerModel
         from test_plan_services import mutation_body
@@ -637,6 +654,7 @@ def test_planner_story_through_actual_browser_and_api(
                         "chips": "US2 real API chips",
                         "transfers": "US3 real API transfers",
                         "pricing": "US4 real API pricing",
+                        "persistence": "US5 real API persistence",
                     }[journey],
                     "--workers=1",
                     "--reporter=line",
@@ -646,6 +664,7 @@ def test_planner_story_through_actual_browser_and_api(
                     **os.environ,
                     "PLANNER_TEST_API_URL": f"http://127.0.0.1:{port}",
                     "PLANNER_TEST_PLAN_ID": str(plan_id),
+                    "PLANNER_FAULT_FILE": str(fault_file),
                 },
                 capture_output=True,
                 text=True,
@@ -665,6 +684,7 @@ def test_planner_story_through_actual_browser_and_api(
             "chips": 1,
             "transfers": 8,
             "pricing": 9,
+            "persistence": 8,
         }[journey]
     )
     assert not reopened.boundary.used_chips
@@ -678,6 +698,23 @@ def test_planner_story_through_actual_browser_and_api(
             == reopened.gameweeks[0].transfers[0].incoming_ownership_id
         )
         assert not evaluate_plan(reopened, planner_metadata).diagnostics
+    if journey == "persistence":
+        assert reopened.revision == 9
+        assert reopened.name == "Second tab"
+        assert not fault_file.exists()
+        assert not any(week.transfers for week in reopened.gameweeks)
+        by_slot = {p.slot_id: p.player_id for p in reopened.boundary.players}
+
+        def roles(number):
+            lineup = next(w.lineup for w in reopened.gameweeks if w.gameweek_number == number)
+            return (
+                next(by_slot[r.slot_id] for r in lineup if r.is_captain),
+                next(by_slot[r.slot_id] for r in lineup if r.is_vice_captain),
+            )
+
+        assert roles(9) == (10, 9)
+        assert roles(8) == roles(10) == (2, 3)
+        assert reopened.boundary.bank_tenths == 10
     if journey == "pricing":
         decision = reopened.gameweeks[0].transfers[0]
         carried = next(p for p in reopened.boundary.players if p.player_id == 113)
@@ -879,3 +916,122 @@ def test_us4_http_exposes_basis_saved_quotes_live_prices_and_shortfall(
     assert status["requires_resolution"] is True
     assert "gameweek 8" in status["earliest_shortfall_reason"]
     assert corrected["gameweeks"][0]["accounting"]["closing_bank_tenths"] == -1
+
+
+def _post(client, plan_id, number, revision, intents=None):
+    from test_plan_services import mutation_body
+
+    return client.post(
+        f"/plans/{plan_id}/mutations",
+        json=mutation_body(number, revision, intents).model_dump(mode="json"),
+    )
+
+
+def _receipt(client, plan_id, number):
+    from uuid import UUID
+
+    return client.get(f"/plans/{plan_id}/mutations/{UUID(int=number)}")
+
+
+def _fail_canonical_writes(monkeypatch):
+    from api.repositories.plan_repository import PlanRepository
+    from sqlalchemy.exc import SQLAlchemyError
+
+    original = PlanRepository.save_canonical
+
+    def fail(*args, **kwargs):
+        raise SQLAlchemyError("Injected accepted write failure")
+
+    monkeypatch.setattr(PlanRepository, "save_canonical", fail)
+    return lambda: monkeypatch.setattr(PlanRepository, "save_canonical", original)
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us5_http_pending_candidate_exists_only_while_its_base_is_compatible(
+    guarded_client, monkeypatch
+):
+    client, plan_id = guarded_client
+    restore = _fail_canonical_writes(monkeypatch)
+    failed = _post(client, plan_id, 1, 0)
+    assert failed.status_code == 503
+    detail = failed.json()["detail"]
+    assert (detail["code"], detail["mutation_id"]) == (
+        "accepted_not_saved",
+        "00000000-0000-0000-0000-000000000001",
+    )
+    assert detail["plan"]["revision"] == 0 and detail["plan"]["name"] != "Renamed"
+    assert detail["candidate"]["name"] == "Renamed"
+    pending = _receipt(client, plan_id, 1)
+    assert pending.status_code == 200
+    assert pending.json()["status"] == "accepted_not_saved"
+    assert pending.json()["candidate"]["name"] == "Renamed"
+    assert client.get(f"/plans/{plan_id}").json()["revision"] == 0
+    restore()
+    other = _post(client, plan_id, 2, 0, [{"kind": "rename_plan", "name": "Other tab"}])
+    assert other.status_code == 200
+    for stale in (_receipt(client, plan_id, 1), _post(client, plan_id, 1, 0)):
+        assert stale.status_code == 409
+        body = stale.json()["detail"]
+        assert body["code"] == "stale_reprepare_required"
+        assert body["candidate"] is None
+        assert body["plan"]["name"] == "Other tab" and body["plan"]["revision"] == 1
+        assert body["intent_metadata"] is not None
+    assert client.get(f"/plans/{plan_id}").json()["name"] == "Other tab"
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us5_http_committed_id_wins_over_a_stale_revision_and_never_overlays_the_old_candidate(
+    guarded_client,
+):
+    client, plan_id = guarded_client
+    first = _post(client, plan_id, 1, 0, [{"kind": "rename_plan", "name": "First"}])
+    assert first.status_code == 200
+    second = _post(client, plan_id, 2, 1, [{"kind": "rename_plan", "name": "Second"}])
+    assert second.json()["plan"]["revision"] == 2
+    retry = _post(client, plan_id, 1, 0, [{"kind": "rename_plan", "name": "First"}])
+    assert retry.status_code == 200, retry.text
+    body = retry.json()
+    assert (body["status"], body["committed_revision"]) == ("already_committed", 1)
+    assert body["plan"]["revision"] == 2 and body["plan"]["name"] == "Second"
+    assert body["candidate"] is None
+    lookup = _receipt(client, plan_id, 1).json()
+    assert (lookup["status"], lookup["committed_revision"]) == ("already_committed", 1)
+    assert lookup["plan"]["name"] == "Second" and lookup["candidate"] is None
+    fresh = _post(client, plan_id, 3, 0, [{"kind": "rename_plan", "name": "Third"}])
+    assert fresh.status_code == 409
+    assert fresh.json()["detail"]["code"] == "revision_conflict"
+    assert fresh.json()["detail"]["plan"]["revision"] == 2
+    assert _receipt(client, plan_id, 3).status_code == 404
+    assert client.get(f"/plans/{plan_id}").json()["revision"] == 2
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us5_http_same_id_retry_after_an_inconclusive_404_commits_exactly_once(guarded_client):
+    client, plan_id = guarded_client
+    unknown = _receipt(client, plan_id, 7)
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"]["code"] == "mutation_not_found"
+    first = _post(client, plan_id, 7, 0)
+    assert first.status_code == 200
+    assert first.json()["committed_revision"] == 1
+    duplicate = _post(client, plan_id, 7, 0)
+    assert duplicate.json()["status"] == "already_committed"
+    assert _receipt(client, plan_id, 7).json()["status"] == "already_committed"
+    assert client.get(f"/plans/{plan_id}").json()["revision"] == 1
+    changed = _post(client, plan_id, 7, 0, [{"kind": "rename_plan", "name": "Different"}])
+    assert changed.status_code == 409
+    assert changed.json()["detail"]["code"] == "mutation_id_reused"
+    assert client.get(f"/plans/{plan_id}").json()["name"] == "Renamed"
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us5_http_missing_plan_is_distinct_from_an_unknown_receipt(guarded_client):
+    client, plan_id = guarded_client
+    missing = _post(client, plan_id + 999, 1, 0)
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "plan_not_found"
+    lookup = _receipt(client, plan_id + 999, 1)
+    assert lookup.status_code == 404
+    assert lookup.json()["detail"]["code"] == "plan_not_found"
+    unknown = _receipt(client, plan_id, 12345)
+    assert unknown.json()["detail"]["code"] == "mutation_not_found"

@@ -566,3 +566,146 @@ def test_us4_free_hit_branch_issue_stays_temporary_after_reopen(
     assert result.earliest_shortfall_gameweek == 8
     assert result.gameweeks[1].financial_issue_gameweeks == frozenset()
     assert result.gameweeks[1].shortfall_tenths == 0
+
+
+def test_us5_duplicate_sequence_neither_writes_twice_nor_reprices_nor_advances_revision(
+    planner_session, planner_plan, planner_metadata
+):
+    from api.models.entities import PlanMutationModel, PlanTransferDecisionModel, PlayerModel
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+    owned = planner_plan.boundary.players[1]
+    planner_session.get(PlayerModel, 2).current_price = 5.4
+    planner_session.get(PlayerModel, 102).current_price = 6.2
+    planner_session.commit()
+    body = _us4_body(1, 0, [_us4_transfer(8, 2, owned.ownership_id, 102)])
+    first = service.mutate(plan_id, body)
+    assert (first.status, first.committed_revision) == ("committed", 1)
+    quote = first.plan.gameweeks[0].transfers[0]
+    for identifier, price in ((2, 5.0), (102, 9.9)):
+        planner_session.get(PlayerModel, identifier).current_price = price
+    planner_session.commit()
+    row_ids = {row.id for row in planner_session.scalars(select(PlanTransferDecisionModel)).all()}
+    for _ in range(3):
+        again = service.mutate(plan_id, body)
+        assert (again.status, again.committed_revision) == ("already_committed", 1)
+        assert again.plan.revision == 1
+        assert again.plan.gameweeks[0].transfers == (quote,)
+    service.mutate(plan_id, _us4_body(2, 1, [{"kind": "rename_plan", "name": "Later"}]))
+    late = service.mutate(plan_id, body)
+    assert (late.status, late.committed_revision, late.plan.revision) == ("already_committed", 1, 2)
+    assert late.candidate is None
+    assert late.plan.name == "Later"
+    assert late.plan.gameweeks[0].transfers == (quote,)
+    receipts = planner_session.scalars(select(PlanMutationModel)).all()
+    assert sorted(r.committed_revision for r in receipts) == [1, 2]
+    assert {
+        r.id for r in planner_session.scalars(select(PlanTransferDecisionModel)).all()
+    } == row_ids
+    assert repository.load_canonical(plan_id).revision == 2
+
+
+def test_us5_pending_candidate_ignores_live_prices_but_not_rule_metadata(
+    planner_session, planner_plan, planner_metadata, monkeypatch
+):
+    from api.models.entities import PlayerModel
+    from api.services.plans import PlannerMutationError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+    owned = planner_plan.boundary.players[1]
+    planner_session.get(PlayerModel, 2).current_price = 5.4
+    planner_session.get(PlayerModel, 102).current_price = 6.2
+    planner_session.commit()
+    body = _us4_body(1, 0, [_us4_transfer(8, 2, owned.ownership_id, 102)])
+    original = PlanRepository.save_canonical
+
+    def fail(*args, **kwargs):
+        raise SQLAlchemyError("Injected accepted write failure")
+
+    monkeypatch.setattr(PlanRepository, "save_canonical", fail)
+    with pytest.raises(PlannerMutationError) as failed:
+        service.mutate(plan_id, body)
+    quote = failed.value.candidate.gameweeks[0].transfers[0]
+    assert (quote.outgoing_market_tenths, quote.incoming_price_tenths) == (54, 62)
+    for identifier, price in ((2, 5.0), (102, 9.9), (3, 4.5)):
+        planner_session.get(PlayerModel, identifier).current_price = price
+    planner_session.commit()
+    pending = service.lookup(plan_id, body.mutation_id)
+    assert pending.status == "accepted_not_saved"
+    assert pending.candidate.gameweeks[0].transfers[0] == quote
+    monkeypatch.setattr(PlanRepository, "save_canonical", original)
+    committed = service.mutate(plan_id, body)
+    assert committed.committed_revision == 1
+    assert committed.plan.gameweeks[0].transfers[0] == quote
+    planner_session.get(PlayerModel, 5).team_id = planner_metadata[15].team_id
+    planner_session.commit()
+    monkeypatch.setattr(PlanRepository, "save_canonical", fail)
+    second = _us4_body(2, 1, [{"kind": "rename_plan", "name": "Pending"}])
+    with pytest.raises(PlannerMutationError):
+        service.mutate(plan_id, second)
+    planner_session.get(PlayerModel, 5).team_id = planner_metadata[5].team_id
+    planner_session.get(PlayerModel, 6).team_id = planner_metadata[15].team_id
+    planner_session.commit()
+    with pytest.raises(PlannerMutationError) as stale:
+        service.lookup(plan_id, second.mutation_id)
+    assert stale.value.code == "stale_reprepare_required"
+    assert stale.value.candidate is None
+
+
+def test_us5_accepted_correction_rollback_keeps_q7_context_and_retries_the_same_id(
+    planner_session, planner_plan, planner_metadata, monkeypatch
+):
+    from api.models.entities import PlayerModel
+    from api.services.plans import PlannerMutationError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+    owned = planner_plan.boundary.players[1]
+    planner_session.get(PlayerModel, 2).current_price = 5.4
+    planner_session.get(PlayerModel, 102).current_price = 6.2
+    planner_session.commit()
+    saved = service.mutate(
+        plan_id, _us4_body(1, 0, [_us4_transfer(8, 2, owned.ownership_id, 102)])
+    ).plan
+    quote = saved.gameweeks[0].transfers[0]
+    correction = _us4_body(
+        2,
+        1,
+        [
+            {
+                "kind": "correct_purchase_price",
+                "ownership_id": str(owned.ownership_id),
+                "price_tenths": 48,
+            }
+        ],
+    )
+    original = PlanRepository.save_canonical
+
+    def fail(*args, **kwargs):
+        original(*args, **kwargs)
+        raise SQLAlchemyError("Injected failure after canonical flush")
+
+    monkeypatch.setattr(PlanRepository, "save_canonical", fail)
+    with pytest.raises(PlannerMutationError) as failed:
+        service.mutate(plan_id, correction)
+    assert failed.value.code == "accepted_not_saved"
+    assert evaluate_plan(failed.value.candidate, planner_metadata).earliest_shortfall_gameweek == 8
+    planner_session.rollback()
+    assert (
+        evaluate_plan(
+            repository.load_canonical(plan_id), planner_metadata
+        ).earliest_shortfall_gameweek
+        is None
+    )
+    assert repository.load_canonical(plan_id) == saved
+    monkeypatch.setattr(PlanRepository, "save_canonical", original)
+    retry = service.mutate(plan_id, correction)
+    assert (retry.status, retry.committed_revision) == ("committed", 2)
+    reopened = repository.load_canonical(plan_id)
+    assert reopened.gameweeks[0].transfers == (quote,)
+    result = evaluate_plan(reopened, planner_metadata)
+    assert result.earliest_shortfall_gameweek == 8
+    assert result.gameweeks[0].sales[0].selling_price_tenths == 51
+    assert service.mutate(plan_id, correction).status == "already_committed"
+    assert repository.load_canonical(plan_id).revision == 2

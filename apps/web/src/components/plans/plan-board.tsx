@@ -623,6 +623,49 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   }, [gameweek]);
 
   useEffect(() => {
+    if (!coordinator) return;
+    const warning =
+      "Your latest Planner edit is not saved yet. Leave this page anyway?";
+    const onUnload = (event: BeforeUnloadEvent): void => {
+      if (!coordinator.hasUnsavedWork()) return;
+      event.preventDefault();
+      event.returnValue = warning;
+    };
+    const onClick = (event: MouseEvent): void => {
+      if (!coordinator.hasUnsavedWork() || event.defaultPrevented) return;
+      if (
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey
+      )
+        return;
+      const link = (event.target as Element | null)?.closest?.("a[href]");
+      if (!(link instanceof HTMLAnchorElement)) return;
+      if (link.target === "_blank" || link.hasAttribute("download")) return;
+      const destination = new URL(link.href, window.location.href);
+      if (!/^https?:$/.test(destination.protocol)) return;
+      const here = new URL(window.location.href);
+      if (
+        destination.origin === here.origin &&
+        destination.pathname === here.pathname &&
+        destination.search === here.search
+      )
+        return;
+      if (!window.confirm(warning)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("beforeunload", onUnload);
+    document.addEventListener("click", onClick, true);
+    return () => {
+      window.removeEventListener("beforeunload", onUnload);
+      document.removeEventListener("click", onClick, true);
+    };
+  }, [coordinator]);
+
+  useEffect(() => {
     if (
       plan &&
       !plan.gameweeks.some((week) => week.gameweek_number === selectedGameweek)
@@ -750,7 +793,8 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   const editingUnavailable =
     currentPlan.foundation_state !== "ready" ||
     snapshot?.status === "not_saved" ||
-    snapshot?.status === "conflict";
+    snapshot?.status === "conflict" ||
+    snapshot?.status === "missing";
   const starters = (draft ?? []).filter((player) => player.is_starting);
   const bench = (draft ?? [])
     .filter((player) => !player.is_starting)
@@ -893,11 +937,13 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
             ? "Initialization required"
             : snapshot?.status === "saving"
               ? "Saving..."
-              : snapshot?.status === "not_saved" || snapshot?.status === "error"
+              : snapshot?.status === "not_saved"
                 ? "Not saved"
                 : snapshot?.status === "conflict"
                   ? "Needs reconciliation"
-                  : "Saved"}
+                  : snapshot?.status === "missing"
+                    ? "Plan missing"
+                    : "Saved"}
         </p>
         {currentPlan.financial_status.provisional && (
           <span className="text-slate-600">Estimated bases</span>
@@ -906,13 +952,22 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           <span className="text-red-700">Requires resolution</span>
         )}
         {snapshot?.status === "not_saved" && (
-          <button
-            type="button"
-            className="rounded-md border px-2 py-1"
-            onClick={() => coordinator?.retry()}
-          >
-            Retry Same Edit
-          </button>
+          <>
+            <button
+              type="button"
+              className="rounded-md border px-2 py-1"
+              onClick={() => coordinator?.retry()}
+            >
+              Retry Same Edit
+            </button>
+            <button
+              type="button"
+              className="rounded-md border px-2 py-1"
+              onClick={() => void coordinator?.reconcile()}
+            >
+              Check Save Status
+            </button>
+          </>
         )}
         {snapshot?.status === "conflict" && (
           <button
@@ -929,6 +984,11 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           {snapshot?.message || actionError}
         </p>
       )}
+      {snapshot?.skipped?.map((item, index) => (
+        <p key={index} className="text-sm text-amber-800">
+          {`Edit not applied: ${item.reason}`}
+        </p>
+      ))}
       <FinancialResolutionPanel plan={currentPlan} onGo={setSelectedGameweek} />
       <TransferRepairPanel
         key={`${currentPlan.revision}-${JSON.stringify(snapshot?.rejection?.intents ?? [])}`}

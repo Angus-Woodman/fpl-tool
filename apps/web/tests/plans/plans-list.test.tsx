@@ -16,7 +16,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function scenario(outcome: "success" | "technical" | "stale") {
+function scenario(outcome: "success" | "technical" | "stale" | "missing") {
   const initial = buildPlannerPlan();
   const server = createPlannerFixture(
     initial,
@@ -40,6 +40,11 @@ function scenario(outcome: "success" | "technical" | "stale") {
       return new Response("retired", { status: 410 });
     if (method === "POST" && url.endsWith("/mutations")) {
       posts += 1;
+      if (outcome === "missing")
+        return Response.json(
+          { detail: { code: "plan_not_found", message: "Plan not found" } },
+          { status: 404 },
+        );
       if (outcome === "stale")
         return Response.json(
           {
@@ -104,7 +109,9 @@ describe("guarded list rename", () => {
         .slice(0, requests.indexOf(post))
         .some((request) => request.url.endsWith(`/plans/${initial.plan_id}`)),
     ).toBe(true);
-    expect(requests.some((request) => request.method === "PATCH")).toBe(false);
+    expect(
+      requests.some((request) => ["PATCH", "PUT"].includes(request.method)),
+    ).toBe(false);
   });
 
   it("shows technical failure and retries the exact same immutable envelope", async () => {
@@ -124,7 +131,9 @@ describe("guarded list rename", () => {
     const posts = requests.filter((request) => request.method === "POST");
     expect(posts).toHaveLength(2);
     expect(posts[1].body).toEqual(posts[0].body);
-    expect(requests.some((request) => request.method === "PATCH")).toBe(false);
+    expect(
+      requests.some((request) => ["PATCH", "PUT"].includes(request.method)),
+    ).toBe(false);
   });
 
   it("keeps stale rename context visible without claiming success or overwriting", async () => {
@@ -142,6 +151,29 @@ describe("guarded list rename", () => {
         requests.filter((request) => request.method === "POST"),
       ).toHaveLength(1),
     );
-    expect(requests.some((request) => request.method === "PATCH")).toBe(false);
+    expect(
+      requests.some((request) => ["PATCH", "PUT"].includes(request.method)),
+    ).toBe(false);
+  });
+
+  it("stops a rename on a deleted plan, says so, and never retries or falls back to PATCH", async () => {
+    const { requests } = scenario("missing");
+    render(<PlansList />);
+    await rename();
+    expect(await screen.findByText(/no longer exists/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Renamed plan" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry Rename" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        requests.filter((request) => request.method === "POST"),
+      ).toHaveLength(1),
+    );
+    expect(
+      requests.some((request) => ["PATCH", "PUT"].includes(request.method)),
+    ).toBe(false);
   });
 });

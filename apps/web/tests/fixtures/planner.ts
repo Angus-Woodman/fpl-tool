@@ -1,4 +1,4 @@
-import type { PlanChip, PlanResponse } from "@/lib/api";
+import type { PlanChip, PlanIntent, PlanResponse } from "@/lib/api";
 
 export function plannerIdentity(value: number): string {
   return `00000000-0000-0000-0000-${value.toString(16).padStart(12, "0")}`;
@@ -221,4 +221,32 @@ export function createPlannerFixture<Plan extends { revision: number }, Intent>(
       };
     },
   };
+}
+
+export function applyPlannerIntents(
+  plan: PlanResponse,
+  intents: PlanIntent[],
+): PlanResponse {
+  for (const intent of intents) {
+    if (intent.kind === "rename_plan") plan.name = intent.name;
+    if (intent.kind === "remove_transfer")
+      for (const week of plan.gameweeks)
+        week.decisions = week.decisions.filter(
+          (decision) => decision.decision_id !== intent.decision_id,
+        );
+    if (
+      intent.kind !== "change_captain" &&
+      intent.kind !== "change_vice_captain"
+    )
+      continue;
+    const week = plan.gameweeks.find(
+      (item) => item.gameweek_number === intent.gameweek_number,
+    )!;
+    for (const player of week.players) {
+      if (intent.kind === "change_captain")
+        player.is_captain = player.player_id === intent.player_id;
+      else player.is_vice_captain = player.player_id === intent.player_id;
+    }
+  }
+  return plan;
 }

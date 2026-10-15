@@ -25,12 +25,13 @@ export type PlanSaveSnapshot = {
   displayPlan: PlanResponse;
   inFlight: PlanMutationEnvelope | null;
   pendingCount: number;
-  status: "saved" | "saving" | "not_saved" | "conflict" | "error";
+  status: "saved" | "saving" | "not_saved" | "conflict" | "error" | "missing";
   message: string | null;
   rejection: {
     intents: PlanIntent[];
     diagnostics: PlanResponse["decision_errors"];
   } | null;
+  skipped: { intents: QueuedPlanIntent[]; reason: string }[] | null;
 };
 
 type Transport = {
@@ -61,6 +62,7 @@ export class PlanSaveCoordinator {
       status: "saved",
       message: null,
       rejection: null,
+      skipped: null,
     };
     this.transport = {
       send: mutatePlan,
@@ -107,7 +109,13 @@ export class PlanSaveCoordinator {
     }
   }
 
+  hasUnsavedWork(): boolean {
+    if (this.snapshot.status === "missing") return false;
+    return this.active !== null || this.queue.length > 0;
+  }
+
   enqueue(intents: QueuedPlanIntent[]): void {
+    if (this.snapshot.status === "missing") return;
     if (this.snapshot.acknowledged.foundation_state !== "ready") {
       this.publish({
         status: "error",
@@ -117,7 +125,7 @@ export class PlanSaveCoordinator {
     }
     if (intents.length === 0) return;
     this.queue.push(structuredClone(intents));
-    this.publish({});
+    this.publish({ skipped: null });
     this.drain();
   }
 
@@ -151,6 +159,15 @@ export class PlanSaveCoordinator {
             : boundary.free_hit_gameweek_19,
       };
     }
+    if (intent.kind === "edit_transfer" || intent.kind === "remove_transfer") {
+      const exists = plan.gameweeks.some((week) =>
+        week.decisions.some(
+          (decision) => decision.decision_id === intent.decision_id,
+        ),
+      );
+      if (!exists)
+        throw new Error("Transfer decision no longer exists; select it again");
+    }
     if ("gameweek_number" in intent) {
       const week = plan.gameweeks.find(
         (item) => item.gameweek_number === intent.gameweek_number,
@@ -179,31 +196,41 @@ export class PlanSaveCoordinator {
   }
 
   private drain(): void {
-    if (this.active || this.queue.length === 0) return;
-    const batch = this.queue.shift()!;
-    try {
-      const envelope: PlanMutationEnvelope = {
-        mutation_id: crypto.randomUUID(),
-        expected_revision: this.snapshot.acknowledged.revision,
-        intents: batch.map((intent) => this.resolve(intent)),
-      };
-      envelope.intents.forEach((intent) => {
-        if ("used_chips" in intent && intent.used_chips)
-          Object.freeze(intent.used_chips);
-        Object.freeze(intent);
-      });
-      Object.freeze(envelope.intents);
-      this.active = Object.freeze(envelope);
-    } catch (error) {
-      this.publish({
-        status: "error",
-        message:
-          error instanceof Error ? error.message : "Edit cannot be applied",
-      });
-      return;
+    while (!this.active && this.queue.length > 0) {
+      if (this.snapshot.status === "missing") return;
+      const batch = this.queue.shift()!;
+      try {
+        const envelope: PlanMutationEnvelope = {
+          mutation_id: crypto.randomUUID(),
+          expected_revision: this.snapshot.acknowledged.revision,
+          intents: batch.map((intent) => this.resolve(intent)),
+        };
+        envelope.intents.forEach((intent) => {
+          if ("used_chips" in intent && intent.used_chips)
+            Object.freeze(intent.used_chips);
+          Object.freeze(intent);
+        });
+        Object.freeze(envelope.intents);
+        this.active = Object.freeze(envelope);
+      } catch (error) {
+        // An unresolvable intent is surfaced for reselection, never retargeted.
+        this.publish({
+          skipped: [
+            ...(this.snapshot.skipped ?? []),
+            {
+              intents: batch,
+              reason:
+                error instanceof Error
+                  ? error.message
+                  : "Edit cannot be applied",
+            },
+          ],
+        });
+        continue;
+      }
+      this.publish({ status: "saving" });
+      void this.dispatch();
     }
-    this.publish({ status: "saving", message: null, rejection: null });
-    void this.dispatch();
   }
 
   private accept(result: PlanMutationResponse): void {
@@ -236,6 +263,7 @@ export class PlanSaveCoordinator {
       displayPlan: plan,
       status: "saved",
       message: null,
+      rejection: null,
     });
     this.drain();
   }
@@ -255,11 +283,22 @@ export class PlanSaveCoordinator {
         this.drain();
         return;
       }
-      if (
-        error.status === 409 ||
-        error.status === 404 ||
-        error.status === 410
-      ) {
+      if (error.status === 404) {
+        if (detail.code === "plan_not_found") {
+          this.publish({
+            status: "missing",
+            message: "This plan no longer exists; the edit was not saved",
+          });
+          return;
+        }
+        // An unknown receipt is inconclusive: the original request may still be in flight.
+        this.publish({
+          status: "not_saved",
+          message: "Save outcome is not confirmed; retry the same edit",
+        });
+        return;
+      }
+      if (error.status === 409 || error.status === 410) {
         const plan =
           detail.plan &&
           detail.plan.revision >= this.snapshot.acknowledged.revision
