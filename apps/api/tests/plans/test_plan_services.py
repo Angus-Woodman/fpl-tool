@@ -1806,3 +1806,258 @@ class TestDeletePlan:
     def test_unknown_plan_raises(self, repository: FakePlanRepository) -> None:
         with pytest.raises(PlanNotFoundError):
             DeletePlanService(repository).execute(99)
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us4_correction_then_explicit_edit_recaptures_only_the_edited_record(
+    guarded_mutations, planner_session, planner_metadata
+):
+    from api.models.entities import PlayerModel
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from sqlalchemy import update
+
+    service, plan_id = guarded_mutations
+    repository = PlanRepository(planner_session)
+    boundary = {p.player_id: p for p in repository.load_canonical(plan_id).boundary.players}
+    planner_session.execute(
+        update(PlayerModel).where(PlayerModel.id == 2).values(current_price=5.4)
+    )
+    planner_session.commit()
+
+    def add(number, revision, week, outgoing, incoming):
+        return service.mutate(
+            plan_id,
+            mutation_body(
+                number,
+                revision,
+                [
+                    {
+                        "kind": "add_transfer",
+                        "gameweek_number": week,
+                        "outgoing_player_id": outgoing,
+                        "outgoing_ownership_id": str(boundary[outgoing].ownership_id),
+                        "incoming_player_id": incoming,
+                    }
+                ],
+            ),
+        ).plan
+
+    add(100, 0, 8, 2, 102)
+    saved = add(101, 1, 9, 3, 103)
+    first, other = saved.gameweeks[0].transfers[0], saved.gameweeks[1].transfers[0]
+    assert (first.outgoing_market_tenths, first.incoming_price_tenths) == (54, 50)
+    for identifier, price in ((2, 5.6), (3, 5.8), (103, 5.9)):
+        planner_session.execute(
+            update(PlayerModel).where(PlayerModel.id == identifier).values(current_price=price)
+        )
+    planner_session.commit()
+    corrected = service.mutate(
+        plan_id,
+        mutation_body(
+            102,
+            2,
+            [
+                {
+                    "kind": "correct_purchase_price",
+                    "ownership_id": str(boundary[2].ownership_id),
+                    "price_tenths": 48,
+                }
+            ],
+        ),
+    ).plan
+    weeks = evaluate_plan(corrected, planner_metadata).gameweeks
+    assert corrected.gameweeks[0].transfers == (first,)
+    assert corrected.gameweeks[1].transfers == (other,)
+    assert (weeks[0].sales[0].selling_price_tenths, weeks[0].closing_bank_tenths) == (51, 11)
+    edited = service.mutate(
+        plan_id,
+        mutation_body(
+            103,
+            3,
+            [
+                {
+                    "kind": "edit_transfer",
+                    "decision_id": str(first.decision_id),
+                    "incoming_player_id": 104,
+                }
+            ],
+        ),
+    ).plan
+    decision = edited.gameweeks[0].transfers[0]
+    assert (decision.outgoing_market_tenths, decision.incoming_price_tenths) == (56, 50)
+    assert decision.decision_id == first.decision_id
+    assert edited.gameweeks[1].transfers == (other,)
+    assert (other.outgoing_market_tenths, other.incoming_price_tenths) == (50, 50)
+    after = evaluate_plan(edited, planner_metadata).gameweeks
+    assert (after[0].sales[0].selling_price_tenths, after[0].closing_bank_tenths) == (52, 12)
+    assert after[1].sales[0].selling_price_tenths == 50
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+@pytest.mark.parametrize("price", [0, -1, 4.8, True])
+def test_us4_purchase_correction_requires_a_positive_integer_tenths_value(guarded_mutations, price):
+    from api.repositories.plan_repository import PlanRepository
+    from pydantic import ValidationError
+
+    service, plan_id = guarded_mutations
+    before = PlanRepository(service._session).load_canonical(plan_id)
+    with pytest.raises(ValidationError):
+        mutation_body(
+            1,
+            0,
+            [
+                {
+                    "kind": "correct_purchase_price",
+                    "ownership_id": str(before.boundary.players[1].ownership_id),
+                    "price_tenths": price,
+                }
+            ],
+        )
+    assert PlanRepository(service._session).load_canonical(plan_id) == before
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+@pytest.mark.parametrize("stored", ["unknown_player", "fraction", "zero"])
+def test_us4_transfer_capture_rejects_missing_or_invalid_observations_without_writes(
+    guarded_mutations, planner_session, stored
+):
+    from api.models.entities import PlanMutationModel, PlayerModel
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.rules import RuleViolationError
+    from sqlalchemy import func, select
+
+    service, plan_id = guarded_mutations
+    before = PlanRepository(planner_session).load_canonical(plan_id)
+    owned = before.boundary.players[1]
+    incoming = 999 if stored == "unknown_player" else 102
+    if stored != "unknown_player":
+        planner_session.get(PlayerModel, 102).current_price = {"fraction": 5.55, "zero": 0.0}[
+            stored
+        ]
+        planner_session.commit()
+    expected = RuleViolationError if stored == "unknown_player" else ValueError
+    with pytest.raises(expected, match="observation missing|whole number|positive"):
+        service.mutate(
+            plan_id,
+            mutation_body(
+                1,
+                0,
+                [
+                    {
+                        "kind": "add_transfer",
+                        "gameweek_number": 8,
+                        "outgoing_player_id": 2,
+                        "outgoing_ownership_id": str(owned.ownership_id),
+                        "incoming_player_id": incoming,
+                    }
+                ],
+            ),
+        )
+    planner_session.rollback()
+    assert PlanRepository(planner_session).load_canonical(plan_id) == before
+    assert planner_session.scalar(select(func.count()).select_from(PlanMutationModel)) == 0
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us4_mixed_correction_and_planning_batch_rejects_atomically(
+    guarded_mutations, planner_session
+):
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.rules import RuleViolationError
+
+    service, plan_id = guarded_mutations
+    before = PlanRepository(planner_session).load_canonical(plan_id)
+    owned = before.boundary.players[1]
+    with pytest.raises(RuleViolationError, match="mix"):
+        service.mutate(
+            plan_id,
+            mutation_body(
+                1,
+                0,
+                [
+                    {
+                        "kind": "correct_purchase_price",
+                        "ownership_id": str(owned.ownership_id),
+                        "price_tenths": 48,
+                    },
+                    {"kind": "rename_plan", "name": "Smuggled"},
+                ],
+            ),
+        )
+    assert PlanRepository(planner_session).load_canonical(plan_id) == before
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us4_rebased_correction_has_no_dangling_source_and_is_independent_of_my_team(
+    guarded_mutations, planner_session, planner_metadata
+):
+    from uuid import UUID
+
+    from api.models.entities import (
+        PlanTransferDecisionModel,
+        PlayerModel,
+        SquadModel,
+        SquadPlayerModel,
+    )
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from sqlalchemy import delete, select, update
+
+    service, plan_id = guarded_mutations
+    repository = PlanRepository(planner_session)
+    owned = next(p for p in repository.load_canonical(plan_id).boundary.players if p.player_id == 2)
+    planner_session.execute(
+        update(PlayerModel).where(PlayerModel.id == 2).values(current_price=5.4)
+    )
+    planner_session.commit()
+    revision = 0
+
+    def mutate(intent):
+        nonlocal revision
+        plan = service.mutate(plan_id, mutation_body(300 + revision, revision, [intent])).plan
+        revision = plan.revision
+        return plan
+
+    mutate(
+        {
+            "kind": "add_transfer",
+            "gameweek_number": 8,
+            "outgoing_player_id": 2,
+            "outgoing_ownership_id": str(owned.ownership_id),
+            "incoming_player_id": 102,
+        }
+    )
+    rebased = mutate({"kind": "change_horizon", "start_gameweek": 9, "end_gameweek": 10})
+    carried = next(p for p in rebased.boundary.players if p.player_id == 102)
+    assert "decision:" in carried.provenance.source
+    removed_decision = carried.provenance.source.split("decision:")[1].split("@")[0]
+    assert not planner_session.scalars(
+        select(PlanTransferDecisionModel).where(
+            PlanTransferDecisionModel.decision_id == UUID(removed_decision)
+        )
+    ).all()
+    planner_session.add(SquadModel(id=1, name="My Team", bank=99.9))
+    planner_session.flush()
+    planner_session.add(SquadPlayerModel(squad_id=1, player_id=5, is_starting=True))
+    planner_session.commit()
+    corrected = mutate(
+        {
+            "kind": "correct_purchase_price",
+            "ownership_id": str(carried.ownership_id),
+            "price_tenths": 48,
+        }
+    )
+    planner_session.execute(delete(SquadPlayerModel))
+    planner_session.execute(update(SquadModel).values(bank=0.0))
+    planner_session.commit()
+    planner_session.expire_all()
+    reopened = repository.load_canonical(plan_id)
+    assert reopened == corrected
+    again = next(p for p in reopened.boundary.players if p.player_id == 102)
+    assert (again.purchase_price_tenths, again.provenance.original_price_tenths) == (48, 50)
+    assert again.provenance.source == carried.provenance.source
+    assert reopened.boundary.bank_tenths == rebased.boundary.bank_tenths == 12
+    assert not evaluate_plan(reopened, planner_metadata).diagnostics
+    after_edit = mutate({"kind": "change_captain", "gameweek_number": 9, "player_id": 4})
+    assert after_edit.boundary == reopened.boundary

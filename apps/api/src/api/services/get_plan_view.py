@@ -12,7 +12,8 @@ from fpl_engine.rules import Chip, SquadSlot, has_unlimited_transfers, score_gam
 from fpl_engine.rules.chips import chip_states
 
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
-from api.repositories.plan_repository import PlanGameweekRecord, PlanRecord
+from api.repositories.plan_repository import PlanGameweekRecord, PlanPlayerRecord, PlanRecord
+from api.services.plans import checked_tenths
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,17 @@ class PlanViewRecord:
     financial_status: dict[str, object] = field(default_factory=dict)
     decision_errors: list[dict[str, object]] = field(default_factory=list)
     initialization: dict[str, object] = field(default_factory=dict)
+
+
+def _live_tenths(lookup: dict[int, PlanPlayerRecord], player_id: int) -> int | None:
+    # Display only: latest market is never a financial input to replay.
+    player = lookup.get(player_id)
+    if player is None:
+        return None
+    try:
+        return checked_tenths(player.current_price)
+    except ValueError:
+        return None
 
 
 class PlanProjectionRepositoryPort(Protocol):
@@ -242,6 +254,7 @@ class GetPlanViewService:
             for identifier, player in lookup.items()
         }
         evaluation = evaluate_plan(plan, metadata)
+        earliest = next((week for week in evaluation.gameweeks if week.shortfall_tenths), None)
         weeks: list[PlanGameweekRecord] = []
         for week, evaluated in zip(plan.gameweeks, evaluation.gameweeks, strict=True):
             roles = {role.slot_id: role for role in week.lineup}
@@ -282,7 +295,7 @@ class GetPlanViewService:
             plan.gameweeks, evaluation.gameweeks, enriched.gameweeks, strict=True
         ):
             ownership = {player.player_id: player for player in evaluated.players or ()}
-            sales = {sale.decision_id: sale.selling_price_tenths for sale in evaluated.sales}
+            sales = {sale.decision_id: sale for sale in evaluated.sales}
             output.append(
                 replace(
                     view,
@@ -302,9 +315,19 @@ class GetPlanViewService:
                     decisions=[
                         {
                             **asdict(decision),
-                            "selling_price_tenths": sales.get(decision.decision_id),
+                            "selling_price_tenths": sale.selling_price_tenths if sale else None,
+                            "purchase_price_tenths": sale.purchase_price_tenths if sale else None,
+                            "basis_kind": sale.basis_kind if sale else None,
+                            "basis_confirmation": sale.basis_confirmation if sale else None,
+                            "outgoing_live_market_tenths": _live_tenths(
+                                lookup, decision.outgoing_player_id
+                            ),
+                            "incoming_live_price_tenths": _live_tenths(
+                                lookup, decision.incoming_player_id
+                            ),
                         }
                         for decision in week.transfers
+                        for sale in (sales.get(decision.decision_id),)
                     ],
                     transfers_in=[
                         PlanTransferViewRecord(
@@ -384,12 +407,20 @@ class GetPlanViewService:
             financial_status={
                 "provisional": any(week.provisional_dependencies for week in evaluation.gameweeks),
                 "earliest_shortfall_gameweek": evaluation.earliest_shortfall_gameweek,
+                "earliest_shortfall_tenths": earliest.shortfall_tenths if earliest else None,
+                "earliest_shortfall_reason": (
+                    f"Bank is £{earliest.shortfall_tenths / 10:.1f}m below zero in gameweek "
+                    f"{earliest.gameweek_number} after its saved transfers"
+                    if earliest and earliest.shortfall_tenths
+                    else None
+                ),
                 "requires_resolution": evaluation.earliest_shortfall_gameweek is not None,
                 "gameweeks": [
                     {
                         "gameweek_number": week.gameweek_number,
                         "shortfall_tenths": week.shortfall_tenths,
                         "affected_chain": sorted(week.financial_issue_gameweeks),
+                        "provisional": bool(week.provisional_dependencies),
                     }
                     for week in evaluation.gameweeks
                 ],

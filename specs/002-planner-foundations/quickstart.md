@@ -1,6 +1,6 @@
 # Planner Foundations Validation Guide
 
-This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) are implemented and verified as recorded here. US4 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) and T054-T065 (US4 Official Selling Prices And Financial Resolution) are implemented and verified as recorded here. US5 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
 
 ## Prerequisites And Safety
 
@@ -522,3 +522,95 @@ TypeScript request type, board repair/diagnostic presentation, their focused
 tests and existing browser harness, plus request-contract/evidence docs. No
 domain arithmetic, coordinator, dependency, migration, task wording/markers or
 US4 price-resolution UX changes. No known remaining issue from either finding.
+
+## Increment 4: US4 Evidence (2026-10-15)
+
+Scope: T054-T065 only. T066/US5 and later tasks remain unchecked. Both
+requirements-quality checklists passed before work (16/16 and 35/35) and were
+not edited. No extension hooks are registered.
+
+### Acceptance Evidence (hand-calculated, tenths)
+
+- SC-005 sale steps: purchase 50 with saved market 40/48/50/51/52/53/54 sells
+  40/48/50/50/51/51/52, and each bank equals `10 + sale - 50` through full
+  replay, not only the pure function. A Wildcard acquisition at 52 becomes the
+  permanent basis: later sale at 56 gives 54; a buy-back at 53 gives 51 with a
+  new ownership identity and basis 50 (banks 10/14/15, no hits).
+- Free Hit: a temporary sale (saved 52 over basis 50) pays 51 and closes at 8;
+  the following week restores bank 10 and a new sale at 54 pays 52 (bank 12).
+  The saved Free Hit decision is unchanged.
+- Upstream acquisition edit: raising a first acquisition from 50 to 54 moves
+  the dependent later sale from 53 to 55 using that sale's own saved market 56
+  and leaves its incoming price unchanged; the earlier bank falls from 10 to 8
+  and a 63 incoming price is rejected at GW8 as a new shortfall (Q2).
+- Q7 correction, P50/M54/live56 to 48: sale 52 becomes 51, the incoming 62 and
+  quote 54 are unchanged, and bank moves 0 to -1 (shortfall 1 at GW8). With a
+  Free Hit GW8 the deficit stays temporary (restored bank 10, empty chain); with
+  a plain GW8 plus a later GW9 sale the negative node is not erased by a later
+  positive bank (-1, 1, 1; chain {8}). Repair by editing the incoming price to 61
+  clears every flag. Moving the earliest failure later (-1,-3 to 0,-2) remains
+  accepted from existing coverage.
+- Confirmation changes no money: sale and bank are identical, only that
+  ownership leaves the provisional set. Mixed correction/planning batches reject.
+- Explicit edit versus refresh: saved M54/P50 with live later 56/58/59; after
+  correction to 48 the explicit edit to another incoming player recaptures only
+  that decision (outgoing market 56, incoming 50, sale 52, bank 12) while a
+  second unedited decision keeps market 50/incoming 50/sale 50. A completed
+  gameweek edit is not historically locked.
+
+### Production Changes And Defects Found
+
+Existing engine arithmetic already satisfied every case above, so T057/T058
+needed only additive read data: each engine sale now records the basis amount,
+kind and confirmation that produced it, and the read model exposes per-decision
+basis, saved quotes, sale, latest live prices, the earliest shortfall amount and
+reason, and a per-gameweek provisional flag, all from the single replay. The
+response schema carries the new fields. No pricing arithmetic changed.
+
+Review found and fixed one defect in this increment's own display helper: a
+stored live price of 0, a negative, a non-tenth, NaN or infinity either crashed
+or produced a schema-invalid read. It now reuses the strict `checked_tenths`
+and omits an unusable live value (five regression cases). A completed-run
+failure also showed two US2 assertions compared whole decisions across a live
+price change; they now compare saved fields strictly and exclude only the two
+explicitly live fields. A blanket formatter run touched an unrelated migration
+and that file was reverted; no migration, dependency or toolchain change exists.
+
+### UI And Browser Evidence
+
+The board states the price policy, separates basis/saved market/selling/
+acquisition prices from "Latest market (not used)", shows estimates as a
+lightweight label, keeps saved/provisional/requires-resolution distinct, lists
+the earliest shortfall amount, reason, full dependent chain and a navigation
+button, shows a negative bank as a shortfall, and presents a planned
+acquisition's source readably instead of a raw decision identifier. All figures
+are server-provided tenths; React performs no financial arithmetic.
+
+The real frontend/API/PostgreSQL journey (desktop 1440x900 and mobile 390x844)
+checked saved quotes against moved live prices, correction to a 0.1 shortfall in
+GW8 with chain GW8-GW11, reload and earliest-GW navigation, an explicit edit of
+that completed-gameweek transfer clearing the flag (bank 12, sale 52, edited
+quote 56/50), a rebase to GW9 carrying the planned acquisition at 50 with bank
+12, correction to 48, and a retained transfer (sale 49, buy 60, bank 1), then
+reload and SQL reopen. Screenshots were inspected: no overlap or document
+overflow and no page errors. API responses were forwarded, not mocked.
+
+### Checks Run
+
+- Engine: 329 tests pass (16 new US4 cases); mutation checks with a deliberately
+  rounded sale step and a removed response field both failed the new cases.
+- Guarded Planner API/SQL/migration suite: 173 pass against `fpl_test`,
+  including four actual browser journeys; ordinary API runs skip DB/browser cases.
+- Web: 131 tests pass (48 Planner), eight fixture browser journeys pass.
+- `make lint`, `make typecheck` and `make test` pass; ruff reports two import/
+  line-length findings only in `apps/api/alembic`, identical on a clean stash and
+  outside the repository lint scope.
+- The isolated build ran on owned preview port 3101 (3100 was already in use);
+  the preview was stopped and awaited, port 3101 released and `.next-copilot`
+  removed, including after an earlier failing run. Ports 3000/8000/3100 untouched.
+
+### Limits
+
+Comprehensive save-failure/departure UX (US5), lineup-rearrangement parity (US6)
+and completion tasks are not certified. The edit-then-refresh display shows the
+latest price only as information; no speculative future price is accepted.

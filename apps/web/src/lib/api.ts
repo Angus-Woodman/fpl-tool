@@ -499,6 +499,11 @@ export type PlanDecision = {
   outgoing_market_tenths: number;
   incoming_price_tenths: number;
   selling_price_tenths: number | null;
+  purchase_price_tenths?: number | null;
+  basis_kind?: "starting" | "planned_acquisition" | null;
+  basis_confirmation?: "assumed" | "user_confirmed" | "authoritative" | null;
+  outgoing_live_market_tenths?: number | null;
+  incoming_live_price_tenths?: number | null;
   observation_source: string;
   observed_at: string;
   origin: string;
@@ -572,10 +577,13 @@ export type PlanResponse = {
     provisional?: boolean;
     requires_resolution?: boolean;
     earliest_shortfall_gameweek?: number | null;
+    earliest_shortfall_tenths?: number | null;
+    earliest_shortfall_reason?: string | null;
     gameweeks?: {
       gameweek_number: number;
       shortfall_tenths: number | null;
       affected_chain: number[];
+      provisional?: boolean;
     }[];
   };
   decision_errors: {

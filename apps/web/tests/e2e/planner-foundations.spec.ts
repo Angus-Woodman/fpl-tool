@@ -824,6 +824,264 @@ test("US3 real API transfers accounting, no phantom moves and explicit atomic re
   expect(errors).toEqual([]);
 });
 
+test("US4 real API pricing inspection, correction shortfall, repair and rebased basis", async ({
+  page,
+}, info) => {
+  test.setTimeout(120_000);
+  const api = process.env.PLANNER_TEST_API_URL;
+  const planId = process.env.PLANNER_TEST_PLAN_ID;
+  test.skip(!api || !planId, "Run through the guarded API browser regression");
+  const errors: string[] = [];
+  const mutations: { intents: PlanIntent[]; expected_revision: number }[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: HEADERS });
+    expect(["GET", "POST"]).toContain(request.method());
+    if (request.method() === "POST") mutations.push(request.postDataJSON());
+    const url = new URL(request.url());
+    const response = await route.fetch({
+      url: `${api}${url.pathname}${url.search}`,
+    });
+    expect(response.status()).toBe(200);
+    await route.fulfill({
+      response,
+      headers: { ...response.headers(), ...HEADERS },
+    });
+  });
+  const read = async (): Promise<PlanResponse> =>
+    (await page.request.get(`${api}/plans/${planId}`)).json();
+  const select = async (number: number) =>
+    page.getByLabel(`Gameweek ${number}`, { exact: true }).click();
+  const write = async (action: () => Promise<unknown>) => {
+    const response = page.waitForResponse(
+      (item) =>
+        item.url().endsWith("/mutations") && item.request().method() === "POST",
+    );
+    await action();
+    expect((await response).status()).toBe(200);
+    await saved(page);
+  };
+  const noOverflow = async () =>
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  const details = (outgoing: string, incoming: string) =>
+    page.getByRole("region", {
+      name: `Transfer price details: ${outgoing} to ${incoming}`,
+    });
+  const resolution = () =>
+    page.getByRole("region", { name: "Financial resolution" });
+
+  // Saved M54/P62 quotes, then live prices moved to 5.6/6.0 before this load.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/plans/${planId}`);
+  const quote = (await read()).gameweeks[0].decisions[0];
+  expect(quote).toMatchObject({
+    outgoing_market_tenths: 54,
+    incoming_price_tenths: 62,
+    selling_price_tenths: 52,
+    purchase_price_tenths: 50,
+    basis_confirmation: "assumed",
+    outgoing_live_market_tenths: 56,
+    incoming_live_price_tenths: 60,
+  });
+  const inspection = details("P2", "P102");
+  await expect(inspection).toContainText("Purchase basis £5.0m · Estimated");
+  await expect(inspection).toContainText("Saved market assumption £5.4m");
+  await expect(inspection).toContainText("Selling price used £5.2m");
+  await expect(inspection).toContainText("Acquisition price paid £6.2m");
+  await expect(inspection).toContainText(
+    "Latest market (not used): P2 £5.6m · P102 £6.0m",
+  );
+  await expect(
+    page.getByText(/Market refreshes do not reprice saved transfers/),
+  ).toBeVisible();
+  await expect(page.getByText(/Bank 0\.0 ·/)).toBeVisible();
+  await expect(
+    page.getByText("Estimated bases", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Requires resolution", { exact: true }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: info.outputPath("pricing-inspection-desktop.png"),
+    fullPage: true,
+  });
+
+  // Provenance correction is accepted and exposes a £0.1m shortfall in GW8.
+  const before = await read();
+  await write(async () => {
+    const input = page.getByLabel("P2 purchase price", { exact: true });
+    await input.fill("4.8");
+    await input.press("Tab");
+  });
+  expect(mutations.at(-1)!.intents).toEqual([
+    {
+      kind: "correct_purchase_price",
+      ownership_id: before.starting_state!.players.find(
+        (player) => player.player_id === 2,
+      )!.ownership_id,
+      price_tenths: 48,
+    },
+  ]);
+  const corrected = await read();
+  expect(corrected.gameweeks[0].decisions[0]).toMatchObject({
+    decision_id: quote.decision_id,
+    outgoing_market_tenths: 54,
+    incoming_price_tenths: 62,
+    selling_price_tenths: 51,
+    purchase_price_tenths: 48,
+    basis_confirmation: "user_confirmed",
+  });
+  expect(corrected.gameweeks[0].accounting!.closing_bank_tenths).toBe(-1);
+  expect(corrected.financial_status).toMatchObject({
+    requires_resolution: true,
+    earliest_shortfall_gameweek: 8,
+    earliest_shortfall_tenths: 1,
+  });
+  await expect(inspection).toContainText("Purchase basis £4.8m · Confirmed");
+  await expect(inspection).toContainText("Selling price used £5.1m");
+  await expect(inspection).toContainText("Acquisition price paid £6.2m");
+  await expect(
+    page.getByText("Requires resolution", { exact: true }),
+  ).toBeVisible();
+  await expect(resolution()).toContainText("Shortfall £0.1m in GW8");
+  await expect(resolution()).toContainText(
+    "Dependent gameweeks: GW8, GW9, GW10, GW11",
+  );
+  await expect(resolution()).toContainText(
+    "Saved does not mean financially valid",
+  );
+  await expect(page.getByText(/Bank Shortfall £0\.1m/)).toBeVisible();
+  await expect(page.getByText(/Bank -0\.1/)).toHaveCount(0);
+  await expect(page.getByLabel("Transfer P102", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: info.outputPath("pricing-shortfall-desktop.png"),
+    fullPage: true,
+  });
+
+  // The flag survives reload (replay-only) and navigates to the earliest GW.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(resolution()).toContainText("Shortfall £0.1m in GW8");
+  await select(11);
+  await page.getByRole("button", { name: "Go to GW8", exact: true }).click();
+  await expect(page.getByLabel("Gameweek 8", { exact: true })).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await noOverflow();
+  await page.screenshot({
+    path: info.outputPath("pricing-shortfall-mobile.png"),
+    fullPage: true,
+  });
+
+  // Explicit edit of the completed GW8 transfer recaptures only that record.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByLabel("Transfer P102", { exact: true }).click();
+  await write(() =>
+    page.getByLabel("Transfer in P113", { exact: true }).click(),
+  );
+  expect(mutations.at(-1)!.intents).toEqual([
+    {
+      kind: "edit_transfer",
+      decision_id: quote.decision_id,
+      incoming_player_id: 113,
+    },
+  ]);
+  const repaired = await read();
+  expect(repaired.gameweeks[0].decisions[0]).toMatchObject({
+    decision_id: quote.decision_id,
+    outgoing_player_id: 2,
+    incoming_player_id: 113,
+    outgoing_market_tenths: 56,
+    incoming_price_tenths: 50,
+    selling_price_tenths: 52,
+    purchase_price_tenths: 48,
+  });
+  expect(repaired.gameweeks[0].accounting!.closing_bank_tenths).toBe(12);
+  expect(repaired.financial_status).toMatchObject({
+    requires_resolution: false,
+    earliest_shortfall_gameweek: null,
+  });
+  await expect(
+    page.getByText("Requires resolution", { exact: true }),
+  ).toHaveCount(0);
+  await expect(resolution()).toHaveCount(0);
+  await expect(page.getByText(/Bank 1\.2 ·/)).toBeVisible();
+  await page.reload();
+  await expect(resolution()).toHaveCount(0);
+  await expect(details("P2", "P113")).toContainText(
+    "Saved market assumption £5.6m",
+  );
+
+  // Rebase to GW9, correct the carried planned acquisition, then transfer it.
+  await write(async () => {
+    const input = page.getByLabel("Plan start gameweek", { exact: true });
+    await input.fill("9");
+  });
+  await select(9);
+  const carried = (await read()).starting_state!;
+  expect(carried.bank_tenths).toBe(12);
+  expect(
+    carried.players.find((player) => player.player_id === 113),
+  ).toMatchObject({
+    purchase_price_tenths: 50,
+    provenance: { basis_kind: "planned_acquisition", confirmation: null },
+  });
+  await write(async () => {
+    const input = page.getByLabel("P113 purchase price", { exact: true });
+    await input.fill("4.8");
+    await input.press("Tab");
+  });
+  const rebased = (await read()).starting_state!;
+  expect(rebased.bank_tenths).toBe(12);
+  expect(
+    rebased.players.find((player) => player.player_id === 113),
+  ).toMatchObject({
+    purchase_price_tenths: 48,
+    provenance: {
+      original_price_tenths: 50,
+      basis_kind: "planned_acquisition",
+    },
+  });
+  await page.getByLabel("Transfer P113", { exact: true }).click();
+  await write(() =>
+    page.getByLabel("Transfer in P102", { exact: true }).click(),
+  );
+  const final = await read();
+  expect(final.gameweeks[0].decisions[0]).toMatchObject({
+    outgoing_player_id: 113,
+    incoming_player_id: 102,
+    outgoing_market_tenths: 50,
+    incoming_price_tenths: 60,
+    selling_price_tenths: 49,
+    purchase_price_tenths: 48,
+    basis_kind: "planned_acquisition",
+  });
+  expect(final.gameweeks[0].accounting!.closing_bank_tenths).toBe(1);
+  expect(final.financial_status.requires_resolution).toBe(false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(details("P113", "P102")).toContainText(
+    "Purchase basis £4.8m · Planned acquisition",
+  );
+  await expect(details("P113", "P102")).toContainText(
+    "Selling price used £4.9m",
+  );
+  await expect(page.getByText(/Bank 0\.1 ·/)).toBeVisible();
+  await noOverflow();
+  await page.screenshot({
+    path: info.outputPath("pricing-rebased-mobile.png"),
+    fullPage: true,
+  });
+  expect(errors).toEqual([]);
+});
+
 test("US2 real API chips across periods, clear/move and frozen FH/WC toggles", async ({
   page,
 }, info) => {

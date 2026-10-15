@@ -238,6 +238,11 @@ class TransferDecisionResponse(BaseModel):
     observed_at: str
     origin: str
     selling_price_tenths: int | None = Field(default=None, gt=0)
+    purchase_price_tenths: int | None = Field(default=None, gt=0)
+    basis_kind: Literal["starting", "planned_acquisition"] | None = None
+    basis_confirmation: Literal["assumed", "user_confirmed", "authoritative"] | None = None
+    outgoing_live_market_tenths: int | None = Field(default=None, gt=0)
+    incoming_live_price_tenths: int | None = Field(default=None, gt=0)
 
 
 class GameweekAccountingResponse(BaseModel):

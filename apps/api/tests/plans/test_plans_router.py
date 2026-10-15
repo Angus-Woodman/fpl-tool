@@ -45,6 +45,14 @@ class _EmptyProjectionRepository:
         return []
 
 
+def _saved(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Live prices are enrichment and may change; every saved field must not.
+    return [
+        {key: value for key, value in decision.items() if "live" not in key}
+        for decision in decisions
+    ]
+
+
 def _squad_payload() -> list[dict[str, Any]]:
     return [
         {
@@ -462,14 +470,14 @@ def test_chip_http_clear_move_reset_and_reopen_use_only_canonical_chip(
         week["chip_availability"]["WILDCARD"]["state"] == "available"
         for week in reopened["gameweeks"]
     )
-    assert reopened["gameweeks"][1]["decisions"] == frozen
+    assert _saved(reopened["gameweeks"][1]["decisions"]) == _saved(frozen)
     assert all(
         not week["decisions"] for week in reopened["gameweeks"] if week["gameweek_number"] != 18
     )
     assert planner_session.get(PlanGameweekModel, legacy.id).chip == PlanChip.WILDCARD
 
 
-@pytest.mark.parametrize("journey", ["horizon", "chips", "transfers"])
+@pytest.mark.parametrize("journey", ["horizon", "chips", "transfers", "pricing"])
 @pytest.mark.skipif(
     __import__("os").getenv("RUN_PLANNER_BROWSER_TESTS") != "1",
     reason="Requires guarded SQL, installed Playwright and a running frontend",
@@ -493,7 +501,12 @@ def test_planner_story_through_actual_browser_and_api(
 
     client, plan_id = guarded_client
     repository = PlanRepository(planner_session)
-    start, end = {"horizon": (25, 26), "chips": (17, 22), "transfers": (8, 12)}[journey]
+    start, end = {
+        "horizon": (25, 26),
+        "chips": (17, 22),
+        "transfers": (8, 12),
+        "pricing": (8, 11),
+    }[journey]
     plan = replace(
         planner_plan,
         start_gameweek=start,
@@ -502,7 +515,7 @@ def test_planner_story_through_actual_browser_and_api(
             planner_plan.boundary,
             free_transfers=2 if journey == "transfers" else planner_plan.boundary.free_transfers,
             used_chips=frozenset()
-            if journey == "transfers"
+            if journey in ("transfers", "pricing")
             else frozenset({Chip.WILDCARD if journey == "horizon" else Chip.FREE_HIT}),
         ),
         gameweeks=tuple(
@@ -547,6 +560,34 @@ def test_planner_story_through_actual_browser_and_api(
             assert response.status_code == 200, response.text
         planner_session.get(PlayerModel, 105).current_price = 8.0
         planner_session.get(PlayerModel, 113).current_price = 5.2
+        planner_session.commit()
+    if journey == "pricing":
+        from api.models.entities import PlayerModel
+        from test_plan_services import mutation_body
+
+        planner_session.get(PlayerModel, 2).current_price = 5.4
+        planner_session.get(PlayerModel, 102).current_price = 6.2
+        planner_session.commit()
+        outgoing = next(player for player in plan.boundary.players if player.player_id == 2)
+        response = client.post(
+            f"/plans/{plan_id}/mutations",
+            json=mutation_body(
+                960,
+                0,
+                [
+                    {
+                        "kind": "add_transfer",
+                        "gameweek_number": 8,
+                        "outgoing_player_id": 2,
+                        "outgoing_ownership_id": str(outgoing.ownership_id),
+                        "incoming_player_id": 102,
+                    }
+                ],
+            ).model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+        planner_session.get(PlayerModel, 2).current_price = 5.6
+        planner_session.get(PlayerModel, 102).current_price = 6.0
         planner_session.commit()
     if journey == "chips":
         from api.models.entities import PlayerModel
@@ -595,6 +636,7 @@ def test_planner_story_through_actual_browser_and_api(
                         "horizon": "real API horizon",
                         "chips": "US2 real API chips",
                         "transfers": "US3 real API transfers",
+                        "pricing": "US4 real API pricing",
                     }[journey],
                     "--workers=1",
                     "--reporter=line",
@@ -616,7 +658,15 @@ def test_planner_story_through_actual_browser_and_api(
             thread.join(timeout=10)
             assert not thread.is_alive()
     reopened = repository.load_canonical(plan_id)
-    assert reopened.start_gameweek == {"horizon": 19, "chips": 1, "transfers": 8}[journey]
+    assert (
+        reopened.start_gameweek
+        == {
+            "horizon": 19,
+            "chips": 1,
+            "transfers": 8,
+            "pricing": 9,
+        }[journey]
+    )
     assert not reopened.boundary.used_chips
     assert all(week.chip is None for week in reopened.gameweeks)
     if journey == "transfers":
@@ -628,14 +678,24 @@ def test_planner_story_through_actual_browser_and_api(
             == reopened.gameweeks[0].transfers[0].incoming_ownership_id
         )
         assert not evaluate_plan(reopened, planner_metadata).diagnostics
+    if journey == "pricing":
+        decision = reopened.gameweeks[0].transfers[0]
+        carried = next(p for p in reopened.boundary.players if p.player_id == 113)
+        assert sum(len(week.transfers) for week in reopened.gameweeks) == 1
+        assert (decision.outgoing_player_id, decision.incoming_player_id) == (113, 102)
+        assert (decision.outgoing_market_tenths, decision.incoming_price_tenths) == (50, 60)
+        assert (carried.purchase_price_tenths, carried.provenance.original_price_tenths) == (48, 50)
+        assert reopened.boundary.bank_tenths == 12
+        evaluation = evaluate_plan(reopened, planner_metadata)
+        assert not evaluation.diagnostics
+        assert evaluation.earliest_shortfall_gameweek is None
     if journey == "chips":
         current = client.get(f"/plans/{plan_id}").json()
-        assert (
+        assert _saved(
             next(week for week in current["gameweeks"] if week["gameweek_number"] == 18)[
                 "decisions"
             ]
-            == frozen
-        )
+        ) == _saved(frozen)
         assert sum(len(week["decisions"]) for week in current["gameweeks"]) == 1
 
 
@@ -749,3 +809,73 @@ def test_guarded_committed_response_loss_is_reconciled_without_second_write(
     assert receipt.status_code == 200
     assert receipt.json()["committed_revision"] == 1
     assert client.post(f"/plans/{plan_id}/mutations", json=body).json()["plan"]["revision"] == 1
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us4_http_exposes_basis_saved_quotes_live_prices_and_shortfall(
+    guarded_client, planner_session, planner_plan
+):
+    from api.models.entities import PlayerModel
+    from test_plan_services import mutation_body
+
+    client, plan_id = guarded_client
+    owned = next(p for p in planner_plan.boundary.players if p.player_id == 2)
+    planner_session.get(PlayerModel, 2).current_price = 5.4
+    planner_session.get(PlayerModel, 102).current_price = 6.2
+    planner_session.commit()
+
+    def post(number, revision, intents):
+        response = client.post(
+            f"/plans/{plan_id}/mutations",
+            json=mutation_body(number, revision, intents).model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["plan"]
+
+    saved = post(
+        1,
+        0,
+        [
+            {
+                "kind": "add_transfer",
+                "gameweek_number": 8,
+                "outgoing_player_id": 2,
+                "outgoing_ownership_id": str(owned.ownership_id),
+                "incoming_player_id": 102,
+            }
+        ],
+    )
+    quote = saved["gameweeks"][0]["decisions"][0]
+    assert (quote["outgoing_market_tenths"], quote["incoming_price_tenths"]) == (54, 62)
+    assert (quote["purchase_price_tenths"], quote["selling_price_tenths"]) == (50, 52)
+    assert (quote["basis_kind"], quote["basis_confirmation"]) == ("starting", "assumed")
+    assert saved["financial_status"]["earliest_shortfall_gameweek"] is None
+    planner_session.get(PlayerModel, 2).current_price = 5.6
+    planner_session.get(PlayerModel, 102).current_price = 6.0
+    planner_session.commit()
+    refreshed = client.get(f"/plans/{plan_id}").json()["gameweeks"][0]["decisions"][0]
+    assert _saved([refreshed]) == _saved([quote])
+    assert (refreshed["outgoing_live_market_tenths"], refreshed["incoming_live_price_tenths"]) == (
+        56,
+        60,
+    )
+    corrected = post(
+        2,
+        1,
+        [
+            {
+                "kind": "correct_purchase_price",
+                "ownership_id": str(owned.ownership_id),
+                "price_tenths": 48,
+            }
+        ],
+    )
+    decision = corrected["gameweeks"][0]["decisions"][0]
+    assert (decision["purchase_price_tenths"], decision["selling_price_tenths"]) == (48, 51)
+    assert decision["basis_confirmation"] == "user_confirmed"
+    assert (decision["outgoing_market_tenths"], decision["incoming_price_tenths"]) == (54, 62)
+    status = corrected["financial_status"]
+    assert (status["earliest_shortfall_gameweek"], status["earliest_shortfall_tenths"]) == (8, 1)
+    assert status["requires_resolution"] is True
+    assert "gameweek 8" in status["earliest_shortfall_reason"]
+    assert corrected["gameweeks"][0]["accounting"]["closing_bank_tenths"] == -1

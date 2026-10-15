@@ -808,3 +808,247 @@ def test_legal_rearrangements_are_executable_domain_intents() -> None:
             ),
             metadata(),
         ).evaluation.diagnostics
+
+
+@pytest.mark.parametrize(
+    ("market", "sale"), [(40, 40), (48, 48), (50, 50), (51, 50), (52, 51), (53, 51), (54, 52)]
+)
+def test_us4_replay_sales_and_bank_use_saved_market_not_incoming_or_live(
+    market: int, sale: int
+) -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+
+    plan = with_week(
+        build_plan(), 8, transfers=(replace(build_transfer(), outgoing_market_tenths=market),)
+    )
+    week = evaluate_plan(plan, metadata()).gameweeks[0]
+    assert week.sales[0].selling_price_tenths == sale
+    assert week.closing_bank_tenths == 10 + sale - 50
+    assert week.provisional_dependencies >= {identity(1002)}
+
+
+def test_us4_wildcard_acquisition_basis_carries_to_a_later_buy_back_chain() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    first = replace(build_transfer(), incoming_price_tenths=52)
+    second = replace(
+        build_transfer(102, 2, 2),
+        outgoing_ownership_id=identity(3001),
+        outgoing_market_tenths=56,
+    )
+    third = replace(
+        build_transfer(2, 103, 3), outgoing_ownership_id=identity(3002), outgoing_market_tenths=53
+    )
+    plan = with_week(build_plan(8, 10), 8, chip=Chip.WILDCARD, transfers=(first,))
+    plan = with_week(with_week(plan, 9, transfers=(second,)), 10, transfers=(third,))
+    result = evaluate_plan(plan, metadata())
+    assert not result.diagnostics
+    # WC sale 52 (50/54) funds the 52 acquisition; its saved 52 is the new basis.
+    assert [week.sales[0].selling_price_tenths for week in result.gameweeks] == [52, 54, 51]
+    assert [week.closing_bank_tenths for week in result.gameweeks] == [10, 14, 15]
+    assert [week.points_hit for week in result.gameweeks] == [0, 0, 0]
+    bought_back = result.gameweeks[1].players[1]
+    assert (bought_back.player_id, bought_back.purchase_price_tenths) == (2, 50)
+    assert bought_back.ownership_id == identity(3002) != identity(1002)
+
+
+def test_us4_free_hit_sales_are_temporary_and_new_sales_use_latest_assumption() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    saved = replace(build_transfer(), outgoing_market_tenths=52, incoming_price_tenths=53)
+    later = replace(build_transfer(2, 103, 2), outgoing_market_tenths=54)
+    plan = with_week(build_plan(8, 9), 8, chip=Chip.FREE_HIT, transfers=(saved,))
+    plan = with_week(plan, 9, transfers=(later,))
+    result = evaluate_plan(plan, metadata())
+    assert not result.diagnostics
+    temporary, restored = result.gameweeks
+    assert temporary.sales[0].selling_price_tenths == 51
+    assert temporary.closing_bank_tenths == 8
+    assert restored.starting_bank_tenths == 10
+    assert restored.sales[0].selling_price_tenths == 52
+    assert restored.closing_bank_tenths == 12
+    assert plan.gameweeks[0].transfers == (saved,)
+
+
+def test_us4_upstream_acquisition_edit_reprices_dependent_sale_from_its_own_saved_market() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import EditTransfer
+    from fpl_engine.planning.mutations import MutationRejectedError, apply_intents
+
+    first = build_transfer()
+    later = replace(
+        build_transfer(102, 2, 2),
+        outgoing_ownership_id=first.incoming_ownership_id,
+        outgoing_market_tenths=56,
+    )
+    plan = with_week(with_week(build_plan(), 8, transfers=(first,)), 10, transfers=(later,))
+    before = evaluate_plan(plan, metadata())
+    assert (
+        before.gameweeks[2].sales[0].selling_price_tenths,
+        before.gameweeks[2].closing_bank_tenths,
+    ) == (53, 15)
+    result = apply_intents(
+        plan,
+        (EditTransfer(first.decision_id, replace(first, incoming_price_tenths=54)),),
+        metadata(),
+    )
+    after = result.evaluation
+    assert after.gameweeks[0].closing_bank_tenths == 8
+    assert (
+        after.gameweeks[2].sales[0].selling_price_tenths,
+        after.gameweeks[2].closing_bank_tenths,
+    ) == (55, 13)
+    assert result.plan.gameweeks[2].transfers == (later,)
+    with pytest.raises(MutationRejectedError, match="Gameweek 8"):
+        apply_intents(
+            plan,
+            (EditTransfer(first.decision_id, replace(first, incoming_price_tenths=63)),),
+            metadata(),
+        )
+
+
+def test_us4_confirmation_changes_no_money_and_clears_only_that_dependency() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import ConfirmPurchasePrice
+    from fpl_engine.planning.mutations import apply_intents
+
+    plan = with_week(build_plan(), 8, transfers=(build_transfer(),))
+    before = evaluate_plan(plan, metadata()).gameweeks[0]
+    result = apply_intents(plan, (ConfirmPurchasePrice(identity(1002)),), metadata())
+    after = result.evaluation.gameweeks[0]
+    confirmed = next(p for p in result.plan.boundary.players if p.player_id == 2)
+    assert (confirmed.provenance.confirmation, confirmed.provenance.source) == (
+        "user_confirmed",
+        "stored_player_observation",
+    )
+    assert after.closing_bank_tenths == before.closing_bank_tenths
+    assert [(s.decision_id, s.selling_price_tenths) for s in after.sales] == [
+        (s.decision_id, s.selling_price_tenths) for s in before.sales
+    ]
+    assert identity(1002) in before.provisional_dependencies
+    assert identity(1002) not in after.provisional_dependencies
+    assert identity(1001) in after.provisional_dependencies
+
+
+def test_us4_provisional_bank_dependency_survives_sale_but_not_a_free_hit_branch() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    sold = build_transfer(3, 103, 1)
+    ordinary = evaluate_plan(with_week(build_plan(8, 9), 8, transfers=(sold,)), metadata())
+    assert identity(1003) in ordinary.gameweeks[1].provisional_dependencies
+    assert identity(1003) not in {p.ownership_id for p in ordinary.gameweeks[1].players}
+    free_hit = evaluate_plan(
+        with_week(build_plan(8, 9), 8, chip=Chip.FREE_HIT, transfers=(sold,)), metadata()
+    )
+    assert identity(1003) in free_hit.gameweeks[0].provisional_dependencies
+    assert identity(1003) not in free_hit.gameweeks[0].permanent_bank_dependencies
+
+
+def test_us4_correction_deficit_survives_later_positive_bank_and_clears_after_repair() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import CorrectPurchasePrice, EditTransfer
+    from fpl_engine.planning.mutations import apply_intents
+
+    first = replace(build_transfer(), incoming_price_tenths=62)
+    second = replace(build_transfer(3, 103, 2), outgoing_market_tenths=54)
+    plan = with_week(with_week(build_plan(8, 10), 8, transfers=(first,)), 9, transfers=(second,))
+    assert not evaluate_plan(plan, metadata()).earliest_shortfall_gameweek
+    corrected = apply_intents(plan, (CorrectPurchasePrice(identity(1002), 48),), metadata())
+    weeks = corrected.evaluation.gameweeks
+    assert [week.closing_bank_tenths for week in weeks] == [-1, 1, 1]
+    assert corrected.evaluation.earliest_shortfall_gameweek == 8
+    assert weeks[1].shortfall_tenths == 0
+    assert weeks[1].financial_issue_gameweeks == frozenset({8})
+    assert corrected.plan.gameweeks == plan.gameweeks
+    repaired = apply_intents(
+        corrected.plan,
+        (EditTransfer(first.decision_id, replace(first, incoming_price_tenths=61)),),
+        metadata(),
+    )
+    assert repaired.evaluation.earliest_shortfall_gameweek is None
+    assert all(not week.financial_issue_gameweeks for week in repaired.evaluation.gameweeks)
+
+
+def test_us4_correction_reprices_temporary_and_later_permanent_sales_from_each_saved_market() -> (
+    None
+):
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import CorrectPurchasePrice
+    from fpl_engine.planning.mutations import apply_intents
+    from fpl_engine.rules import Chip
+
+    temporary = replace(build_transfer(), incoming_price_tenths=62)
+    permanent = replace(build_transfer(2, 103, 2), outgoing_market_tenths=52)
+    plan = with_week(build_plan(8, 9), 8, chip=Chip.FREE_HIT, transfers=(temporary,))
+    plan = with_week(plan, 9, transfers=(permanent,))
+    before = evaluate_plan(plan, metadata())
+    assert [w.closing_bank_tenths for w in before.gameweeks] == [0, 11]
+    corrected = apply_intents(plan, (CorrectPurchasePrice(identity(1002), 48),), metadata())
+    weeks = corrected.evaluation.gameweeks
+    assert [w.sales[0].selling_price_tenths for w in weeks] == [51, 50]
+    assert [w.closing_bank_tenths for w in weeks] == [-1, 10]
+    assert corrected.evaluation.earliest_shortfall_gameweek == 8
+    assert weeks[1].starting_bank_tenths == 10
+    assert weeks[1].financial_issue_gameweeks == frozenset()
+    assert corrected.plan.gameweeks == plan.gameweeks
+
+
+def test_us4_permanent_deficit_stays_dependent_through_a_free_hit_week() -> None:
+    from fpl_engine.planning.models import CorrectPurchasePrice
+    from fpl_engine.planning.mutations import apply_intents
+    from fpl_engine.rules import Chip
+
+    plan = with_week(
+        build_plan(8, 10), 8, transfers=(replace(build_transfer(), incoming_price_tenths=62),)
+    )
+    plan = with_week(plan, 9, chip=Chip.FREE_HIT)
+    corrected = apply_intents(plan, (CorrectPurchasePrice(identity(1002), 48),), metadata())
+    weeks = corrected.evaluation.gameweeks
+    assert [w.closing_bank_tenths for w in weeks] == [-1, -1, -1]
+    # The FH week is itself negative, but its temporary issue must not reach GW10.
+    assert [w.financial_issue_gameweeks for w in weeks] == [
+        frozenset({8}),
+        frozenset({8, 9}),
+        frozenset({8, 10}),
+    ]
+    assert corrected.evaluation.earliest_shortfall_gameweek == 8
+
+
+def test_us4_sale_exposes_the_basis_and_provenance_that_produced_it() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import ConfirmPurchasePrice, CorrectPurchasePrice
+    from fpl_engine.planning.mutations import apply_intents
+    from fpl_engine.rules import Chip
+
+    first = replace(build_transfer(), incoming_price_tenths=52)
+    second = replace(
+        build_transfer(102, 2, 2),
+        outgoing_ownership_id=identity(3001),
+        outgoing_market_tenths=56,
+    )
+    plan = with_week(build_plan(8, 9), 8, chip=Chip.WILDCARD, transfers=(first,))
+    plan = with_week(plan, 9, transfers=(second,))
+    starting, acquired = (
+        evaluate_plan(plan, metadata()).gameweeks[0].sales[0],
+        evaluate_plan(plan, metadata()).gameweeks[1].sales[0],
+    )
+    assert (starting.purchase_price_tenths, starting.basis_kind, starting.basis_confirmation) == (
+        50,
+        "starting",
+        "assumed",
+    )
+    assert (acquired.purchase_price_tenths, acquired.basis_kind, acquired.basis_confirmation) == (
+        52,
+        "planned_acquisition",
+        None,
+    )
+    confirmed = apply_intents(plan, (ConfirmPurchasePrice(identity(1002)),), metadata())
+    assert confirmed.evaluation.gameweeks[0].sales[0].basis_confirmation == "user_confirmed"
+    assert confirmed.evaluation.gameweeks[0].sales[0].purchase_price_tenths == 50
+    corrected = apply_intents(plan, (CorrectPurchasePrice(identity(1002), 48),), metadata())
+    sale = corrected.evaluation.gameweeks[0].sales[0]
+    assert (sale.purchase_price_tenths, sale.selling_price_tenths) == (48, 51)
+    assert sale.basis_confirmation == "user_confirmed"

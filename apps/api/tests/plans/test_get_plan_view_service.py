@@ -281,3 +281,176 @@ def test_canonical_view_uses_replay_not_quarantined_finances(
     else:
         assert response["gameweeks"][0]["players"][0]["ownership_id"] is not None
     assert response["gameweeks"][0]["chip_availability"]["WILDCARD"]["state"] == "available"
+
+
+def test_us4_decision_inspection_separates_basis_saved_quotes_and_live_prices(
+    planner_plan, planner_metadata
+) -> None:
+    from dataclasses import replace
+    from uuid import UUID
+
+    from fpl_engine.planning.models import TransferDecision
+
+    decision = TransferDecision(
+        UUID(int=8000),
+        2,
+        UUID(int=1002),
+        102,
+        UUID(int=8001),
+        54,
+        62,
+        "stored_player_observation",
+        "2026-10-14T12:00:00+00:00",
+        "captured",
+    )
+    corrected = tuple(
+        replace(
+            player,
+            purchase_price_tenths=48,
+            provenance=replace(player.provenance, confirmation="user_confirmed"),
+        )
+        if player.player_id == 2
+        else player
+        for player in planner_plan.boundary.players
+    )
+    plan = replace(
+        planner_plan,
+        boundary=replace(planner_plan.boundary, players=corrected),
+        gameweeks=(
+            replace(planner_plan.gameweeks[0], transfers=(decision,)),
+            *planner_plan.gameweeks[1:],
+        ),
+    )
+    live = {2: 5.6, 102: 6.0}
+    players = [
+        PlanPlayerRecord(
+            identifier,
+            f"P{identifier}",
+            "First",
+            "Second",
+            player.team_id,
+            "Team",
+            "TMX",
+            player.position.value,
+            live.get(identifier, 5.0),
+            "a",
+            False,
+            None,
+            False,
+            False,
+        )
+        for identifier, player in planner_metadata.items()
+    ]
+    record = replace(_plan(), canonical_plan=plan, rule_players=players)
+    view = GetPlanViewService(_FakeProjectionRepository([])).execute(record)
+    saved = view.gameweeks[0].decisions[0]
+    assert (saved["purchase_price_tenths"], saved["basis_kind"], saved["basis_confirmation"]) == (
+        48,
+        "starting",
+        "user_confirmed",
+    )
+    assert (saved["outgoing_market_tenths"], saved["selling_price_tenths"]) == (54, 51)
+    assert saved["incoming_price_tenths"] == 62
+    assert (saved["outgoing_live_market_tenths"], saved["incoming_live_price_tenths"]) == (56, 60)
+    assert view.gameweeks[0].accounting["closing_bank_tenths"] == -1
+    status = view.financial_status
+    assert status["provisional"] is True
+    assert status["requires_resolution"] is True
+    assert status["earliest_shortfall_gameweek"] == 8
+    assert status["earliest_shortfall_tenths"] == 1
+    assert "gameweek 8" in str(status["earliest_shortfall_reason"])
+    assert "0.1" in str(status["earliest_shortfall_reason"])
+    weeks = status["gameweeks"]
+    assert [week["shortfall_tenths"] for week in weeks][:2] == [1, 1]
+    assert weeks[0]["provisional"] is True
+    assert weeks[1]["affected_chain"] == [8, 9]
+
+
+def test_us4_resolved_plan_has_no_shortfall_reason_or_amount(
+    planner_plan, planner_metadata
+) -> None:
+    from dataclasses import replace
+
+    players = [
+        PlanPlayerRecord(
+            identifier,
+            f"P{identifier}",
+            "First",
+            "Second",
+            player.team_id,
+            "Team",
+            "TMX",
+            player.position.value,
+            5.0,
+            "a",
+            False,
+            None,
+            False,
+            False,
+        )
+        for identifier, player in planner_metadata.items()
+    ]
+    record = replace(_plan(), canonical_plan=planner_plan, rule_players=players)
+    status = GetPlanViewService(_FakeProjectionRepository([])).execute(record).financial_status
+    assert status["requires_resolution"] is False
+    assert status["earliest_shortfall_gameweek"] is None
+    assert status["earliest_shortfall_tenths"] is None
+    assert status["earliest_shortfall_reason"] is None
+
+
+@pytest.mark.parametrize("live", [0.0, -1.0, 5.55, float("nan"), float("inf")])
+def test_us4_unusable_live_prices_never_break_the_read_or_invent_a_value(
+    planner_plan, planner_metadata, live
+) -> None:
+    from dataclasses import replace
+    from uuid import UUID
+
+    from api.schemas.plans import TransferDecisionResponse
+    from fpl_engine.planning.models import TransferDecision
+
+    decision = TransferDecision(
+        UUID(int=8000),
+        2,
+        UUID(int=1002),
+        102,
+        UUID(int=8001),
+        54,
+        50,
+        "stored_player_observation",
+        "2026-10-14T12:00:00+00:00",
+        "captured",
+    )
+    plan = replace(
+        planner_plan,
+        gameweeks=(
+            replace(planner_plan.gameweeks[0], transfers=(decision,)),
+            *planner_plan.gameweeks[1:],
+        ),
+    )
+    players = [
+        PlanPlayerRecord(
+            identifier,
+            f"P{identifier}",
+            "First",
+            "Second",
+            player.team_id,
+            "Team",
+            "TMX",
+            player.position.value,
+            live if identifier in (2, 102) else 5.0,
+            "a",
+            False,
+            None,
+            False,
+            False,
+        )
+        for identifier, player in planner_metadata.items()
+    ]
+    record = replace(_plan(), canonical_plan=plan, rule_players=players)
+    saved = (
+        GetPlanViewService(_FakeProjectionRepository([])).execute(record).gameweeks[0].decisions[0]
+    )
+    assert saved["outgoing_live_market_tenths"] is None
+    assert saved["incoming_live_price_tenths"] is None
+    assert (saved["outgoing_market_tenths"], saved["selling_price_tenths"]) == (54, 52)
+    assert TransferDecisionResponse.model_validate(saved).incoming_live_price_tenths is None

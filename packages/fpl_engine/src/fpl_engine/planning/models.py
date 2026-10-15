@@ -243,6 +243,9 @@ class Diagnostic:
 class DecisionSale:
     decision_id: UUID
     selling_price_tenths: int
+    purchase_price_tenths: int | None = None
+    basis_kind: Literal["starting", "planned_acquisition"] | None = None
+    basis_confirmation: Confirmation | None = None
 
 
 @dataclass(frozen=True)

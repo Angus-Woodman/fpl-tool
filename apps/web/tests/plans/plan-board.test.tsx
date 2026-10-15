@@ -9,7 +9,13 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PlanBoard } from "@/components/plans/plan-board";
-import type { PlanChip, PlanIntent, PlanPlayer, PlanResponse } from "@/lib/api";
+import type {
+  PlanChip,
+  PlanDecision,
+  PlanIntent,
+  PlanPlayer,
+  PlanResponse,
+} from "@/lib/api";
 import {
   buildPlannerPlan,
   createPlannerFixture,
@@ -263,7 +269,220 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function us4Decision(overrides: Partial<PlanDecision> = {}): PlanDecision {
+  return {
+    decision_id: plannerIdentity(8000),
+    outgoing_player_id: 2,
+    outgoing_ownership_id: plannerIdentity(1002),
+    incoming_player_id: 102,
+    incoming_ownership_id: plannerIdentity(8001),
+    outgoing_market_tenths: 54,
+    incoming_price_tenths: 62,
+    selling_price_tenths: 51,
+    purchase_price_tenths: 48,
+    basis_kind: "starting",
+    basis_confirmation: "user_confirmed",
+    outgoing_live_market_tenths: 56,
+    incoming_live_price_tenths: 60,
+    observation_source: "stored_player_observation",
+    observed_at: "2026-10-14T12:00:00+00:00",
+    origin: "captured",
+    ...overrides,
+  };
+}
+
+function us4Plan(start = 8, end = 9): PlanResponse {
+  const plan = buildPlannerPlan(start, end);
+  plan.gameweeks[0].decisions = [us4Decision()];
+  plan.gameweeks[0].transfers_out = [{ player_id: 2, web_name: "P2" }];
+  plan.gameweeks[0].transfers_in = [{ player_id: 102, web_name: "P102" }];
+  return plan;
+}
+
+function shortfallStatus(plan: PlanResponse): void {
+  plan.gameweeks[1].bank = -0.1;
+  plan.gameweeks[1].accounting!.closing_bank_tenths = -1;
+  plan.financial_status = {
+    provisional: true,
+    requires_resolution: true,
+    earliest_shortfall_gameweek: 9,
+    earliest_shortfall_tenths: 1,
+    earliest_shortfall_reason:
+      "Bank is £0.1m below zero in gameweek 9 after its saved transfers",
+    gameweeks: [
+      {
+        gameweek_number: 8,
+        shortfall_tenths: 0,
+        affected_chain: [],
+        provisional: true,
+      },
+      {
+        gameweek_number: 9,
+        shortfall_tenths: 1,
+        affected_chain: [9],
+        provisional: true,
+      },
+      {
+        gameweek_number: 10,
+        shortfall_tenths: 1,
+        affected_chain: [9, 10],
+        provisional: true,
+      },
+    ],
+  };
+}
+
 describe("PlanBoard", () => {
+  it("US4 inspection separates basis, saved quotes, sale and live prices and states the policy", async () => {
+    const plan = us4Plan();
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    const details = await screen.findByRole("region", {
+      name: "Transfer price details: P2 to P102",
+    });
+    expect(details).toHaveTextContent("Purchase basis £4.8m · Confirmed");
+    expect(details).toHaveTextContent("Saved market assumption £5.4m");
+    expect(details).toHaveTextContent("Selling price used £5.1m");
+    expect(details).toHaveTextContent("Acquisition price paid £6.2m");
+    expect(details).toHaveTextContent(
+      "Latest market (not used): P2 £5.6m · P102 £6.0m",
+    );
+    expect(
+      screen.getByText(/Market refreshes do not reprice saved transfers/),
+    ).toBeVisible();
+  });
+
+  it("US4 presents a planned acquisition's source readably, never as a raw decision identifier", async () => {
+    const plan = us4Plan();
+    const carried = plan.starting_state!.players[1];
+    carried.provenance = {
+      source: `decision:${plannerIdentity(8000)}@stored_player_observation@2026-10-15T14:04:28+00:00`,
+      original_price_tenths: 50,
+      basis_kind: "planned_acquisition",
+      confirmation: null,
+    };
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    const row = (await screen.findByLabelText("P2 purchase price")).closest(
+      "li",
+    )!;
+    expect(row).toHaveTextContent("Planned acquisition");
+    expect(row).toHaveTextContent(
+      "Original 5.0 · acquired by a planned transfer",
+    );
+    expect(row).not.toHaveTextContent("decision:");
+    expect(row).not.toHaveTextContent(plannerIdentity(8000));
+  });
+
+  it("US4 estimated bases are lightweight, provisional and never block planning", async () => {
+    const plan = us4Plan();
+    plan.gameweeks[0].decisions = [
+      us4Decision({ basis_confirmation: "assumed", purchase_price_tenths: 50 }),
+    ];
+    plan.financial_status = { provisional: true, requires_resolution: false };
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    const details = await screen.findByRole("region", {
+      name: "Transfer price details: P2 to P102",
+    });
+    expect(details).toHaveTextContent("Purchase basis £5.0m · Estimated");
+    expect(screen.getByText("Estimated bases")).toBeVisible();
+    expect(screen.queryByText("Requires resolution")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Make P4 captain")).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Remove transfer 2 to 102" }),
+    ).toBeEnabled();
+  });
+
+  it("US4 keeps saved, provisional and requires-resolution status separate and navigates to the earliest gameweek", async () => {
+    const plan = us4Plan(8, 10);
+    shortfallStatus(plan);
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    expect(await screen.findByRole("status")).toHaveTextContent("Saved");
+    expect(screen.getByText("Estimated bases")).toBeVisible();
+    expect(screen.getByText("Requires resolution")).toBeVisible();
+    const issue = screen.getByRole("region", { name: "Financial resolution" });
+    expect(issue).toHaveTextContent("Shortfall £0.1m in GW9");
+    expect(issue).toHaveTextContent("Bank is £0.1m below zero in gameweek 9");
+    expect(issue).toHaveTextContent("Dependent gameweeks: GW9, GW10");
+    expect(issue).toHaveTextContent("Saved does not mean financially valid");
+    expect(screen.getByLabelText("Gameweek 8")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    fireEvent.click(within(issue).getByRole("button", { name: "Go to GW9" }));
+    expect(screen.getByLabelText("Gameweek 9")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("US4 shows a negative bank as a shortfall rather than clamping or hiding it", async () => {
+    const plan = us4Plan();
+    shortfallStatus(plan);
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Gameweek 9"));
+    expect(screen.getByText(/Bank Shortfall £0.1m/)).toBeVisible();
+    expect(screen.queryByText(/Bank -0.1/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Bank 0.0/)).not.toBeInTheDocument();
+  });
+
+  it("US4 retains decisions during repair and clears the flags only after an acknowledged legal repair", async () => {
+    const plan = us4Plan();
+    shortfallStatus(plan);
+    const repaired = us4Plan();
+    repaired.plan_id = plan.plan_id;
+    repaired.revision = 1;
+    repaired.gameweeks[0].decisions = [];
+    repaired.gameweeks[0].transfers_in = [];
+    repaired.gameweeks[0].transfers_out = [];
+    repaired.financial_status = {
+      provisional: true,
+      requires_resolution: false,
+    };
+    const requests: { intents: PlanIntent[]; expected_revision: number }[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (_input, init) => {
+      if (init?.method !== "POST")
+        return new Response(JSON.stringify(plan), { status: 200 });
+      const envelope = JSON.parse(String(init.body));
+      requests.push(envelope);
+      return new Response(
+        JSON.stringify({
+          status: "committed",
+          mutation_id: envelope.mutation_id,
+          committed_revision: 1,
+          plan: repaired,
+          candidate: null,
+        }),
+        { status: 200 },
+      );
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    expect(await screen.findByText("Requires resolution")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Remove transfer 2 to 102" }),
+    ).toBeVisible();
+    expect(requests).toHaveLength(0);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove transfer 2 to 102" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("Saved"),
+    );
+    expect(requests[0]).toMatchObject({
+      expected_revision: 0,
+      intents: [
+        { kind: "remove_transfer", decision_id: plannerIdentity(8000) },
+      ],
+    });
+    expect(screen.queryByText("Requires resolution")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Financial resolution" }),
+    ).not.toBeInTheDocument();
+  });
+
   it.each(["none", "duplicate", "additional"])(
     "retains accepted repair diagnostics after a 422 with %s diagnostics",
     async (mode) => {

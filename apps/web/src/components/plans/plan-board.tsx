@@ -56,6 +56,93 @@ function opponentLabel(player: PlanPlayer): string {
 
 type RepairOrigin = "saved" | "rejected";
 
+const formatTenths = (tenths: number | null | undefined): string =>
+  tenths == null ? "Unavailable" : `£${(tenths / 10).toFixed(1)}m`;
+
+function basisLabel(decision: PlanDecision): string {
+  if (decision.basis_kind === "planned_acquisition")
+    return "Planned acquisition";
+  if (decision.basis_confirmation === "assumed") return "Estimated";
+  if (decision.basis_confirmation === "authoritative") return "Authoritative";
+  return decision.basis_confirmation ? "Confirmed" : "Unavailable";
+}
+
+function TransferPriceDetails({
+  decision,
+  week,
+}: {
+  decision: PlanDecision;
+  week: PlanGameweek;
+}): JSX.Element {
+  const nameOf = (id: number): string =>
+    [...week.transfers_out, ...week.transfers_in, ...week.players].find(
+      (player) => player.player_id === id,
+    )?.web_name ?? `Player ${id}`;
+  const outgoing = nameOf(decision.outgoing_player_id);
+  const incoming = nameOf(decision.incoming_player_id);
+  const live =
+    decision.outgoing_live_market_tenths != null &&
+    decision.incoming_live_price_tenths != null;
+  return (
+    <section
+      aria-label={`Transfer price details: ${outgoing} to ${incoming}`}
+      className="mt-3 space-y-0.5 rounded-md border border-slate-200 p-3 text-xs text-slate-700"
+    >
+      <p>{`Purchase basis ${formatTenths(decision.purchase_price_tenths)} · ${basisLabel(decision)}`}</p>
+      <p>{`Saved market assumption ${formatTenths(decision.outgoing_market_tenths)}`}</p>
+      <p>{`Selling price used ${formatTenths(decision.selling_price_tenths)}`}</p>
+      <p>{`Acquisition price paid ${formatTenths(decision.incoming_price_tenths)}`}</p>
+      {live && (
+        <p className="text-slate-500">{`Latest market (not used): ${outgoing} ${formatTenths(decision.outgoing_live_market_tenths)} · ${incoming} ${formatTenths(decision.incoming_live_price_tenths)}`}</p>
+      )}
+    </section>
+  );
+}
+
+function FinancialResolutionPanel({
+  plan,
+  onGo,
+}: {
+  plan: PlanResponse;
+  onGo: (gameweek: number) => void;
+}): JSX.Element | null {
+  const status = plan.financial_status;
+  if (!status.requires_resolution) return null;
+  const earliest = status.earliest_shortfall_gameweek ?? null;
+  const chain = (status.gameweeks ?? [])
+    .filter(
+      (week) => earliest !== null && week.affected_chain.includes(earliest),
+    )
+    .map((week) => week.gameweek_number);
+  return (
+    <section
+      aria-label="Financial resolution"
+      className="space-y-1 border-y border-red-200 py-3 text-sm text-red-800"
+    >
+      <p className="font-medium">{`Shortfall ${formatTenths(status.earliest_shortfall_tenths)} in GW${earliest ?? "?"}`}</p>
+      {status.earliest_shortfall_reason && (
+        <p>{status.earliest_shortfall_reason}</p>
+      )}
+      {chain.length > 0 && (
+        <p>{`Dependent gameweeks: ${chain.map((number) => `GW${number}`).join(", ")}`}</p>
+      )}
+      <p>
+        Saved does not mean financially valid. Repair the affected transfers or
+        purchase prices to resolve it.
+      </p>
+      {earliest !== null && (
+        <button
+          type="button"
+          className="rounded-md border border-red-300 bg-white px-2 py-1 text-xs"
+          onClick={() => onGo(earliest)}
+        >
+          {`Go to GW${earliest}`}
+        </button>
+      )}
+    </section>
+  );
+}
+
 function TransferRepairPanel({
   plan,
   rejection,
@@ -452,7 +539,9 @@ function StartingStatePanel({
               <p className="break-all text-xs text-slate-600">
                 Original{" "}
                 {(player.provenance.original_price_tenths / 10).toFixed(1)} ·{" "}
-                {player.provenance.source.replaceAll("_", " ")}
+                {player.provenance.basis_kind === "planned_acquisition"
+                  ? "acquired by a planned transfer"
+                  : player.provenance.source.replaceAll("_", " ")}
               </p>
             </li>
           ))}
@@ -654,6 +743,10 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   const currentPlan = plan ?? state.plan;
   const draft = gameweek?.players ?? null;
   const draftChip = gameweek?.chip ?? null;
+  const shortfallTenths =
+    currentPlan.financial_status.gameweeks?.find(
+      (week) => week.gameweek_number === gameweek?.gameweek_number,
+    )?.shortfall_tenths ?? 0;
   const editingUnavailable =
     currentPlan.foundation_state !== "ready" ||
     snapshot?.status === "not_saved" ||
@@ -836,6 +929,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           {snapshot?.message || actionError}
         </p>
       )}
+      <FinancialResolutionPanel plan={currentPlan} onGo={setSelectedGameweek} />
       <TransferRepairPanel
         key={`${currentPlan.revision}-${JSON.stringify(snapshot?.rejection?.intents ?? [])}`}
         plan={currentPlan}
@@ -865,8 +959,11 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   Gameweek {gameweek.gameweek_number}
                 </p>
                 <p>
-                  Bank {gameweek.bank?.toFixed(1) ?? "Unavailable"} · Free
-                  transfers{" "}
+                  Bank{" "}
+                  {shortfallTenths > 0
+                    ? `Shortfall ${formatTenths(shortfallTenths)}`
+                    : (gameweek.bank?.toFixed(1) ?? "Unavailable")}{" "}
+                  · Free transfers{" "}
                   {gameweek.unlimited_transfers
                     ? "unlimited"
                     : (gameweek.accounting?.free_transfers_available ??
@@ -980,6 +1077,22 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                 Remove Transfer
               </button>
             ))}
+            {gameweek.decisions.map((decision) => (
+              <TransferPriceDetails
+                key={`price-${decision.decision_id}`}
+                decision={decision}
+                week={gameweek}
+              />
+            ))}
+            {gameweek.decisions.length > 0 && (
+              <p className="mt-2 text-xs text-slate-600">
+                Price policy: a new or explicitly edited transfer saves the
+                latest market prices at that moment. Market refreshes do not
+                reprice saved transfers. A purchase-price correction
+                recalculates sales from each transfer&apos;s saved market
+                assumption and leaves acquisition prices unchanged.
+              </p>
+            )}
           </section>
 
           <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">

@@ -346,3 +346,223 @@ def test_pending_receipt_contains_only_inputs_and_commit_drops_redundant_payload
     assert stored.pending_inputs is None
     assert stored.committed_revision == 1
     assert stored.digest == "a" * 64
+
+
+def _us4_service(session, planner_plan, planner_metadata):
+    from api.repositories.squad_player_lookup_repository import SquadPlayerLookupRepository
+    from api.services.plans import PlanMutationService
+
+    seed_players(session, planner_metadata)
+    repository = PlanRepository(session)
+    plan_id = new_plan(session).id
+    repository.save_canonical(plan_id, planner_plan, evaluate_plan(planner_plan, planner_metadata))
+    session.commit()
+    return PlanMutationService(session, SquadPlayerLookupRepository(session)), repository, plan_id
+
+
+def _us4_body(number, revision, intents):
+    from api.schemas.plans import PlanMutationRequestBody
+
+    return PlanMutationRequestBody.model_validate(
+        {"mutation_id": str(UUID(int=number)), "expected_revision": revision, "intents": intents}
+    )
+
+
+def _us4_transfer(week, outgoing, ownership, incoming):
+    return {
+        "kind": "add_transfer",
+        "gameweek_number": week,
+        "outgoing_player_id": outgoing,
+        "outgoing_ownership_id": str(ownership),
+        "incoming_player_id": incoming,
+    }
+
+
+def test_us4_frozen_quotes_survive_live_refresh_and_lineup_saves_across_reopen(
+    planner_session, planner_plan, planner_metadata
+):
+    from api.models.entities import PlanTransferDecisionModel, PlayerModel
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+    owned = planner_plan.boundary.players[1]
+    planner_session.get(PlayerModel, 2).current_price = 5.4
+    planner_session.get(PlayerModel, 102).current_price = 6.2
+    planner_session.commit()
+    saved = service.mutate(
+        plan_id, _us4_body(1, 0, [_us4_transfer(8, 2, owned.ownership_id, 102)])
+    ).plan
+    decision = saved.gameweeks[0].transfers[0]
+    assert (decision.outgoing_market_tenths, decision.incoming_price_tenths) == (54, 62)
+    for identifier, price in ((2, 5.0), (102, 5.0), (3, 9.9)):
+        planner_session.get(PlayerModel, identifier).current_price = price
+    planner_session.commit()
+    lineup = service.mutate(
+        plan_id,
+        _us4_body(2, 1, [{"kind": "change_captain", "gameweek_number": 9, "player_id": 4}]),
+    ).plan
+    planner_session.expire_all()
+    reopened = repository.load_canonical(plan_id)
+    assert reopened == lineup
+    assert reopened.gameweeks[0].transfers == (decision,)
+    row = planner_session.scalar(select(PlanTransferDecisionModel))
+    assert (row.outgoing_market_tenths, row.incoming_price_tenths, row.selling_price_tenths) == (
+        54,
+        62,
+        52,
+    )
+    assert evaluate_plan(reopened, planner_metadata).gameweeks[0].closing_bank_tenths == 0
+
+
+def test_us4_dependent_sales_materialize_atomically_and_roll_back_with_the_correction(
+    planner_session, planner_plan, planner_metadata, monkeypatch
+):
+    from api.models.entities import PlanTransferDecisionModel, PlayerModel
+    from api.services.plans import PlannerMutationError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+    owned = planner_plan.boundary.players[1]
+    planner_session.get(PlayerModel, 2).current_price = 5.4
+    planner_session.commit()
+    first = service.mutate(
+        plan_id, _us4_body(1, 0, [_us4_transfer(8, 2, owned.ownership_id, 102)])
+    ).plan
+    bought = first.gameweeks[0].transfers[0]
+    service.mutate(
+        plan_id, _us4_body(2, 1, [_us4_transfer(9, 102, bought.incoming_ownership_id, 2)])
+    )
+    before = {
+        r.decision_id: r.selling_price_tenths
+        for r in planner_session.scalars(select(PlanTransferDecisionModel))
+    }
+    original = PlanRepository.save_canonical
+
+    def fail(*args, **kwargs):
+        original(*args, **kwargs)
+        raise SQLAlchemyError("Injected failure after sale materialization")
+
+    correction = _us4_body(
+        3,
+        2,
+        [
+            {
+                "kind": "correct_purchase_price",
+                "ownership_id": str(owned.ownership_id),
+                "price_tenths": 48,
+            }
+        ],
+    )
+    monkeypatch.setattr(PlanRepository, "save_canonical", fail)
+    with pytest.raises(PlannerMutationError):
+        service.mutate(plan_id, correction)
+    planner_session.rollback()
+    monkeypatch.setattr(PlanRepository, "save_canonical", original)
+    unchanged = {
+        r.decision_id: r.selling_price_tenths
+        for r in planner_session.scalars(select(PlanTransferDecisionModel))
+    }
+    assert unchanged == before
+    service.mutate(plan_id, correction)
+    after = {
+        r.decision_id: r.selling_price_tenths
+        for r in planner_session.scalars(select(PlanTransferDecisionModel))
+    }
+    assert after[bought.decision_id] == 51 and before[bought.decision_id] == 52
+    assert len(after) == 2
+    assert repository.load_canonical(plan_id).gameweeks[0].transfers[0] == bought
+
+
+def test_us4_resolution_is_replay_only_after_reopen_and_moves_with_repairs(
+    planner_session, planner_plan, planner_metadata
+):
+    from api.models.entities import PlanGameweekModel, PlayerModel
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+    owned = {p.player_id: p for p in planner_plan.boundary.players}
+    for identifier, price in ((102, 6.0), (3, 5.4)):
+        planner_session.get(PlayerModel, identifier).current_price = price
+    planner_session.commit()
+    service.mutate(plan_id, _us4_body(1, 0, [_us4_transfer(9, 2, owned[2].ownership_id, 102)]))
+    plan = service.mutate(
+        plan_id, _us4_body(2, 1, [_us4_transfer(10, 3, owned[3].ownership_id, 103)])
+    ).plan
+    banks = [w.closing_bank_tenths for w in evaluate_plan(plan, planner_metadata).gameweeks]
+    assert banks == [10, 0, 2]
+    service.mutate(
+        plan_id,
+        _us4_body(
+            3,
+            2,
+            [
+                {
+                    "kind": "correct_purchase_price",
+                    "ownership_id": str(owned[2].ownership_id),
+                    "price_tenths": 40,
+                }
+            ],
+        ),
+    )
+    planner_session.execute(
+        update(PlanGameweekModel).values(bank=999.0, points_hit=0, free_transfers_available=5)
+    )
+    planner_session.commit()
+    planner_session.expire_all()
+    reopened = repository.load_canonical(plan_id)
+    result = evaluate_plan(reopened, planner_metadata)
+    assert [w.closing_bank_tenths for w in result.gameweeks] == [10, -5, -3]
+    assert result.earliest_shortfall_gameweek == 9
+    assert result.gameweeks[2].financial_issue_gameweeks == frozenset({9, 10})
+    assert reopened.gameweeks[1].transfers[0].incoming_price_tenths == 60
+    removed = reopened.gameweeks[1].transfers[0].decision_id
+    repaired = service.mutate(
+        plan_id, _us4_body(4, 3, [{"kind": "remove_transfer", "decision_id": str(removed)}])
+    ).plan
+    planner_session.expire_all()
+    assert repository.load_canonical(plan_id) == repaired
+    final = evaluate_plan(repaired, planner_metadata)
+    assert final.earliest_shortfall_gameweek is None
+    assert all(not w.financial_issue_gameweeks for w in final.gameweeks)
+
+
+def test_us4_free_hit_branch_issue_stays_temporary_after_reopen(
+    planner_session, planner_plan, planner_metadata
+):
+    from api.models.entities import PlayerModel
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+    owned = planner_plan.boundary.players[1]
+    planner_session.get(PlayerModel, 102).current_price = 6.0
+    planner_session.commit()
+    service.mutate(
+        plan_id,
+        _us4_body(
+            1,
+            0,
+            [
+                {"kind": "activate_chip", "gameweek_number": 8, "chip": "FREE_HIT"},
+                _us4_transfer(8, 2, owned.ownership_id, 102),
+            ],
+        ),
+    )
+    plan = service.mutate(
+        plan_id,
+        _us4_body(
+            2,
+            1,
+            [
+                {
+                    "kind": "correct_purchase_price",
+                    "ownership_id": str(owned.ownership_id),
+                    "price_tenths": 40,
+                }
+            ],
+        ),
+    ).plan
+    planner_session.expire_all()
+    reopened = repository.load_canonical(plan_id)
+    result = evaluate_plan(reopened, planner_metadata)
+    assert reopened == plan
+    assert [w.closing_bank_tenths for w in result.gameweeks[:2]] == [-5, 10]
+    assert result.earliest_shortfall_gameweek == 8
+    assert result.gameweeks[1].financial_issue_gameweeks == frozenset()
+    assert result.gameweeks[1].shortfall_tenths == 0

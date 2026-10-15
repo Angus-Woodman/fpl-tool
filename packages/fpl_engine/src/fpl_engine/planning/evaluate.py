@@ -93,7 +93,15 @@ def _apply_transfers(
             )
             continue
         sale = selling_price_tenths(outgoing.purchase_price_tenths, transfer.outgoing_market_tenths)
-        sales.append(DecisionSale(transfer.decision_id, sale))
+        sales.append(
+            DecisionSale(
+                transfer.decision_id,
+                sale,
+                outgoing.purchase_price_tenths,
+                outgoing.provenance.basis_kind,
+                outgoing.provenance.confirmation,
+            )
+        )
         if outgoing.provenance.confirmation == "assumed":
             dependencies.add(outgoing.ownership_id)
         replacements[outgoing.player_id] = Ownership(
