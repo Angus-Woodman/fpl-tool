@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import {
   PlanChip,
+  PlanDecision,
   PlanGameweek,
   PlanPlayer,
   PlanResponse,
@@ -53,6 +54,8 @@ function opponentLabel(player: PlanPlayer): string {
     .join(", ");
 }
 
+type RepairOrigin = "saved" | "rejected";
+
 function TransferRepairPanel({
   plan,
   rejection,
@@ -88,35 +91,48 @@ function TransferRepairPanel({
         ]
       : [];
   });
-  const diagnostics = [
-    ...new Map(
-      [...(rejection?.diagnostics ?? []), ...plan.decision_errors].map(
-        (error) => [
-          JSON.stringify([
-            error.code,
-            error.gameweek_number,
-            error.decision_id,
-            error.conflicting_gameweek,
-            error.player_id,
-            error.message,
-          ]),
-          error,
-        ],
-      ),
-    ).values(),
-  ];
+  const diagnosticKey = (error: PlanResponse["decision_errors"][number]) =>
+    JSON.stringify([
+      error.code,
+      error.gameweek_number,
+      error.decision_id,
+      error.conflicting_gameweek,
+      error.player_id,
+      error.message,
+    ]);
+  const savedKeys = new Set(plan.decision_errors.map(diagnosticKey));
+  const diagnosticEntries = new Map<
+    string,
+    { error: PlanResponse["decision_errors"][number]; origin: RepairOrigin }
+  >();
+  for (const error of rejection?.diagnostics ?? [])
+    diagnosticEntries.set(diagnosticKey(error), {
+      error,
+      origin: savedKeys.has(diagnosticKey(error)) ? "saved" : "rejected",
+    });
+  for (const error of plan.decision_errors)
+    diagnosticEntries.set(diagnosticKey(error), { error, origin: "saved" });
+  const diagnostics = [...diagnosticEntries.values()];
+  // A decision cited by a saved issue is repaired as saved state, never with rejected intents.
+  const decisionOrigin = new Map<string, RepairOrigin>();
+  for (const { error, origin } of diagnostics)
+    if (error.decision_id && decisionOrigin.get(error.decision_id) !== "saved")
+      decisionOrigin.set(error.decision_id, origin);
   const affected = plan.gameweeks.flatMap((week) =>
-    week.decisions
-      .filter((decision) =>
-        diagnostics.some((error) => error.decision_id === decision.decision_id),
-      )
-      .map((decision) => ({ decision, week })),
+    week.decisions.flatMap((decision) => {
+      const origin = decisionOrigin.get(decision.decision_id);
+      return origin ? [{ decision, week, origin }] : [];
+    }),
   );
-  const repairs = affected.flatMap<PlanIntent>(({ decision, week }) => {
+  const repairFor = (
+    decision: PlanDecision,
+    week: PlanGameweek,
+    origin: RepairOrigin,
+  ): PlanIntent[] => {
     const choice = choices[decision.decision_id];
     if (choice === "remove")
       return [{ kind: "remove_transfer", decision_id: decision.decision_id }];
-    const acquisition = acquisitions.find(
+    const acquisition = (origin === "rejected" ? acquisitions : []).find(
       (source) =>
         choice === `source:${source.decisionId}` &&
         source.gameweek < week.gameweek_number,
@@ -144,84 +160,101 @@ function TransferRepairPanel({
           },
         ]
       : [];
-  });
+  };
   if (!diagnostics.length) return null;
   return (
     <section
       aria-label="Transfer diagnostics"
       className="space-y-3 border-y border-red-200 py-3 text-sm text-red-800"
     >
-      {diagnostics.map((error, index) => (
+      {diagnostics.map(({ error, origin }, index) => (
         <p key={`${error.decision_id}-${error.code}-${index}`}>
-          {plan.decision_errors.includes(error)
-            ? "Saved plan"
-            : "Rejected edit"}
+          {origin === "saved" ? "Saved plan" : "Rejected edit"}
           {" · "}GW{error.gameweek_number}: {error.message}
         </p>
       ))}
-      <fieldset disabled={disabled} className="min-w-0 space-y-3">
-        {affected.map(({ decision, week }) => (
-          <label
-            key={decision.decision_id}
-            className="flex max-w-lg flex-col gap-1"
+      {(
+        [
+          ["saved", "Saved plan repairs"],
+          ["rejected", "Rejected edit repairs"],
+        ] as const
+      ).map(([origin, label]) => {
+        const group = affected.filter((item) => item.origin === origin);
+        if (group.length === 0) return null;
+        const repairs = group.flatMap(({ decision, week }) =>
+          repairFor(decision, week, origin),
+        );
+        return (
+          <fieldset
+            key={origin}
+            role="group"
+            aria-label={label}
+            disabled={disabled}
+            className="min-w-0 space-y-3"
           >
-            GW{week.gameweek_number}: outgoing {decision.outgoing_player_id} →{" "}
-            {decision.incoming_player_id}
-            <select
-              aria-label={`Repair transfer GW${week.gameweek_number}: ${decision.outgoing_player_id} to ${decision.incoming_player_id}`}
-              value={choices[decision.decision_id] ?? ""}
-              onChange={(event) =>
-                setChoices({
-                  ...choices,
-                  [decision.decision_id]: event.target.value,
-                })
-              }
-              className="min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-slate-900"
-            >
-              <option value="">Keep transfer</option>
-              <option value="remove">Remove transfer</option>
-              {acquisitions
-                .filter((source) => source.gameweek < week.gameweek_number)
-                .map((source) => (
-                  <option
-                    key={`source:${source.decisionId}`}
-                    value={`source:${source.decisionId}`}
-                  >
-                    Proposed incoming player {source.playerId} from GW
-                    {source.gameweek}
-                  </option>
-                ))}
-              {(week.players.length
-                ? week.players
-                : (plan.starting_state?.players ?? [])
-              ).map((player) => (
-                <option
-                  key={player.ownership_id ?? player.player_id}
-                  value={player.ownership_id ?? ""}
-                  disabled={!player.ownership_id}
+            {group.map(({ decision, week }) => (
+              <label
+                key={decision.decision_id}
+                className="flex max-w-lg flex-col gap-1"
+              >
+                GW{week.gameweek_number}: outgoing {decision.outgoing_player_id}{" "}
+                → {decision.incoming_player_id}
+                <select
+                  aria-label={`Repair transfer GW${week.gameweek_number}: ${decision.outgoing_player_id} to ${decision.incoming_player_id}`}
+                  value={choices[decision.decision_id] ?? ""}
+                  onChange={(event) =>
+                    setChoices({
+                      ...choices,
+                      [decision.decision_id]: event.target.value,
+                    })
+                  }
+                  className="min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-slate-900"
                 >
-                  Replace outgoing with {player.web_name} ({player.player_id})
-                </option>
-              ))}
-            </select>
-          </label>
-        ))}
-        {affected.length > 0 && (
-          <button
-            type="button"
-            disabled={repairs.length === 0}
-            onClick={() =>
-              onApply([
-                ...(rejection?.diagnostics.length ? rejection.intents : []),
-                ...repairs,
-              ])
-            }
-            className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-900 disabled:opacity-40"
-          >
-            Apply transfer repair
-          </button>
-        )}
-      </fieldset>
+                  <option value="">Keep transfer</option>
+                  <option value="remove">Remove transfer</option>
+                  {(origin === "rejected" ? acquisitions : [])
+                    .filter((source) => source.gameweek < week.gameweek_number)
+                    .map((source) => (
+                      <option
+                        key={`source:${source.decisionId}`}
+                        value={`source:${source.decisionId}`}
+                      >
+                        Proposed incoming player {source.playerId} from GW
+                        {source.gameweek}
+                      </option>
+                    ))}
+                  {(week.players.length
+                    ? week.players
+                    : (plan.starting_state?.players ?? [])
+                  ).map((player) => (
+                    <option
+                      key={player.ownership_id ?? player.player_id}
+                      value={player.ownership_id ?? ""}
+                      disabled={!player.ownership_id}
+                    >
+                      Replace outgoing with {player.web_name} (
+                      {player.player_id})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+            <button
+              type="button"
+              disabled={repairs.length === 0}
+              onClick={() =>
+                onApply([
+                  ...(origin === "rejected" ? (rejection?.intents ?? []) : []),
+                  ...repairs,
+                ])
+              }
+              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-900 disabled:opacity-40"
+            >
+              Apply transfer repair
+            </button>
+          </fieldset>
+        );
+      })}
     </section>
   );
 }

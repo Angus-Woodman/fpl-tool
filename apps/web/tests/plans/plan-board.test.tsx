@@ -357,6 +357,133 @@ describe("PlanBoard", () => {
     },
   );
 
+  it.each(["saved", "rejected"])(
+    "US3 %s-origin repair replays rejected intents only for the rejected proposal",
+    async (origin) => {
+      const plan = buildPlannerPlan(8, 9);
+      const decision = (id: number, outgoing: number, incoming: number) => ({
+        decision_id: plannerIdentity(id),
+        outgoing_player_id: outgoing,
+        outgoing_ownership_id: plannerIdentity(1000 + outgoing),
+        incoming_player_id: incoming,
+        incoming_ownership_id: plannerIdentity(id + 1),
+        outgoing_market_tenths: 50,
+        incoming_price_tenths: 50,
+        selling_price_tenths: 50,
+        observation_source: "stored_player_observation",
+        observed_at: "2026-10-14T12:00:00+00:00",
+        origin: "captured",
+      });
+      const saved = decision(8000, 6, 106);
+      const rejectedTarget = decision(8100, 7, 107);
+      plan.gameweeks[0].decisions = [saved];
+      plan.gameweeks[1].decisions = [rejectedTarget];
+      const diagnostic = (target: typeof saved, message: string) => ({
+        code: "outgoing_not_owned",
+        message,
+        gameweek_number: target === saved ? 8 : 9,
+        decision_id: target.decision_id,
+        conflicting_gameweek: null,
+        player_id: target.outgoing_player_id,
+      });
+      plan.decision_errors = [
+        diagnostic(saved, "Saved ownership needs repair"),
+      ];
+      const captain = {
+        kind: "change_captain",
+        gameweek_number: 8,
+        player_id: 4,
+      };
+      const requests: { intents: PlanIntent[]; expected_revision: number }[] =
+        [];
+      vi.spyOn(global, "fetch").mockImplementation(async (_input, init) => {
+        if (init?.method !== "POST")
+          return new Response(JSON.stringify(plan), { status: 200 });
+        const envelope = JSON.parse(String(init.body));
+        requests.push(envelope);
+        if (requests.length === 1)
+          return new Response(
+            JSON.stringify({
+              detail: {
+                code: "outgoing_not_owned",
+                message: "Captain edit rejected",
+                diagnostics: [
+                  diagnostic(rejectedTarget, "Rejected edit breaks ownership"),
+                ],
+              },
+            }),
+            { status: 422 },
+          );
+        return new Response(
+          JSON.stringify({
+            status: "committed",
+            mutation_id: envelope.mutation_id,
+            committed_revision: 1,
+            plan: {
+              ...plan,
+              revision: 1,
+              decision_errors: [],
+              gameweeks: plan.gameweeks.map((week) => ({
+                ...week,
+                decisions: [],
+              })),
+            },
+            candidate: null,
+          }),
+          { status: 200 },
+        );
+      });
+      render(<PlanBoard planId={plan.plan_id} />);
+      expect(
+        await screen.findByText(/Saved ownership needs repair/),
+      ).toBeVisible();
+      fireEvent.click(screen.getByLabelText("Make P4 captain"));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Captain edit rejected",
+      );
+      expect(
+        screen.getByText(/Saved ownership needs repair/),
+      ).toHaveTextContent("Saved plan");
+      expect(
+        screen.getByText(/Rejected edit breaks ownership/),
+      ).toHaveTextContent("Rejected edit");
+      const target = origin === "saved" ? saved : rejectedTarget;
+      const group = screen.getByRole("group", {
+        name:
+          origin === "saved" ? "Saved plan repairs" : "Rejected edit repairs",
+      });
+      fireEvent.change(
+        within(group).getByLabelText(
+          `Repair transfer GW${target === saved ? 8 : 9}: ${target.outgoing_player_id} to ${target.incoming_player_id}`,
+        ),
+        { target: { value: "remove" } },
+      );
+      fireEvent.click(
+        within(group).getByRole("button", { name: "Apply transfer repair" }),
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Saved"),
+      );
+      expect(requests).toHaveLength(2);
+      expect(requests[1].expected_revision).toBe(0);
+      expect(requests[1].intents).toEqual(
+        origin === "saved"
+          ? [{ kind: "remove_transfer", decision_id: saved.decision_id }]
+          : [
+              captain,
+              { kind: "remove_transfer", decision_id: target.decision_id },
+            ],
+      );
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Rejected edit breaks ownership/),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Saved ownership needs repair/),
+      ).not.toBeInTheDocument();
+    },
+  );
+
   it.each(["remove", "replace", "proposed"])(
     "US3 preserves rejected acquisition and submits chosen %s repair atomically",
     async (choice) => {
