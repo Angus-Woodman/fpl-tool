@@ -1,6 +1,6 @@
 # Planner Foundations Validation Guide
 
-This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State) and T038-T044 (US2 Plan Chips Across Both Periods) are implemented and verified as recorded here. US3 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) are implemented and verified as recorded here. US4 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
 
 ## Prerequisites And Safety
 
@@ -369,3 +369,102 @@ Only T038-T044 completion markers were added; task wording is unchanged.
 No known US2 defect blocks US3. Later-story transfer accounting/repair UX,
 price-resolution UX, comprehensive save-failure/departure UX and lineup parity
 are not certified here.
+
+## Increment 3: US3 Evidence (2026-10-15)
+
+Scope: T045-T053 only. T054/US4 and later tasks remain unchecked. The
+requirements-quality checklists passed before implementation (16/16 and 35/35)
+and were not edited.
+
+### Acceptance Evidence
+
+- SC-002: 35 new engine cases cover the independently counted GW8-12 chain,
+	FT0-5, the cap, ordinary/WC/FH/BB/TC accounting at move counts 0/1/4,
+	first/last and adjacent FH/WC, permanent buy-back ownership episodes,
+	same-GW round-trip rejection, unordered net sets and local lineup roles.
+	Starting FT2 with moves 1/0/4/0/0 produces available FT2/2/3/1/2,
+	next FT2/3/1/2/3, hits 0/0/4/0/0 and closing banks 12/12/20/20/20 tenths.
+	Existing GW1/GW2 and first-GW FT0 cases passed in the complete replay slice.
+- No competing accounting: ten canonical API read cases compare all seven
+	accounting fields directly with the single engine replay, despite stale
+	legacy starting finances and different live prices. Two additional view
+	cases independently assert FT0 first-week labels/count/hit/bank and FH
+	restoration without inferred downstream moves. No engine/API production
+	arithmetic or ownership implementation was added.
+- FR-008/027/040 repair subset: guarded SQL starts with two saved legacy
+	ownership errors, removes one atomically, reloads the accepted inputs and
+	retains the other diagnostic. Dependent bank/shortfall/hit remain unavailable.
+	An unverified downstream transfer and an unrelated new invalid captain reject
+	without changing those accepted inputs; removing the second error restores
+	evaluable accounting. Existing independent lineup and financial-repair
+	regression cases also passed. This is not certification of US4 price UX.
+- Transfer-related SC-009: direct guarded service calls reject illegal formation,
+	club, squad and unowned-captain states after propagated ownership changes.
+	Wrong ownership episodes reject; completed-GW explicit edits capture current
+	prices for edited records while a third unedited record remains identical
+	despite its changed live price. Canonical reload verifies accepted decisions.
+- Example A: actual API/browser FH/WC activation and removal on first/last
+	weeks preserve every explicit decision and captured quote. FH restores the
+	independent permanent squad; clearing it restores the planned acquisition.
+	The following empty week still has zero decisions/transfers, never a phantom
+	transfer inferred from displayed membership.
+- Example B: actual API/browser changes an earlier acquisition with a later
+	sale bound to its episode. The upstream-only proposal returns 422 with the
+	intended outgoing player/GW and leaves GET exactly equal to the accepted
+	plan. User-selected removal or explicit outgoing replacement is submitted
+	with that original proposal in one two-intent batch at the accepted revision.
+	The source acquisition decision ID is reused, not a same-GW round trip.
+	A GW11 captain choice remains local while earlier/later slots inherit only
+	their own replacement roles; reload and SQL reopen retain the final inputs.
+
+### Executed Checks
+
+- Complete planner engine slice: 93 passed, including 35 new US3 cases.
+- Complete guarded Planner service/view/router/repository/migration gate:
+	145 passed, including all three actual PostgreSQL/API browser journeys.
+	Only the dedicated `fpl_test` URL and UUID-isolated guarded schemas were used.
+- Final full web suite: 119 passed, including 36 Planner component/coordinator/
+	list cases. Rejected proposals preserve the accepted display; diagnostics
+	expose explicit remove/replace choices and blocked totals say Unavailable.
+	Rejected impact context expires on a newer accepted server revision.
+- `mise exec -- make lint`, `mise exec -- make typecheck` and
+	`mise exec -- make test`: passed. Final frontend lint/typecheck/full tests
+	were rerun after the coordinator review fix. Ordinary API runs intentionally
+	skip DB/browser opt-ins; the guarded gate above supplies actual SQL proof.
+- `mise exec -- make frontend-verify-build`: passed on the final bundle.
+	All eight fixture browser journeys passed separately. Their starting-FT
+	response fixture was corrected to update replay accounting as well as its
+	legacy display field; no production fallback arithmetic was introduced.
+
+The guarded command from the preceding increments was run with
+`PLANNER_BASE_URL=http://127.0.0.1:3101`; ports 3000/8000 and an existing 3100
+listener were left untouched. The owned preview used `.next-copilot` and was
+stopped and awaited in `finally` before `frontend-verify-clean`, including after
+an initial fixture-test failure. Port 3101 was confirmed released and isolated
+output/generated types absent. No persistent migration or initialization ran.
+
+Actual API/browser screenshots were inspected at 1440x900 and 390x844.
+Removal repair was exercised on desktop and replacement repair on mobile;
+diagnostics, controls and accounting wrap without content overlap, and reload
+has no document-width overflow. No uncaught page errors occurred. Existing
+mobile navigation scrolling, the command-local mac14 Playwright workaround,
+Vite CJS warning and two WebSocket dependency deprecation warnings remain.
+
+### Decisions And Limits
+
+Production changes are confined to board presentation and rejected-impact
+context in its existing plan-scoped coordinator. Replacement choices carry
+saved ownership IDs from the accepted read/boundary; legality stays on the
+server. No candidate ownership, bank or FT is synthesized in React. Existing
+engine/API handlers passed the new adversarial cases unchanged, so T048/T049
+required coverage rather than speculative implementation changes.
+
+Final diff reviewed against the accepted US3 scope: only the board/coordinator,
+their focused tests, the existing guarded browser harness and these task/evidence
+records changed. No dependencies, migrations, infrastructure, xPts model,
+contract, specification or plan changes. Only T045-T053 markers were added,
+with task wording unchanged; no extension hooks were registered.
+
+No known US3 defect blocks US4. Selling-price inspection, provenance/shortfall
+resolution UX, comprehensive failure/departure handling and My Team/Planner
+lineup parity remain future-story work, not certification from this increment.

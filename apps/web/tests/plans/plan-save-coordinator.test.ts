@@ -14,6 +14,90 @@ import {
 } from "../fixtures/planner";
 
 describe("PlanSaveCoordinator", () => {
+  it("US3 discards rejected repair context when synchronization advances the accepted revision", async () => {
+    const initial = buildPlannerPlan();
+    const send = vi
+      .fn()
+      .mockRejectedValue(
+        new PlannerMutationError(422, {
+          code: "outgoing_not_owned",
+          message: "Missing outgoing player",
+          diagnostics: [],
+        }),
+      );
+    const coordinator = new PlanSaveCoordinator(initial, { send });
+    coordinator.enqueue([
+      {
+        kind: "edit_transfer",
+        decision_id: "upstream",
+        incoming_player_id: 103,
+      },
+    ]);
+    await waitFor(() => expect(coordinator.getSnapshot().status).toBe("error"));
+    coordinator.synchronize(initial);
+    expect(coordinator.getSnapshot().rejection).not.toBeNull();
+    coordinator.synchronize({ ...initial, revision: 1 });
+    expect(coordinator.getSnapshot().acknowledged.revision).toBe(1);
+    expect(coordinator.getSnapshot().rejection).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("US3 retains rejected impacts without accepting them and submits only explicit repair batches", async () => {
+    const initial = buildPlannerPlan();
+    const intents: PlanIntent[] = [
+      {
+        kind: "edit_transfer",
+        decision_id: "upstream",
+        incoming_player_id: 103,
+      },
+    ];
+    const diagnostics = [
+      {
+        code: "outgoing_not_owned",
+        message: "Intended outgoing player 102 is not owned",
+        gameweek_number: 13,
+        decision_id: "downstream",
+        conflicting_gameweek: null,
+        player_id: 102,
+      },
+    ];
+    const server = createPlannerFixture(initial, (plan) => plan);
+    const send = vi
+      .fn(async (_planId: number, envelope: PlanMutationEnvelope) => ({
+        ...server.mutate(envelope),
+        mutation_id: envelope.mutation_id,
+        candidate: null,
+      }))
+      .mockRejectedValueOnce(
+        new PlannerMutationError(422, {
+          code: "outgoing_not_owned",
+          message: diagnostics[0].message,
+          diagnostics,
+        }),
+      );
+    const coordinator = new PlanSaveCoordinator(initial, { send });
+    coordinator.enqueue(intents);
+    await waitFor(() => expect(coordinator.getSnapshot().status).toBe("error"));
+    expect(coordinator.getSnapshot().acknowledged).toEqual(initial);
+    expect(coordinator.getSnapshot().displayPlan).toEqual(initial);
+    expect(coordinator.getSnapshot().rejection).toEqual({
+      intents,
+      diagnostics,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    coordinator.enqueue([
+      ...intents,
+      { kind: "remove_transfer", decision_id: "downstream" },
+    ]);
+    await waitFor(() => expect(coordinator.getSnapshot().status).toBe("saved"));
+    expect(send.mock.calls[1][1].intents).toEqual([
+      ...intents,
+      { kind: "remove_transfer", decision_id: "downstream" },
+    ]);
+    expect(send.mock.calls[1][1].expected_revision).toBe(0);
+    expect(coordinator.getSnapshot().rejection).toBeNull();
+  });
+
   it("dispatches field-only queued edits at the latest acknowledged revision", async () => {
     const initial = buildPlannerPlan();
     const release = deferred<void>();

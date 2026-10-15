@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import {
   PlanSaveCoordinator,
+  PlanSaveSnapshot,
   getPlanSaveCoordinator,
 } from "@/lib/plan-save-coordinator";
 
@@ -50,6 +51,107 @@ function opponentLabel(player: PlanPlayer): string {
       return `${fixture.opponent_team_short_name}${venue}`;
     })
     .join(", ");
+}
+
+function TransferRepairPanel({
+  plan,
+  rejection,
+  disabled,
+  onApply,
+}: {
+  plan: PlanResponse;
+  rejection: PlanSaveSnapshot["rejection"];
+  disabled: boolean;
+  onApply: (intents: PlanIntent[]) => void;
+}): JSX.Element | null {
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const diagnostics = rejection?.diagnostics ?? plan.decision_errors;
+  const affected = plan.gameweeks.flatMap((week) =>
+    week.decisions
+      .filter((decision) =>
+        diagnostics.some((error) => error.decision_id === decision.decision_id),
+      )
+      .map((decision) => ({ decision, week })),
+  );
+  const repairs = affected.flatMap<PlanIntent>(({ decision, week }) => {
+    const choice = choices[decision.decision_id];
+    if (choice === "remove")
+      return [{ kind: "remove_transfer", decision_id: decision.decision_id }];
+    const options = week.players.length
+      ? week.players
+      : (plan.starting_state?.players ?? []);
+    const player = options.find((item) => item.ownership_id === choice);
+    return player?.ownership_id
+      ? [
+          {
+            kind: "edit_transfer",
+            decision_id: decision.decision_id,
+            outgoing_player_id: player.player_id,
+            outgoing_ownership_id: player.ownership_id,
+          },
+        ]
+      : [];
+  });
+  if (!diagnostics.length) return null;
+  return (
+    <section
+      aria-label="Transfer diagnostics"
+      className="space-y-3 border-y border-red-200 py-3 text-sm text-red-800"
+    >
+      {diagnostics.map((error, index) => (
+        <p key={`${error.decision_id}-${error.code}-${index}`}>
+          GW{error.gameweek_number}: {error.message}
+        </p>
+      ))}
+      <fieldset disabled={disabled} className="min-w-0 space-y-3">
+        {affected.map(({ decision, week }) => (
+          <label
+            key={decision.decision_id}
+            className="flex max-w-lg flex-col gap-1"
+          >
+            GW{week.gameweek_number}: outgoing {decision.outgoing_player_id} →{" "}
+            {decision.incoming_player_id}
+            <select
+              aria-label={`Repair transfer GW${week.gameweek_number}: ${decision.outgoing_player_id} to ${decision.incoming_player_id}`}
+              value={choices[decision.decision_id] ?? ""}
+              onChange={(event) =>
+                setChoices({
+                  ...choices,
+                  [decision.decision_id]: event.target.value,
+                })
+              }
+              className="min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-slate-900"
+            >
+              <option value="">Keep transfer</option>
+              <option value="remove">Remove transfer</option>
+              {(week.players.length
+                ? week.players
+                : (plan.starting_state?.players ?? [])
+              ).map((player) => (
+                <option
+                  key={player.ownership_id ?? player.player_id}
+                  value={player.ownership_id ?? ""}
+                  disabled={!player.ownership_id}
+                >
+                  Replace outgoing with {player.web_name} ({player.player_id})
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+        {affected.length > 0 && (
+          <button
+            type="button"
+            disabled={repairs.length === 0}
+            onClick={() => onApply([...(rejection?.intents ?? []), ...repairs])}
+            className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-900 disabled:opacity-40"
+          >
+            Apply transfer repair
+          </button>
+        )}
+      </fieldset>
+    </section>
+  );
 }
 
 function StartingStatePanel({
@@ -507,7 +609,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
             )}
             <p className="mt-1 text-sm text-slate-600">
               Plan xPts: {currentPlan.total_points?.toFixed(1) ?? "Unavailable"}{" "}
-              · Hits taken: {currentPlan.total_points_hit}
+              · Hits taken: {currentPlan.total_points_hit ?? "Unavailable"}
             </p>
           </div>
 
@@ -575,7 +677,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
             <span className="block">
               {item.unlimited_transfers
                 ? "Unlimited"
-                : `${item.free_transfers_available} FT`}
+                : `${item.free_transfers_available ?? "Unavailable"} FT`}
               {item.points_hit !== null && item.points_hit > 0
                 ? ` · -${item.points_hit}`
                 : ""}
@@ -629,6 +731,13 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           {snapshot?.message || actionError}
         </p>
       )}
+      <TransferRepairPanel
+        key={`${currentPlan.revision}-${JSON.stringify(snapshot?.rejection?.intents ?? [])}`}
+        plan={currentPlan}
+        rejection={snapshot?.rejection ?? null}
+        disabled={editingUnavailable || snapshot?.status === "saving"}
+        onApply={send}
+      />
       {currentPlan.foundation_state !== "ready" && (
         <p className="text-sm text-amber-800">
           {currentPlan.initialization.reason}
@@ -655,11 +764,18 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   transfers{" "}
                   {gameweek.unlimited_transfers
                     ? "unlimited"
-                    : gameweek.free_transfers_available}{" "}
-                  · Transfers made {gameweek.transfers_made}
-                  {gameweek.points_hit !== null && gameweek.points_hit > 0
-                    ? ` · Hit -${gameweek.points_hit}`
-                    : ""}
+                    : (gameweek.accounting?.free_transfers_available ??
+                      "Unavailable")}{" "}
+                  · Transfers made{" "}
+                  {gameweek.accounting?.transfers_made ?? "Unavailable"}
+                  {" · Next FT "}
+                  {gameweek.accounting?.next_free_transfers ?? "Unavailable"}
+                  {" · Hit "}
+                  {gameweek.accounting?.points_hit == null
+                    ? "Unavailable"
+                    : gameweek.accounting.points_hit > 0
+                      ? `-${gameweek.accounting.points_hit}`
+                      : 0}
                 </p>
               </div>
             </div>

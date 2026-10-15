@@ -469,7 +469,7 @@ def test_chip_http_clear_move_reset_and_reopen_use_only_canonical_chip(
     assert planner_session.get(PlanGameweekModel, legacy.id).chip == PlanChip.WILDCARD
 
 
-@pytest.mark.parametrize("journey", ["horizon", "chips"])
+@pytest.mark.parametrize("journey", ["horizon", "chips", "transfers"])
 @pytest.mark.skipif(
     __import__("os").getenv("RUN_PLANNER_BROWSER_TESTS") != "1",
     reason="Requires guarded SQL, installed Playwright and a running frontend",
@@ -493,14 +493,17 @@ def test_planner_story_through_actual_browser_and_api(
 
     client, plan_id = guarded_client
     repository = PlanRepository(planner_session)
-    start, end = (25, 26) if journey == "horizon" else (17, 22)
+    start, end = {"horizon": (25, 26), "chips": (17, 22), "transfers": (8, 12)}[journey]
     plan = replace(
         planner_plan,
         start_gameweek=start,
         end_gameweek=end,
         boundary=replace(
             planner_plan.boundary,
-            used_chips=frozenset({Chip.WILDCARD if journey == "horizon" else Chip.FREE_HIT}),
+            free_transfers=2 if journey == "transfers" else planner_plan.boundary.free_transfers,
+            used_chips=frozenset()
+            if journey == "transfers"
+            else frozenset({Chip.WILDCARD if journey == "horizon" else Chip.FREE_HIT}),
         ),
         gameweeks=tuple(
             GameweekDecision(number, planner_plan.boundary.lineup)
@@ -510,6 +513,38 @@ def test_planner_story_through_actual_browser_and_api(
     repository.save_canonical(plan_id, plan, evaluate_plan(plan, planner_metadata))
     planner_session.commit()
     frozen = []
+    if journey == "transfers":
+        from api.models.entities import PlayerModel
+        from test_plan_services import mutation_body
+
+        for identifier in (2, 3, 4, 5, 6):
+            planner_session.get(PlayerModel, identifier).current_price = 5.4
+        planner_session.commit()
+        for revision, (number, identifiers) in enumerate(((8, (2,)), (10, (3, 4, 5, 6)))):
+            response = client.post(
+                f"/plans/{plan_id}/mutations",
+                json=mutation_body(
+                    950 + revision,
+                    revision,
+                    [
+                        {
+                            "kind": "add_transfer",
+                            "gameweek_number": number,
+                            "outgoing_player_id": identifier,
+                            "outgoing_ownership_id": str(
+                                next(
+                                    player.ownership_id
+                                    for player in plan.boundary.players
+                                    if player.player_id == identifier
+                                )
+                            ),
+                            "incoming_player_id": identifier + 100,
+                        }
+                        for identifier in identifiers
+                    ],
+                ).model_dump(mode="json"),
+            )
+            assert response.status_code == 200, response.text
     if journey == "chips":
         from api.models.entities import PlayerModel
         from test_plan_services import mutation_body
@@ -553,7 +588,11 @@ def test_planner_story_through_actual_browser_and_api(
                     "e2e",
                     "tests/e2e/planner-foundations.spec.ts",
                     "--grep",
-                    "real API horizon" if journey == "horizon" else "US2 real API chips",
+                    {
+                        "horizon": "real API horizon",
+                        "chips": "US2 real API chips",
+                        "transfers": "US3 real API transfers",
+                    }[journey],
                     "--workers=1",
                     "--reporter=line",
                 ],
@@ -574,9 +613,14 @@ def test_planner_story_through_actual_browser_and_api(
             thread.join(timeout=10)
             assert not thread.is_alive()
     reopened = repository.load_canonical(plan_id)
-    assert reopened.start_gameweek == (19 if journey == "horizon" else 1)
+    assert reopened.start_gameweek == {"horizon": 19, "chips": 1, "transfers": 8}[journey]
     assert not reopened.boundary.used_chips
     assert all(week.chip is None for week in reopened.gameweeks)
+    if journey == "transfers":
+        assert sum(len(week.transfers) for week in reopened.gameweeks) == 6
+        assert reopened.gameweeks[0].transfers[0].incoming_player_id == 113
+        assert reopened.gameweeks[3].transfers[0].outgoing_player_id == 13
+        assert not evaluate_plan(reopened, planner_metadata).diagnostics
     if journey == "chips":
         current = client.get(f"/plans/{plan_id}").json()
         assert (

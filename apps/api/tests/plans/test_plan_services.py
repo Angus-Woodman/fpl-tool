@@ -371,6 +371,319 @@ def test_guarded_rename_is_idempotent_even_after_a_later_revision(guarded_mutati
 
 
 @pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us3_independent_legacy_repairs_reopen_with_unavailable_accounting(
+    guarded_mutations, planner_session, planner_metadata
+):
+    from dataclasses import replace
+    from uuid import UUID
+
+    from api.models.entities import PlanTransferDecisionModel
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import TransferDecision
+    from fpl_engine.rules import RuleViolationError
+    from sqlalchemy import select
+
+    service, plan_id = guarded_mutations
+    repository = PlanRepository(planner_session)
+    plan = repository.load_canonical(plan_id)
+
+    def bad(number, player):
+        return TransferDecision(
+            UUID(int=8000 + number),
+            player,
+            UUID(int=9000 + number),
+            player + 100,
+            UUID(int=10000 + number),
+            50,
+            50,
+            "legacy",
+            "2026-10-14T12:00:00+00:00",
+            "legacy_initialized_estimate",
+        )
+
+    first, second = bad(1, 2), bad(2, 3)
+    plan = replace(
+        plan, gameweeks=(replace(plan.gameweeks[0], transfers=(first, second)), *plan.gameweeks[1:])
+    )
+    valid = replace(
+        plan,
+        gameweeks=(
+            replace(
+                plan.gameweeks[0],
+                transfers=tuple(
+                    replace(
+                        decision, outgoing_ownership_id=UUID(int=1000 + decision.outgoing_player_id)
+                    )
+                    for decision in (first, second)
+                ),
+            ),
+            *plan.gameweeks[1:],
+        ),
+    )
+    repository.save_canonical(plan_id, valid, evaluate_plan(valid, planner_metadata))
+    for decision in (first, second):
+        row = planner_session.scalar(
+            select(PlanTransferDecisionModel).where(
+                PlanTransferDecisionModel.decision_id == decision.decision_id
+            )
+        )
+        row.outgoing_ownership_id = decision.outgoing_ownership_id
+    planner_session.commit()
+    repaired = service.mutate(
+        plan_id,
+        mutation_body(100, 0, [{"kind": "remove_transfer", "decision_id": str(first.decision_id)}]),
+    ).plan
+    assert repository.load_canonical(plan_id) == repaired
+    evaluation = evaluate_plan(repaired, planner_metadata)
+    assert any(error.decision_id == second.decision_id for error in evaluation.diagnostics)
+    assert evaluation.gameweeks[1].closing_bank_tenths is None
+    assert evaluation.gameweeks[1].shortfall_tenths is None
+    assert evaluation.gameweeks[2].points_hit is None
+    with pytest.raises(RuleViolationError):
+        service.mutate(
+            plan_id,
+            mutation_body(
+                101,
+                1,
+                [
+                    {
+                        "kind": "add_transfer",
+                        "gameweek_number": 9,
+                        "outgoing_player_id": 4,
+                        "outgoing_ownership_id": str(UUID(int=1004)),
+                        "incoming_player_id": 104,
+                    }
+                ],
+            ),
+        )
+    assert repository.load_canonical(plan_id) == repaired
+    with pytest.raises(RuleViolationError):
+        service.mutate(
+            plan_id,
+            mutation_body(
+                103, 1, [{"kind": "change_captain", "gameweek_number": 8, "player_id": 999}]
+            ),
+        )
+    assert repository.load_canonical(plan_id) == repaired
+    final = service.mutate(
+        plan_id,
+        mutation_body(
+            102, 1, [{"kind": "remove_transfer", "decision_id": str(second.decision_id)}]
+        ),
+    ).plan
+    assert not evaluate_plan(final, planner_metadata).diagnostics
+    assert repository.load_canonical(plan_id) == final
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us3_explicit_rebinding_and_completed_week_edit_keep_identity_and_other_quotes(
+    guarded_mutations, planner_session, planner_metadata
+):
+    import datetime as dt
+    from dataclasses import replace
+    from uuid import UUID
+
+    from api.models.entities import GameweekModel, PlayerModel
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import TransferDecision
+    from fpl_engine.rules import RuleViolationError
+
+    service, plan_id = guarded_mutations
+    planner_session.add(
+        GameweekModel(
+            number=8, name="GW8", deadline=dt.datetime(2026, 9, 1, tzinfo=dt.UTC), is_finished=True
+        )
+    )
+    planner_session.commit()
+    first_plan = service.mutate(
+        plan_id,
+        mutation_body(
+            100,
+            0,
+            [
+                {
+                    "kind": "add_transfer",
+                    "gameweek_number": 8,
+                    "outgoing_player_id": 2,
+                    "outgoing_ownership_id": str(UUID(int=1002)),
+                    "incoming_player_id": 102,
+                }
+            ],
+        ),
+    ).plan
+    first = first_plan.gameweeks[0].transfers[0]
+    second_plan = service.mutate(
+        plan_id,
+        mutation_body(
+            101,
+            1,
+            [
+                {
+                    "kind": "add_transfer",
+                    "gameweek_number": 9,
+                    "outgoing_player_id": 102,
+                    "outgoing_ownership_id": str(first.incoming_ownership_id),
+                    "incoming_player_id": 2,
+                }
+            ],
+        ),
+    ).plan
+    second = second_plan.gameweeks[1].transfers[0]
+    untouched = TransferDecision(
+        UUID(int=8100),
+        5,
+        UUID(int=1005),
+        105,
+        UUID(int=8101),
+        50,
+        50,
+        "stored_player_observation",
+        "2026-10-14T12:00:00+00:00",
+        "captured",
+    )
+    with_untouched = replace(
+        second_plan,
+        gameweeks=(
+            *second_plan.gameweeks[:2],
+            replace(second_plan.gameweeks[2], transfers=(untouched,)),
+        ),
+    )
+    PlanRepository(planner_session).save_canonical(
+        plan_id, with_untouched, evaluate_plan(with_untouched, planner_metadata)
+    )
+    planner_session.get(PlayerModel, 102).current_price = 9.0
+    planner_session.get(PlayerModel, 103).current_price = 5.5
+    planner_session.get(PlayerModel, 105).current_price = 8.0
+    planner_session.commit()
+    unchanged = service.mutate(
+        plan_id,
+        mutation_body(102, 2, [{"kind": "change_captain", "gameweek_number": 10, "player_id": 4}]),
+    ).plan
+    assert unchanged.gameweeks[0].transfers == (first,)
+    assert unchanged.gameweeks[1].transfers == (second,)
+    assert unchanged.gameweeks[2].transfers == (untouched,)
+    edit = {
+        "kind": "edit_transfer",
+        "decision_id": str(first.decision_id),
+        "incoming_player_id": 103,
+    }
+    with pytest.raises(RuleViolationError):
+        service.mutate(plan_id, mutation_body(103, 3, [edit]))
+    repaired = service.mutate(
+        plan_id,
+        mutation_body(
+            104,
+            3,
+            [
+                edit,
+                {
+                    "kind": "edit_transfer",
+                    "decision_id": str(second.decision_id),
+                    "outgoing_player_id": 4,
+                    "outgoing_ownership_id": str(UUID(int=1004)),
+                },
+            ],
+        ),
+    ).plan
+    assert repaired.gameweeks[0].transfers[0].decision_id == first.decision_id
+    assert repaired.gameweeks[1].transfers[0].decision_id == second.decision_id
+    assert repaired.gameweeks[1].transfers[0].outgoing_player_id == 4
+    assert repaired.gameweeks[1].transfers[0].outgoing_ownership_id == UUID(int=1004)
+    assert repaired.gameweeks[0].transfers[0].incoming_price_tenths == 55
+    assert repaired.gameweeks[2].transfers == (untouched,)
+    assert repaired.gameweeks[0].transfers[0].outgoing_market_tenths == first.outgoing_market_tenths
+    with pytest.raises(RuleViolationError):
+        service.mutate(
+            plan_id,
+            mutation_body(
+                105,
+                4,
+                [
+                    {
+                        "kind": "edit_transfer",
+                        "decision_id": str(second.decision_id),
+                        "outgoing_ownership_id": str(first.incoming_ownership_id),
+                    }
+                ],
+            ),
+        )
+    assert PlanRepository(planner_session).load_canonical(plan_id) == repaired
+
+
+@pytest.mark.parametrize("violation", ["formation", "club", "squad", "captain"])
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us3_direct_api_rejects_illegal_state_after_propagation(
+    guarded_mutations, planner_session, violation
+):
+    from uuid import UUID
+
+    from api.models.entities import PlayerModel
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.rules import RuleViolationError
+
+    service, plan_id = guarded_mutations
+    accepted = service.mutate(
+        plan_id,
+        mutation_body(
+            900,
+            0,
+            [
+                {
+                    "kind": "add_transfer",
+                    "gameweek_number": 8,
+                    "outgoing_player_id": 2,
+                    "outgoing_ownership_id": str(UUID(int=1002)),
+                    "incoming_player_id": 102,
+                }
+            ],
+        ),
+    ).plan
+    if violation == "club":
+        planner_session.get(PlayerModel, 103).team_id = planner_session.get(PlayerModel, 1).team_id
+        planner_session.commit()
+    intents = {
+        "formation": [
+            {
+                "kind": "swap_lineup_players",
+                "gameweek_number": 9,
+                "first_player_id": 102,
+                "second_player_id": 14,
+            },
+            {
+                "kind": "swap_lineup_players",
+                "gameweek_number": 9,
+                "first_player_id": 3,
+                "second_player_id": 15,
+            },
+        ],
+        "club": [
+            {
+                "kind": "add_transfer",
+                "gameweek_number": 9,
+                "outgoing_player_id": 3,
+                "outgoing_ownership_id": str(UUID(int=1003)),
+                "incoming_player_id": 103,
+            }
+        ],
+        "squad": [
+            {
+                "kind": "add_transfer",
+                "gameweek_number": 9,
+                "outgoing_player_id": 3,
+                "outgoing_ownership_id": str(UUID(int=1003)),
+                "incoming_player_id": 101,
+            }
+        ],
+        "captain": [{"kind": "change_captain", "gameweek_number": 9, "player_id": 999}],
+    }[violation]
+    with pytest.raises(RuleViolationError):
+        service.mutate(plan_id, mutation_body(901, 1, intents))
+    assert PlanRepository(planner_session).load_canonical(plan_id) == accepted
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
 def test_guarded_core_handlers_and_explicit_dependency_repair(guarded_mutations, planner_session):
     from api.repositories.plan_repository import PlanRepository
     from fpl_engine.rules import RuleViolationError

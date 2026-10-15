@@ -129,6 +129,85 @@ def test_double_gameweek_points_are_summed_for_a_player() -> None:
     assert len(captain.fixtures) == 2
 
 
+@pytest.mark.parametrize("free_hit", [False, True])
+def test_us3_explicit_decisions_and_accounting_ignore_legacy_snapshots(
+    planner_plan, planner_metadata, free_hit
+) -> None:
+    from dataclasses import replace
+    from uuid import UUID
+
+    from fpl_engine.planning.models import TransferDecision
+    from fpl_engine.rules import Chip
+
+    decision = TransferDecision(
+        UUID(int=8000),
+        2,
+        UUID(int=1002),
+        102,
+        UUID(int=8001),
+        54,
+        50,
+        "stored_market",
+        "2026-10-14T12:00:00+00:00",
+        "captured",
+    )
+    plan = replace(
+        planner_plan,
+        boundary=replace(planner_plan.boundary, free_transfers=0),
+        gameweeks=(
+            replace(
+                planner_plan.gameweeks[0],
+                transfers=(decision,),
+                chip=Chip.FREE_HIT if free_hit else None,
+            ),
+            *planner_plan.gameweeks[1:],
+        ),
+    )
+    players = [
+        PlanPlayerRecord(
+            identifier,
+            f"P{identifier}",
+            "First",
+            "Second",
+            player.team_id,
+            "Team",
+            "TMX",
+            player.position.value,
+            9.9,
+            "a",
+            False,
+            None,
+            False,
+            False,
+        )
+        for identifier, player in planner_metadata.items()
+    ]
+    record = replace(
+        _plan(),
+        canonical_plan=plan,
+        rule_players=players,
+        initial_bank=99.9,
+        initial_free_transfers=5,
+    )
+    view = GetPlanViewService(_FakeProjectionRepository([])).execute(record)
+    assert view.gameweeks[0].accounting == {
+        "starting_bank_tenths": 10,
+        "closing_bank_tenths": 12,
+        "free_transfers_available": 0,
+        "next_free_transfers": 1,
+        "unlimited_transfers": free_hit,
+        "transfers_made": 1,
+        "points_hit": 0 if free_hit else 4,
+    }
+    assert [item.player_id for item in view.gameweeks[0].transfers_out] == [2]
+    assert [item.player_id for item in view.gameweeks[0].transfers_in] == [102]
+    assert view.gameweeks[1].transfers_in == []
+    assert view.gameweeks[1].transfers_out == []
+    assert view.gameweeks[1].bank == (1.0 if free_hit else 1.2)
+    assert view.gameweeks[1].transfers_made == 0
+    assert view.total_points_hit == (0 if free_hit else 4)
+
+
 @pytest.mark.parametrize("blocked", [False, True])
 def test_canonical_view_uses_replay_not_quarantined_finances(
     planner_plan, planner_metadata, blocked

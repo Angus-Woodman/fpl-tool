@@ -27,6 +27,10 @@ export type PlanSaveSnapshot = {
   pendingCount: number;
   status: "saved" | "saving" | "not_saved" | "conflict" | "error";
   message: string | null;
+  rejection: {
+    intents: PlanIntent[];
+    diagnostics: PlanResponse["decision_errors"];
+  } | null;
 };
 
 type Transport = {
@@ -56,6 +60,7 @@ export class PlanSaveCoordinator {
       pendingCount: 0,
       status: "saved",
       message: null,
+      rejection: null,
     };
     this.transport = {
       send: mutatePlan,
@@ -91,7 +96,14 @@ export class PlanSaveCoordinator {
       this.queue.length === 0 &&
       plan.revision >= this.snapshot.acknowledged.revision
     ) {
-      this.publish({ acknowledged: plan, displayPlan: plan });
+      this.publish({
+        acknowledged: plan,
+        displayPlan: plan,
+        rejection:
+          plan.revision === this.snapshot.acknowledged.revision
+            ? this.snapshot.rejection
+            : null,
+      });
     }
   }
 
@@ -190,7 +202,7 @@ export class PlanSaveCoordinator {
       });
       return;
     }
-    this.publish({ status: "saving", message: null });
+    this.publish({ status: "saving", message: null, rejection: null });
     void this.dispatch();
   }
 
@@ -232,11 +244,13 @@ export class PlanSaveCoordinator {
     if (error instanceof PlannerMutationError) {
       const { detail } = error;
       if (error.status === 422) {
+        const intents = this.active?.intents ?? [];
         this.active = null;
         this.publish({
           displayPlan: this.snapshot.acknowledged,
           status: "error",
           message: error.message,
+          rejection: { intents, diagnostics: detail.diagnostics ?? [] },
         });
         this.drain();
         return;

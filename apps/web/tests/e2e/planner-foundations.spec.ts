@@ -22,6 +22,8 @@ function startingEdit(plan: PlanResponse, intents: PlanIntent[]): PlanResponse {
     if (intent.kind === "set_starting_transfers") {
       plan.starting_state.free_transfers = intent.value;
       plan.gameweeks[0].free_transfers_available = intent.value;
+      if (plan.gameweeks[0].accounting)
+        plan.gameweeks[0].accounting.free_transfers_available = intent.value;
     } else if (intent.kind === "set_starting_chips") {
       if (intent.used_chips.includes("TRIPLE_CAPTAIN"))
         throw new Error("Gameweek 18: Triple Captain is already planned");
@@ -588,6 +590,195 @@ test("US1 real API horizon changes never reinterpret chip history", async ({
     path: info.outputPath("real-api-earlier-horizon.png"),
     fullPage: true,
   });
+});
+
+test("US3 real API transfers accounting, no phantom moves and explicit atomic repair", async ({
+  page,
+}, info) => {
+  test.setTimeout(90_000);
+  const api = process.env.PLANNER_TEST_API_URL;
+  const planId = process.env.PLANNER_TEST_PLAN_ID;
+  test.skip(!api || !planId, "Run through the guarded API browser regression");
+  const errors: string[] = [];
+  const mutations: { intents: PlanIntent[]; expected_revision: number }[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: HEADERS });
+    expect(["GET", "POST"]).toContain(request.method());
+    if (request.method() === "POST") mutations.push(request.postDataJSON());
+    const url = new URL(request.url());
+    const response = await route.fetch({
+      url: `${api}${url.pathname}${url.search}`,
+    });
+    expect([200, 422]).toContain(response.status());
+    await route.fulfill({
+      response,
+      headers: { ...response.headers(), ...HEADERS },
+    });
+  });
+  const read = async (): Promise<PlanResponse> =>
+    (await page.request.get(`${api}/plans/${planId}`)).json();
+  const select = async (number: number) =>
+    page.getByLabel(`Gameweek ${number}`, { exact: true }).click();
+  const write = async (action: () => Promise<unknown>, status = 200) => {
+    const response = page.waitForResponse(
+      (item) =>
+        item.url().endsWith("/mutations") && item.request().method() === "POST",
+    );
+    await action();
+    expect((await response).status()).toBe(status);
+    if (status === 200) await saved(page);
+  };
+  const transfer = async (outgoing: number, incoming: number, status = 200) => {
+    await page.getByLabel(`Transfer P${outgoing}`, { exact: true }).click();
+    await write(
+      () =>
+        page.getByLabel(`Transfer in P${incoming}`, { exact: true }).click(),
+      status,
+    );
+  };
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/plans/${planId}`);
+  await expect(
+    page.getByText(
+      /Bank 1.2 · Free transfers 2 · Transfers made 1 · Next FT 2/,
+    ),
+  ).toBeVisible();
+  const initial = await read();
+  expect(
+    initial.gameweeks.map((week) => [
+      week.free_transfers_available,
+      week.transfers_made,
+      week.points_hit,
+      week.accounting?.next_free_transfers,
+      week.bank,
+    ]),
+  ).toEqual([
+    [2, 1, 0, 2, 1.2],
+    [2, 0, 0, 3, 1.2],
+    [3, 4, 4, 1, 2],
+    [1, 0, 0, 2, 2],
+    [2, 0, 0, 3, 2],
+  ]);
+  const frozen = initial.gameweeks.flatMap((week) => week.decisions);
+  await write(() =>
+    page.getByRole("button", { name: "Free Hit", exact: true }).click(),
+  );
+  let current = await read();
+  expect(
+    current.gameweeks[1].players.map((player) => player.player_id),
+  ).toContain(2);
+  expect(current.gameweeks[1].decisions).toEqual([]);
+  expect(current.gameweeks[1].transfers_made).toBe(0);
+  await write(() =>
+    page.getByRole("button", { name: "Free Hit", exact: true }).click(),
+  );
+  expect(
+    (await read()).gameweeks[1].players.map((player) => player.player_id),
+  ).toContain(102);
+  for (const [number, chip] of [
+    [8, "Wildcard"],
+    [12, "Free Hit"],
+    [12, "Wildcard"],
+  ] as const) {
+    await select(number);
+    await write(() =>
+      page.getByRole("button", { name: chip, exact: true }).click(),
+    );
+    await write(() =>
+      page.getByRole("button", { name: chip, exact: true }).click(),
+    );
+  }
+  expect((await read()).gameweeks.flatMap((week) => week.decisions)).toEqual(
+    frozen,
+  );
+  await select(11);
+  await write(() =>
+    page.getByLabel("Make P104 captain", { exact: true }).click(),
+  );
+  await transfer(102, 2);
+  for (const choice of ["remove", "replace"] as const) {
+    if (choice === "replace")
+      await page.setViewportSize({ width: 390, height: 844 });
+    await select(8);
+    const accepted = await read();
+    await transfer(102, 113, 422);
+    await expect(
+      page.getByLabel("Transfer P102", { exact: true }),
+    ).toBeVisible();
+    expect(await read()).toEqual(accepted);
+    const panel = page.getByRole("region", { name: "Transfer diagnostics" });
+    await expect(panel).toContainText("102");
+    await page.screenshot({
+      path: info.outputPath(
+        `transfers-${choice}-${choice === "remove" ? "desktop" : "mobile"}.png`,
+      ),
+      fullPage: true,
+    });
+    const replacement = accepted.gameweeks[3].players.find(
+      (player) => player.player_id === 13,
+    )!;
+    await page
+      .getByLabel("Repair transfer GW11: 102 to 2", { exact: true })
+      .selectOption(choice === "remove" ? "remove" : replacement.ownership_id!);
+    await write(() =>
+      page
+        .getByRole("button", { name: "Apply transfer repair", exact: true })
+        .click(),
+    );
+    const repair = mutations.at(-1)!;
+    expect(repair.expected_revision).toBe(accepted.revision);
+    expect(repair.intents).toHaveLength(2);
+    expect(repair.intents[0]).toMatchObject({
+      kind: "edit_transfer",
+      decision_id: accepted.gameweeks[0].decisions[0].decision_id,
+      incoming_player_id: 113,
+    });
+    expect(repair.intents[1]).toMatchObject(
+      choice === "remove"
+        ? {
+            kind: "remove_transfer",
+            decision_id: accepted.gameweeks[3].decisions[0].decision_id,
+          }
+        : {
+            kind: "edit_transfer",
+            decision_id: accepted.gameweeks[3].decisions[0].decision_id,
+            outgoing_player_id: 13,
+            outgoing_ownership_id: replacement.ownership_id,
+          },
+    );
+    if (choice === "remove") {
+      await transfer(113, 102);
+      await select(11);
+      await transfer(102, 2);
+    }
+  }
+  current = await read();
+  expect(
+    current.gameweeks[1].players.find((player) => player.is_captain)?.player_id,
+  ).toBe(113);
+  expect(
+    current.gameweeks[3].players.find((player) => player.is_captain)?.player_id,
+  ).toBe(104);
+  expect(current.total_points_hit).toBe(4);
+  expect(current.decision_errors).toEqual([]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await select(11);
+  await expect(page.getByText(/Next FT 1/)).toBeVisible();
+  await expect(page.getByText(/Hits taken: 4/)).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: info.outputPath("transfers-mobile.png"),
+    fullPage: true,
+  });
+  expect(errors).toEqual([]);
 });
 
 test("US2 real API chips across periods, clear/move and frozen FH/WC toggles", async ({

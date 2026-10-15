@@ -271,6 +271,129 @@ def with_week(plan: Plan, number: int, **changes) -> Plan:
     )
 
 
+def test_us3_hand_calculated_chain_and_unordered_net_set_preserve_local_roles() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+
+    plan = build_plan(8, 12)
+    plan = replace(plan, boundary=replace(plan.boundary, free_transfers=2))
+    plan = with_week(plan, 8, transfers=(build_transfer(),))
+    transfers = tuple(build_transfer(player, player + 100, player) for player in (3, 4, 5, 6))
+    plan = with_week(plan, 10, transfers=transfers)
+    lineup = tuple(
+        replace(
+            role,
+            is_captain=role.slot_id == identity(3),
+            is_vice_captain=role.slot_id == identity(2),
+        )
+        for role in plan.gameweeks[3].lineup
+    )
+    plan = with_week(plan, 11, lineup=lineup)
+    result = evaluate_plan(plan, metadata())
+    assert not result.diagnostics
+    assert [
+        (
+            week.free_transfers_available,
+            week.transfers_made,
+            week.points_hit,
+            week.next_free_transfers,
+            week.closing_bank_tenths,
+        )
+        for week in result.gameweeks
+    ] == [
+        (2, 1, 0, 2, 12),
+        (2, 0, 0, 3, 12),
+        (3, 4, 4, 1, 20),
+        (1, 0, 0, 2, 20),
+        (2, 0, 0, 3, 20),
+    ]
+    assert sum(week.points_hit for week in result.gameweeks) == 4
+    assert result.gameweeks[3].lineup == lineup
+    assert result.gameweeks[4].lineup == plan.boundary.lineup
+    assert (
+        evaluate_plan(with_week(plan, 10, transfers=tuple(reversed(transfers))), metadata())
+        == result
+    )
+
+
+@pytest.mark.parametrize("remaining", range(6))
+@pytest.mark.parametrize(
+    "chip_name", [None, "WILDCARD", "FREE_HIT", "BENCH_BOOST", "TRIPLE_CAPTAIN"]
+)
+def test_us3_allowance_hits_and_cap_matrix(remaining, chip_name) -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    chip = Chip(chip_name) if chip_name else None
+    for count in (0, 1, 4):
+        plan = build_plan()
+        plan = replace(plan, boundary=replace(plan.boundary, free_transfers=remaining))
+        decisions = tuple(
+            build_transfer(player, player + 100, player) for player in range(2, 2 + count)
+        )
+        plan = with_week(plan, 8, chip=chip, transfers=decisions)
+        result = evaluate_plan(plan, metadata())
+        assert not result.diagnostics
+        unlimited = chip_name in {"WILDCARD", "FREE_HIT"}
+        expected_next = min(5, max(remaining - (1 if unlimited else count), 0) + 1)
+        assert (
+            result.gameweeks[0].transfers_made,
+            result.gameweeks[0].points_hit,
+            result.gameweeks[0].next_free_transfers,
+        ) == (count, 0 if unlimited else max(count - remaining, 0) * 4, expected_next)
+        assert result.gameweeks[1].closing_bank_tenths == (
+            10 if chip_name == "FREE_HIT" else 10 + count * 2
+        )
+
+
+@pytest.mark.parametrize("first_chip", ["FREE_HIT", "WILDCARD"])
+def test_us3_adjacent_first_last_chips_and_buy_back_episode(first_chip) -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    first = build_transfer()
+    plan = with_week(build_plan(8, 9), 8, chip=Chip(first_chip), transfers=(first,))
+    if first_chip == "FREE_HIT":
+        second = replace(build_transfer(2, 102, 2), outgoing_ownership_id=identity(1002))
+    else:
+        second = replace(
+            build_transfer(102, 2, 2), outgoing_ownership_id=first.incoming_ownership_id
+        )
+    plan = with_week(
+        plan,
+        9,
+        chip=Chip.WILDCARD if first_chip == "FREE_HIT" else Chip.FREE_HIT,
+        transfers=(second,),
+    )
+    result = evaluate_plan(plan, metadata())
+    assert not result.diagnostics
+    assert result.gameweeks[1].players[1].ownership_id == second.incoming_ownership_id
+    assert result.gameweeks[1].players[1].ownership_id != first.outgoing_ownership_id
+    assert plan.gameweeks[0].transfers == (first,)
+    assert result.gameweeks[1].points_hit == 0
+
+
+def test_us3_example_b_explicit_replacement_is_atomic_and_preserves_unchanged_quotes() -> None:
+    from fpl_engine.planning.models import EditTransfer
+    from fpl_engine.planning.mutations import apply_intents
+
+    first = build_transfer()
+    later = replace(build_transfer(102, 2, 2), outgoing_ownership_id=first.incoming_ownership_id)
+    plan = with_week(with_week(build_plan(), 8, transfers=(first,)), 10, transfers=(later,))
+    changed = replace(first, incoming_player_id=103, incoming_ownership_id=identity(4001))
+    replacement = replace(
+        later, outgoing_player_id=103, outgoing_ownership_id=changed.incoming_ownership_id
+    )
+    result = apply_intents(
+        plan,
+        (EditTransfer(first.decision_id, changed), EditTransfer(later.decision_id, replacement)),
+        metadata(),
+    )
+    assert not result.evaluation.diagnostics
+    assert result.plan.gameweeks[2].transfers == (replacement,)
+    assert result.plan.gameweeks[0].transfers == (changed,)
+    assert plan.gameweeks[0].transfers == (first,)
+
+
 def test_first_gameweek_counts_against_independent_boundary_with_zero_ft() -> None:
     from fpl_engine.planning.evaluate import evaluate_plan
 
@@ -283,6 +406,26 @@ def test_first_gameweek_counts_against_independent_boundary_with_zero_ft() -> No
     assert (week.transfers_made, week.points_hit, week.next_free_transfers) == (1, 4, 1)
     assert week.closing_bank_tenths == 12
     assert week.sales[0].selling_price_tenths == 52
+
+
+def test_us3_permanent_buy_back_requires_the_new_episode_and_forbids_same_week_round_trip() -> None:
+    from fpl_engine.planning.mutations import AddTransfer, MutationRejectedError, apply_intents
+
+    first = build_transfer()
+    second = replace(build_transfer(102, 2, 2), outgoing_ownership_id=first.incoming_ownership_id)
+    third = replace(build_transfer(2, 103, 3), outgoing_ownership_id=second.incoming_ownership_id)
+    plan = with_week(with_week(build_plan(), 8, transfers=(first,)), 9, transfers=(second,))
+    result = apply_intents(plan, (AddTransfer(10, third),), metadata())
+    assert result.plan.gameweeks[2].transfers == (third,)
+    assert second.incoming_ownership_id != identity(1002)
+    with pytest.raises(MutationRejectedError):
+        apply_intents(
+            plan,
+            (AddTransfer(10, replace(third, outgoing_ownership_id=identity(1002))),),
+            metadata(),
+        )
+    with pytest.raises(RuleViolationError):
+        apply_intents(build_plan(), (AddTransfer(8, first), AddTransfer(8, second)), metadata())
 
 
 def test_example_a_free_hit_restores_permanent_ownership_without_phantom_transfers() -> None:

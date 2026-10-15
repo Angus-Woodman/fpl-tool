@@ -264,6 +264,191 @@ afterEach(() => {
 });
 
 describe("PlanBoard", () => {
+  it.each(["remove", "replace"])(
+    "US3 preserves rejected acquisition and submits chosen %s repair atomically",
+    async (choice) => {
+      const plan = buildPlannerPlan(8, 9);
+      const acquisition = {
+        decision_id: plannerIdentity(8000),
+        outgoing_player_id: 6,
+        outgoing_ownership_id: plannerIdentity(1006),
+        incoming_player_id: 106,
+        incoming_ownership_id: plannerIdentity(8001),
+        outgoing_market_tenths: 50,
+        incoming_price_tenths: 50,
+        selling_price_tenths: 50,
+        observation_source: "stored_player_observation",
+        observed_at: "2026-10-14T12:00:00+00:00",
+        origin: "captured",
+      };
+      const downstream = {
+        ...acquisition,
+        decision_id: plannerIdentity(8002),
+        outgoing_player_id: 106,
+        outgoing_ownership_id: acquisition.incoming_ownership_id,
+        incoming_player_id: 6,
+        incoming_ownership_id: plannerIdentity(8003),
+      };
+      plan.gameweeks[0].decisions = [acquisition];
+      plan.gameweeks[1].decisions = [downstream];
+      Object.assign(plan.gameweeks[0].players[5], {
+        player_id: 106,
+        web_name: "P106",
+        ownership_id: acquisition.incoming_ownership_id,
+        source_decision_id: acquisition.decision_id,
+      });
+      const requests: { intents: PlanIntent[]; expected_revision: number }[] =
+        [];
+      vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        if (init?.method === "POST") {
+          const envelope = JSON.parse(String(init.body));
+          requests.push(envelope);
+          if (requests.length === 1)
+            return new Response(
+              JSON.stringify({
+                detail: {
+                  code: "outgoing_not_owned",
+                  message: "Outgoing player unavailable",
+                  diagnostics: [
+                    {
+                      code: "outgoing_not_owned",
+                      message: "Intended outgoing player 106 is not owned",
+                      gameweek_number: 9,
+                      decision_id: downstream.decision_id,
+                      conflicting_gameweek: null,
+                      player_id: 106,
+                    },
+                  ],
+                },
+              }),
+              { status: 422 },
+            );
+          return new Response(
+            JSON.stringify({
+              status: "committed",
+              mutation_id: envelope.mutation_id,
+              committed_revision: 1,
+              plan: { ...plan, revision: 1 },
+              candidate: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (String(input).includes("/players?"))
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: 99,
+                  web_name: "New Mid",
+                  first_name: "New",
+                  second_name: "Mid",
+                  team_name: "Team",
+                  team_short_name: "TMX",
+                  position: "MID",
+                  current_price: 5,
+                  status: "a",
+                },
+              ],
+              total: 1,
+              page: 1,
+              page_size: 50,
+            }),
+            { status: 200 },
+          );
+        return new Response(JSON.stringify(plan), { status: 200 });
+      });
+      render(<PlanBoard planId={plan.plan_id} />);
+      fireEvent.click(await screen.findByLabelText("Transfer P106"));
+      fireEvent.click(await screen.findByLabelText("Transfer in New Mid"));
+      const repair = await screen.findByLabelText(
+        "Repair transfer GW9: 106 to 6",
+      );
+      expect(screen.getByLabelText("Transfer P106")).toBeVisible();
+      expect(requests).toHaveLength(1);
+      expect(requests[0].intents).toEqual([
+        {
+          kind: "edit_transfer",
+          decision_id: acquisition.decision_id,
+          incoming_player_id: 99,
+        },
+      ]);
+      expect(
+        screen.getByRole("button", { name: "Apply transfer repair" }),
+      ).toBeDisabled();
+      fireEvent.change(repair, {
+        target: {
+          value: choice === "remove" ? "remove" : plannerIdentity(1007),
+        },
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Apply transfer repair" }),
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Saved"),
+      );
+      expect(requests[1].expected_revision).toBe(0);
+      expect(requests[1].intents).toEqual([
+        ...requests[0].intents,
+        choice === "remove"
+          ? { kind: "remove_transfer", decision_id: downstream.decision_id }
+          : {
+              kind: "edit_transfer",
+              decision_id: downstream.decision_id,
+              outgoing_player_id: 7,
+              outgoing_ownership_id: plannerIdentity(1007),
+            },
+      ]);
+    },
+  );
+
+  it("US3 displays replay next FT and plan hit total", async () => {
+    const plan = buildPlannerPlan(8, 11);
+    plan.total_points_hit = 4;
+    plan.gameweeks[0].accounting!.next_free_transfers = 2;
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    expect(await screen.findByText(/Next FT 2/)).toBeVisible();
+    expect(screen.getByText(/Hits taken: 4/)).toBeVisible();
+  });
+
+  it("US3 blocked accounting shows unavailable values rather than invented totals", async () => {
+    const plan = buildPlannerPlan(8, 11);
+    const week = plan.gameweeks[0];
+    plan.total_points_hit = null;
+    week.players = [];
+    week.bank = null;
+    week.transfers_made = null;
+    week.points_hit = null;
+    week.free_transfers_available = null;
+    week.accounting = {
+      starting_bank_tenths: null,
+      closing_bank_tenths: null,
+      free_transfers_available: null,
+      next_free_transfers: null,
+      unlimited_transfers: false,
+      transfers_made: null,
+      points_hit: null,
+    };
+    week.evaluation_status = "blocked";
+    plan.decision_errors = [
+      {
+        code: "outgoing_not_owned",
+        message: "Intended outgoing player 102 is not owned in that episode",
+        gameweek_number: 8,
+        decision_id: "missing-decision",
+        conflicting_gameweek: null,
+        player_id: 102,
+      },
+    ];
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    expect(await screen.findByText(/Hits taken: Unavailable/)).toBeVisible();
+    expect(screen.getByText(/Next FT Unavailable/)).toBeVisible();
+    expect(screen.getByText(/Hit Unavailable/)).toBeVisible();
+    expect(screen.getByText(/Intended outgoing player 102/)).toBeVisible();
+  });
+
   it.each([
     ["available", null, null, false, false],
     ["planned_here", null, null, false, true],
