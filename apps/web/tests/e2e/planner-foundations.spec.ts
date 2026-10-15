@@ -663,6 +663,15 @@ test("US3 real API transfers accounting, no phantom moves and explicit atomic re
     [2, 0, 0, 3, 2],
   ]);
   const frozen = initial.gameweeks.flatMap((week) => week.decisions);
+  expect(
+    initial.gameweeks[2].players.find((player) => player.player_id === 105)
+      ?.current_price,
+  ).toBe(8);
+  expect(
+    initial.gameweeks[2].decisions.find(
+      (decision) => decision.incoming_player_id === 105,
+    )?.incoming_price_tenths,
+  ).toBe(50);
   await write(() =>
     page.getByRole("button", { name: "Free Hit", exact: true }).click(),
   );
@@ -717,12 +726,12 @@ test("US3 real API transfers accounting, no phantom moves and explicit atomic re
       ),
       fullPage: true,
     });
-    const replacement = accepted.gameweeks[3].players.find(
-      (player) => player.player_id === 13,
-    )!;
+    const sourceDecision = accepted.gameweeks[0].decisions[0];
     await page
       .getByLabel("Repair transfer GW11: 102 to 2", { exact: true })
-      .selectOption(choice === "remove" ? "remove" : replacement.ownership_id!);
+      .selectOption(
+        choice === "remove" ? "remove" : `source:${sourceDecision.decision_id}`,
+      );
     await write(() =>
       page
         .getByRole("button", { name: "Apply transfer repair", exact: true })
@@ -745,10 +754,40 @@ test("US3 real API transfers accounting, no phantom moves and explicit atomic re
         : {
             kind: "edit_transfer",
             decision_id: accepted.gameweeks[3].decisions[0].decision_id,
-            outgoing_player_id: 13,
-            outgoing_ownership_id: replacement.ownership_id,
+            outgoing_player_id: 113,
+            outgoing_source_decision_id: sourceDecision.decision_id,
           },
     );
+    if (choice === "replace") {
+      expect(repair.intents[1]).not.toHaveProperty("outgoing_ownership_id");
+      const repaired = await read();
+      const acquisition = repaired.gameweeks[0].decisions[0];
+      const downstream = repaired.gameweeks[3].decisions[0];
+      expect(acquisition.decision_id).toBe(sourceDecision.decision_id);
+      expect(acquisition.incoming_ownership_id).not.toBe(
+        sourceDecision.incoming_ownership_id,
+      );
+      expect(downstream.decision_id).toBe(
+        accepted.gameweeks[3].decisions[0].decision_id,
+      );
+      expect(downstream.outgoing_player_id).toBe(113);
+      expect(downstream.outgoing_ownership_id).toBe(
+        acquisition.incoming_ownership_id,
+      );
+      expect(acquisition.incoming_price_tenths).toBe(52);
+      expect(downstream.outgoing_market_tenths).toBe(52);
+      expect(downstream.incoming_price_tenths).toBe(54);
+      expect(downstream.incoming_ownership_id).toBe(
+        accepted.gameweeks[3].decisions[0].incoming_ownership_id,
+      );
+      expect(repaired.gameweeks[2].decisions).toEqual(
+        accepted.gameweeks[2].decisions,
+      );
+      expect(repaired.gameweeks[1].decisions).toEqual([]);
+      expect(repaired.gameweeks.flatMap((week) => week.decisions)).toHaveLength(
+        6,
+      );
+    }
     if (choice === "remove") {
       await transfer(113, 102);
       await select(11);
@@ -767,6 +806,10 @@ test("US3 real API transfers accounting, no phantom moves and explicit atomic re
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
   await select(11);
+  const reopened = await read();
+  expect(reopened.gameweeks[3].decisions[0].outgoing_ownership_id).toBe(
+    reopened.gameweeks[0].decisions[0].incoming_ownership_id,
+  );
   await expect(page.getByText(/Next FT 1/)).toBeVisible();
   await expect(page.getByText(/Hits taken: 4/)).toBeVisible();
   expect(

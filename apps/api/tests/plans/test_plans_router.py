@@ -545,6 +545,9 @@ def test_planner_story_through_actual_browser_and_api(
                 ).model_dump(mode="json"),
             )
             assert response.status_code == 200, response.text
+        planner_session.get(PlayerModel, 105).current_price = 8.0
+        planner_session.get(PlayerModel, 113).current_price = 5.2
+        planner_session.commit()
     if journey == "chips":
         from api.models.entities import PlayerModel
         from test_plan_services import mutation_body
@@ -619,7 +622,11 @@ def test_planner_story_through_actual_browser_and_api(
     if journey == "transfers":
         assert sum(len(week.transfers) for week in reopened.gameweeks) == 6
         assert reopened.gameweeks[0].transfers[0].incoming_player_id == 113
-        assert reopened.gameweeks[3].transfers[0].outgoing_player_id == 13
+        assert reopened.gameweeks[3].transfers[0].outgoing_player_id == 113
+        assert (
+            reopened.gameweeks[3].transfers[0].outgoing_ownership_id
+            == reopened.gameweeks[0].transfers[0].incoming_ownership_id
+        )
         assert not evaluate_plan(reopened, planner_metadata).diagnostics
     if journey == "chips":
         current = client.get(f"/plans/{plan_id}").json()

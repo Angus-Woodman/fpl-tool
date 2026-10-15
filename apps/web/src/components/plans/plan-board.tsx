@@ -65,7 +65,46 @@ function TransferRepairPanel({
   onApply: (intents: PlanIntent[]) => void;
 }): JSX.Element | null {
   const [choices, setChoices] = useState<Record<string, string>>({});
-  const diagnostics = rejection?.diagnostics ?? plan.decision_errors;
+  const acquisitions = (rejection?.intents ?? []).flatMap((intent) => {
+    if (
+      intent.kind !== "edit_transfer" ||
+      intent.incoming_player_id === undefined
+    )
+      return [];
+    const sourceWeek = plan.gameweeks.find((week) =>
+      week.decisions.some(
+        (decision) =>
+          decision.decision_id === intent.decision_id &&
+          decision.incoming_player_id !== intent.incoming_player_id,
+      ),
+    );
+    return sourceWeek
+      ? [
+          {
+            decisionId: intent.decision_id,
+            playerId: intent.incoming_player_id,
+            gameweek: sourceWeek.gameweek_number,
+          },
+        ]
+      : [];
+  });
+  const diagnostics = [
+    ...new Map(
+      [...(rejection?.diagnostics ?? []), ...plan.decision_errors].map(
+        (error) => [
+          JSON.stringify([
+            error.code,
+            error.gameweek_number,
+            error.decision_id,
+            error.conflicting_gameweek,
+            error.player_id,
+            error.message,
+          ]),
+          error,
+        ],
+      ),
+    ).values(),
+  ];
   const affected = plan.gameweeks.flatMap((week) =>
     week.decisions
       .filter((decision) =>
@@ -77,6 +116,20 @@ function TransferRepairPanel({
     const choice = choices[decision.decision_id];
     if (choice === "remove")
       return [{ kind: "remove_transfer", decision_id: decision.decision_id }];
+    const acquisition = acquisitions.find(
+      (source) =>
+        choice === `source:${source.decisionId}` &&
+        source.gameweek < week.gameweek_number,
+    );
+    if (acquisition)
+      return [
+        {
+          kind: "edit_transfer",
+          decision_id: decision.decision_id,
+          outgoing_player_id: acquisition.playerId,
+          outgoing_source_decision_id: acquisition.decisionId,
+        },
+      ];
     const options = week.players.length
       ? week.players
       : (plan.starting_state?.players ?? []);
@@ -100,7 +153,10 @@ function TransferRepairPanel({
     >
       {diagnostics.map((error, index) => (
         <p key={`${error.decision_id}-${error.code}-${index}`}>
-          GW{error.gameweek_number}: {error.message}
+          {plan.decision_errors.includes(error)
+            ? "Saved plan"
+            : "Rejected edit"}
+          {" · "}GW{error.gameweek_number}: {error.message}
         </p>
       ))}
       <fieldset disabled={disabled} className="min-w-0 space-y-3">
@@ -124,6 +180,17 @@ function TransferRepairPanel({
             >
               <option value="">Keep transfer</option>
               <option value="remove">Remove transfer</option>
+              {acquisitions
+                .filter((source) => source.gameweek < week.gameweek_number)
+                .map((source) => (
+                  <option
+                    key={`source:${source.decisionId}`}
+                    value={`source:${source.decisionId}`}
+                  >
+                    Proposed incoming player {source.playerId} from GW
+                    {source.gameweek}
+                  </option>
+                ))}
               {(week.players.length
                 ? week.players
                 : (plan.starting_state?.players ?? [])
@@ -143,7 +210,12 @@ function TransferRepairPanel({
           <button
             type="button"
             disabled={repairs.length === 0}
-            onClick={() => onApply([...(rejection?.intents ?? []), ...repairs])}
+            onClick={() =>
+              onApply([
+                ...(rejection?.diagnostics.length ? rejection.intents : []),
+                ...repairs,
+              ])
+            }
             className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-900 disabled:opacity-40"
           >
             Apply transfer repair

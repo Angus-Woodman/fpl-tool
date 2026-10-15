@@ -89,6 +89,7 @@ class EditTransferIntent(PlannerIntentBody):
     decision_id: WireUUID
     outgoing_player_id: int | None = Field(default=None, gt=0)
     outgoing_ownership_id: WireUUID | None = None
+    outgoing_source_decision_id: WireUUID | None = None
     incoming_player_id: int | None = Field(default=None, gt=0)
 
 

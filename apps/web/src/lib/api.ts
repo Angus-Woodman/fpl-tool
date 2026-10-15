@@ -650,6 +650,7 @@ export type PlanIntent =
       decision_id: string;
       outgoing_player_id?: number;
       outgoing_ownership_id?: string;
+      outgoing_source_decision_id?: string;
       incoming_player_id?: number;
     }
   | { kind: "remove_transfer"; decision_id: string };

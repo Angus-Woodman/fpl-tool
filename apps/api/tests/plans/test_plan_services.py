@@ -571,6 +571,7 @@ def test_us3_explicit_rebinding_and_completed_week_edit_keep_identity_and_other_
     }
     with pytest.raises(RuleViolationError):
         service.mutate(plan_id, mutation_body(103, 3, [edit]))
+    assert PlanRepository(planner_session).load_canonical(plan_id) == unchanged
     repaired = service.mutate(
         plan_id,
         mutation_body(
@@ -581,17 +582,25 @@ def test_us3_explicit_rebinding_and_completed_week_edit_keep_identity_and_other_
                 {
                     "kind": "edit_transfer",
                     "decision_id": str(second.decision_id),
-                    "outgoing_player_id": 4,
-                    "outgoing_ownership_id": str(UUID(int=1004)),
+                    "outgoing_player_id": 103,
+                    "outgoing_source_decision_id": str(first.decision_id),
                 },
             ],
         ),
     ).plan
     assert repaired.gameweeks[0].transfers[0].decision_id == first.decision_id
     assert repaired.gameweeks[1].transfers[0].decision_id == second.decision_id
-    assert repaired.gameweeks[1].transfers[0].outgoing_player_id == 4
-    assert repaired.gameweeks[1].transfers[0].outgoing_ownership_id == UUID(int=1004)
+    assert repaired.gameweeks[1].transfers[0].outgoing_player_id == 103
+    assert (
+        repaired.gameweeks[1].transfers[0].outgoing_ownership_id
+        == repaired.gameweeks[0].transfers[0].incoming_ownership_id
+    )
+    assert repaired.gameweeks[0].transfers[0].incoming_ownership_id != first.incoming_ownership_id
+    assert repaired.gameweeks[1].transfers[0].incoming_ownership_id == second.incoming_ownership_id
     assert repaired.gameweeks[0].transfers[0].incoming_price_tenths == 55
+    assert repaired.gameweeks[1].transfers[0].outgoing_market_tenths == 55
+    assert repaired.gameweeks[1].transfers[0].incoming_price_tenths == second.incoming_price_tenths
+    assert sum(len(week.transfers) for week in repaired.gameweeks) == 3
     assert repaired.gameweeks[2].transfers == (untouched,)
     assert repaired.gameweeks[0].transfers[0].outgoing_market_tenths == first.outgoing_market_tenths
     with pytest.raises(RuleViolationError):
@@ -610,6 +619,80 @@ def test_us3_explicit_rebinding_and_completed_week_edit_keep_identity_and_other_
             ),
         )
     assert PlanRepository(planner_session).load_canonical(plan_id) == repaired
+
+
+@pytest.mark.parametrize(
+    "reference", ["unknown", "forward", "mismatched", "conflicting", "same_gameweek"]
+)
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_same_batch_ownership_reference_rejects_invalid_or_same_week_sources(
+    guarded_mutations, planner_session, planner_plan, planner_metadata, reference
+):
+    from dataclasses import replace
+    from uuid import UUID
+
+    from api.repositories.plan_repository import PlanRepository
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import TransferDecision
+    from fpl_engine.rules import RuleViolationError
+
+    service, plan_id = guarded_mutations
+
+    def decision(number, outgoing, ownership, incoming):
+        return TransferDecision(
+            UUID(int=8000 + number),
+            outgoing,
+            UUID(int=ownership),
+            incoming,
+            UUID(int=8100 + number),
+            50,
+            50,
+            "stored_player_observation",
+            "2026-10-14T12:00:00+00:00",
+            "captured",
+        )
+
+    first = decision(1, 2, 1002, 102)
+    second = decision(2, 102, 8101, 2)
+    third = decision(3, 3, 1003, 103)
+    plan = replace(
+        planner_plan,
+        gameweeks=(
+            replace(planner_plan.gameweeks[0], transfers=(first,)),
+            replace(
+                planner_plan.gameweeks[1],
+                transfers=(second, third) if reference == "same_gameweek" else (second,),
+            ),
+            planner_plan.gameweeks[2],
+        ),
+    )
+    repository = PlanRepository(planner_session)
+    repository.save_canonical(plan_id, plan, evaluate_plan(plan, planner_metadata))
+    planner_session.commit()
+    upstream = {
+        "kind": "edit_transfer",
+        "decision_id": str(first.decision_id),
+        "incoming_player_id": 103,
+    }
+    repair = {
+        "kind": "edit_transfer",
+        "decision_id": str(second.decision_id),
+        "outgoing_player_id": 103,
+        "outgoing_source_decision_id": str(first.decision_id),
+    }
+    if reference == "unknown":
+        repair["outgoing_source_decision_id"] = str(UUID(int=9999))
+    elif reference == "mismatched":
+        repair["outgoing_player_id"] = 104
+    elif reference == "conflicting":
+        repair["outgoing_ownership_id"] = str(first.incoming_ownership_id)
+    elif reference == "same_gameweek":
+        upstream["decision_id"] = str(third.decision_id)
+        repair["outgoing_source_decision_id"] = str(third.decision_id)
+    intents = [repair, upstream] if reference == "forward" else [upstream, repair]
+    with pytest.raises(RuleViolationError):
+        service.mutate(plan_id, mutation_body(900, 0, intents))
+    assert repository.load_canonical(plan_id) == plan
 
 
 @pytest.mark.parametrize("violation", ["formation", "club", "squad", "captain"])

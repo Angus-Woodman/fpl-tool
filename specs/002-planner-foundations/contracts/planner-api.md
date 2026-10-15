@@ -35,13 +35,24 @@ Envelope: `mutation_id` (UUID), `expected_revision`, and `intents` (normally one
 | `swap_lineup_players` | GW and two selected player IDs. Engine applies legal starter/bench or outfield priority swap and My Team captaincy inheritance. |
 | `activate_chip`, `remove_chip`, `move_chip` | Explicit chip/source/target and expected existing values. Contradictions reject; never silently clear a second chip. Replay existing transfers without repricing. |
 | `add_transfer` | GW and explicit entering-state outgoing player/ownership plus incoming player. Latest observed prices captured server-side. |
-| `edit_transfer` | Decision ID and explicit changed outgoing/incoming identity or explicit quote refresh. Capture current prices for this edited record only. |
+| `edit_transfer` | Decision ID and explicit changed outgoing/incoming identity or explicit quote refresh. Optionally identify outgoing ownership by `outgoing_source_decision_id` as described below. Capture current prices for this edited record only. |
 | `remove_transfer` | Decision ID; remove the explicit net decision and replay, not a simulated FPL reverse transaction. |
 | `set_starting_transfers`, `set_starting_chips` | One starting field/domain value; appropriate period/declaration validation. |
 | `correct_purchase_price`, `confirm_purchase_price` | Starting ownership/player and value or confirmation. Q7 finances remain persistable; no speculative future transaction price. |
 | `rename_plan`, `change_horizon` | Name or horizon; explicit compatible declarations if changing start requires them. Rebase rules in data model. |
 
 All input changes in an explicit batch are applied before final whole-plan validation; it is one canonical revision/transaction, not a sequence of partially saved plans. This permits Example B's upstream edit plus user-chosen downstream removal/replacement, and atomic multi-transfer net sets. No automatic replacement transfer is added. An incoming player selected again in the same GW edits its original acquisition decision, not a new same-GW sale/round trip. Expose source decision IDs so the client can submit that explicit edit. A batch of purchase corrections/confirmations cannot include planning mutations: reject mixed batches, commit Q7 corrections first, and validate later planning repairs against their acknowledged revision. Merely including a correction never exempts a new transfer from Q2.
+
+For an atomic Example B replacement, a downstream `edit_transfer` may supply
+`outgoing_player_id` and `outgoing_source_decision_id` instead of
+`outgoing_ownership_id`. The source decision must have been captured earlier
+in the same request batch and acquire that outgoing player. The server resolves
+its actual captured `incoming_ownership_id`; clients neither generate nor need
+to know the new ownership ID. Unknown/forward/mismatched sources or supplying
+both reference forms reject. Canonical inputs and receipts retain resolved
+ownership IDs, and whole-plan engine validation still rejects an unavailable
+episode or same-GW round trip. This does not change frozen quotes on unedited
+decisions or decision-identity rules.
 
 ### Server Processing And Acceptance
 

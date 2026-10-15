@@ -468,3 +468,57 @@ with task wording unchanged; no extension hooks were registered.
 No known US3 defect blocks US4. Selling-price inspection, provenance/shortfall
 resolution UX, comprehensive failure/departure handling and My Team/Planner
 lineup parity remain future-story work, not certification from this increment.
+
+## US3 Review Remediation (2026-10-15)
+
+Both independent US3 findings are remediated without starting T054/US4 or
+changing task markers. This evidence supersedes the earlier Example B browser
+replacement case, which selected an already-known ownership rather than the
+newly proposed acquisition.
+
+- Canonical Example B now submits the upstream acquisition edit followed by a
+	downstream edit with `outgoing_player_id` and `outgoing_source_decision_id`,
+	not a guessed/generated browser ownership ID. Capture resolves that earlier
+	same-batch source to its actual new incoming ownership. Both decision IDs
+	and the unchanged downstream incoming ownership remain stable. The normal
+	engine remains authoritative for final ownership and legality.
+- Guarded regressions reject unknown, forward, mismatched-player, conflicting
+	ownership/source and same-GW references without changing canonical inputs.
+	Explicit edits capture latest prices; an unedited third decision remains
+	identical despite a changed live price. Upstream-only rejection leaves the
+	accepted plan unchanged, and repaired inputs survive canonical reload.
+- The real frontend/API/PostgreSQL journey now chooses the proposed D
+	acquisition on mobile, sends its source decision ID without an ownership ID,
+	and verifies the newly generated episode is used for D-to-C. Decision IDs,
+	the C acquisition identity, unchanged quotes and empty downstream decisions
+	are checked through API read, browser reload and SQL reopen. A live price of
+	8.0 does not change the untouched 5.0 acquisition; edited D records capture
+	5.2. No phantom transfer is introduced.
+- Accepted-plan diagnostics are merged/deduplicated for display with rejected
+	proposal diagnostics, labelled Saved plan versus Rejected edit. Missing
+	rejection diagnostics never hide accepted issues. The coordinator's raw
+	rejection context and acknowledged canonical plan remain separate and
+	unchanged; a later accepted revision clears rejection-only context as before.
+	Component cases cover missing, identical and additional rejection diagnostics,
+	the rejection message and subsequent acceptance. A diagnostic-less rejection
+	is not silently resubmitted with an accepted-plan repair.
+
+Verification passed: all 93 planner replay cases; six focused guarded source
+reference cases; all 150 guarded Planner API/repository/migration cases,
+including three actual API browser journeys; all 123 web tests (40 Planner);
+all eight fixture browser journeys; root `make lint`, `make typecheck`,
+`make test`; and the isolated production build. Ordinary API test skips are
+not SQL evidence; the guarded run uses only `fpl_test` and existing safeguards.
+
+Desktop/mobile screenshots were inspected; no new overlap or page errors were
+observed. The owned preview on port 3101 and `.next-copilot` were cleaned after
+both an initial test-fixture setup failure and the successful rerun. Existing
+ports 3000/8000/3100 were untouched. The fixture failure was fixed by refreshing
+live prices after both seed mutations, preserving the original saved quotes.
+Existing dependency deprecation warnings and mobile navigation scrolling remain.
+
+Final diff reviewed for US3-only scope: request schema, capture resolution,
+TypeScript request type, board repair/diagnostic presentation, their focused
+tests and existing browser harness, plus request-contract/evidence docs. No
+domain arithmetic, coordinator, dependency, migration, task wording/markers or
+US4 price-resolution UX changes. No known remaining issue from either finding.

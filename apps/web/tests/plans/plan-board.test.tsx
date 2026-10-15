@@ -264,7 +264,100 @@ afterEach(() => {
 });
 
 describe("PlanBoard", () => {
-  it.each(["remove", "replace"])(
+  it.each(["none", "duplicate", "additional"])(
+    "retains accepted repair diagnostics after a 422 with %s diagnostics",
+    async (mode) => {
+      const plan = buildPlannerPlan(8, 9);
+      plan.decision_errors = [
+        {
+          code: "outgoing_not_owned",
+          message: "Accepted legacy ownership needs repair",
+          gameweek_number: 8,
+          decision_id: null,
+          conflicting_gameweek: null,
+          player_id: 102,
+        },
+      ];
+      const requests: unknown[] = [];
+      vi.spyOn(global, "fetch").mockImplementation(async (_input, init) => {
+        if (init?.method === "POST") {
+          requests.push(JSON.parse(String(init.body)));
+          if (requests.length === 1)
+            return new Response(
+              JSON.stringify({
+                detail: {
+                  code: "unrelated_rejection",
+                  message: "Unrelated edit rejected",
+                  ...(mode === "none"
+                    ? {}
+                    : {
+                        diagnostics:
+                          mode === "duplicate"
+                            ? [...plan.decision_errors]
+                            : [
+                                {
+                                  ...plan.decision_errors[0],
+                                  message: "Proposed ownership unavailable",
+                                },
+                              ],
+                      }),
+                },
+              }),
+              { status: 422 },
+            );
+          return new Response(
+            JSON.stringify({
+              status: "committed",
+              mutation_id: JSON.parse(String(init.body)).mutation_id,
+              committed_revision: 1,
+              plan: { ...plan, revision: 1 },
+              candidate: null,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify(plan), { status: 200 });
+      });
+      render(<PlanBoard planId={plan.plan_id} />);
+      expect(
+        await screen.findByText(/Accepted legacy ownership needs repair/),
+      ).toBeVisible();
+      fireEvent.click(screen.getByLabelText("Make P4 captain"));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Unrelated edit rejected",
+      );
+      expect(
+        screen.getAllByText(/Accepted legacy ownership needs repair/),
+      ).toHaveLength(1);
+      if (mode === "additional")
+        expect(
+          screen.getByText(/Proposed ownership unavailable/),
+        ).toHaveTextContent("Rejected edit");
+      expect(
+        screen.getByText(/Accepted legacy ownership needs repair/),
+      ).toHaveTextContent("Saved plan");
+      expect(screen.getByLabelText("Make P4 captain")).toBeVisible();
+      expect(requests).toHaveLength(1);
+      expect(plan.revision).toBe(0);
+      expect(
+        plan.gameweeks[0].players.find((player) => player.is_captain)
+          ?.player_id,
+      ).toBe(10);
+      fireEvent.click(screen.getByLabelText("Make P5 captain"));
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Saved"),
+      );
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Proposed ownership unavailable/),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText(/Accepted legacy ownership needs repair/),
+      ).toBeVisible();
+    },
+  );
+
+  it.each(["remove", "replace", "proposed"])(
     "US3 preserves rejected acquisition and submits chosen %s repair atomically",
     async (choice) => {
       const plan = buildPlannerPlan(8, 9);
@@ -378,7 +471,12 @@ describe("PlanBoard", () => {
       ).toBeDisabled();
       fireEvent.change(repair, {
         target: {
-          value: choice === "remove" ? "remove" : plannerIdentity(1007),
+          value:
+            choice === "remove"
+              ? "remove"
+              : choice === "proposed"
+                ? `source:${acquisition.decision_id}`
+                : plannerIdentity(1007),
         },
       });
       fireEvent.click(
@@ -392,12 +490,19 @@ describe("PlanBoard", () => {
         ...requests[0].intents,
         choice === "remove"
           ? { kind: "remove_transfer", decision_id: downstream.decision_id }
-          : {
-              kind: "edit_transfer",
-              decision_id: downstream.decision_id,
-              outgoing_player_id: 7,
-              outgoing_ownership_id: plannerIdentity(1007),
-            },
+          : choice === "proposed"
+            ? {
+                kind: "edit_transfer",
+                decision_id: downstream.decision_id,
+                outgoing_player_id: 99,
+                outgoing_source_decision_id: acquisition.decision_id,
+              }
+            : {
+                kind: "edit_transfer",
+                decision_id: downstream.decision_id,
+                outgoing_player_id: 7,
+                outgoing_ownership_id: plannerIdentity(1007),
+              },
       ]);
     },
   );

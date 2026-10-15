@@ -656,6 +656,7 @@ class PlanMutationService:
             decision.decision_id: decision for week in plan.gameweeks for decision in week.transfers
         }
         operations: list[planning.Intent] = []
+        captured_sources: dict[str, planning.TransferDecision] = {}
         for request in requests:
             if isinstance(request, bodies.RenamePlanIntent):
                 _validate_name(request.name)
@@ -741,6 +742,22 @@ class PlanMutationService:
                 ownership = request.outgoing_ownership_id or (
                     old.outgoing_ownership_id if old else None
                 )
+                if (
+                    isinstance(request, bodies.EditTransferIntent)
+                    and request.outgoing_source_decision_id is not None
+                ):
+                    source = captured_sources.get(str(request.outgoing_source_decision_id))
+                    if (
+                        request.outgoing_ownership_id is not None
+                        or source is None
+                        or source.incoming_player_id != outgoing
+                    ):
+                        raise RuleViolationError(
+                            "invalid_ownership_reference",
+                            "Outgoing acquisition must reference an earlier matching transfer "
+                            "in this batch, without an ownership ID",
+                        )
+                    ownership = source.incoming_ownership_id
                 if outgoing not in lookup or incoming not in lookup or ownership is None:
                     raise RuleViolationError(
                         "missing_price_observation", "Stored player/price observation missing"
@@ -766,6 +783,7 @@ class PlanMutationService:
                         cast(bodies.AddTransferIntent, request).gameweek_number, decision
                     )
                 )
+                captured_sources[str(decision.decision_id)] = decision
         return tuple(operations), lookup
 
     def _commit(self) -> None:
