@@ -454,3 +454,67 @@ def test_us4_unusable_live_prices_never_break_the_read_or_invent_a_value(
     assert saved["incoming_live_price_tenths"] is None
     assert (saved["outgoing_market_tenths"], saved["selling_price_tenths"]) == (54, 52)
     assert TransferDecisionResponse.model_validate(saved).incoming_live_price_tenths is None
+
+
+@pytest.mark.parametrize("bad_side", ["outgoing", "incoming"])
+@pytest.mark.parametrize("bad", [0.0, 5.55, float("nan")])
+def test_us4_one_unusable_live_price_is_omitted_without_hiding_the_other(
+    planner_plan, planner_metadata, bad_side, bad
+) -> None:
+    from dataclasses import replace
+    from uuid import UUID
+
+    from api.schemas.plans import TransferDecisionResponse
+    from fpl_engine.planning.models import TransferDecision
+
+    decision = TransferDecision(
+        UUID(int=8000),
+        2,
+        UUID(int=1002),
+        102,
+        UUID(int=8001),
+        54,
+        50,
+        "stored_player_observation",
+        "2026-10-14T12:00:00+00:00",
+        "captured",
+    )
+    plan = replace(
+        planner_plan,
+        gameweeks=(
+            replace(planner_plan.gameweeks[0], transfers=(decision,)),
+            *planner_plan.gameweeks[1:],
+        ),
+    )
+    live = {
+        2: bad if bad_side == "outgoing" else 5.6,
+        102: bad if bad_side == "incoming" else 6.0,
+    }
+    players = [
+        PlanPlayerRecord(
+            identifier,
+            f"P{identifier}",
+            "First",
+            "Second",
+            player.team_id,
+            "Team",
+            "TMX",
+            player.position.value,
+            live.get(identifier, 5.0),
+            "a",
+            False,
+            None,
+            False,
+            False,
+        )
+        for identifier, player in planner_metadata.items()
+    ]
+    record = replace(_plan(), canonical_plan=plan, rule_players=players)
+    saved = (
+        GetPlanViewService(_FakeProjectionRepository([])).execute(record).gameweeks[0].decisions[0]
+    )
+    expected = {"outgoing": (None, 60), "incoming": (56, None)}[bad_side]
+    assert (saved["outgoing_live_market_tenths"], saved["incoming_live_price_tenths"]) == expected
+    assert (saved["outgoing_market_tenths"], saved["incoming_price_tenths"]) == (54, 50)
+    assert saved["selling_price_tenths"] == 52
+    TransferDecisionResponse.model_validate(saved)

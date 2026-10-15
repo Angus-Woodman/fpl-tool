@@ -374,6 +374,39 @@ describe("PlanBoard", () => {
     expect(row).not.toHaveTextContent(plannerIdentity(8000));
   });
 
+  it.each([
+    ["both available", 56, 60, "P2 £5.6m · P102 £6.0m"],
+    ["outgoing only", 56, null, "P2 £5.6m · P102 Unavailable"],
+    ["incoming only", null, 60, "P2 Unavailable · P102 £6.0m"],
+    ["both unavailable", null, null, null],
+  ])(
+    "US4 shows live prices independently when %s without changing saved values",
+    async (_name, outgoingLive, incomingLive, expected) => {
+      const plan = us4Plan();
+      plan.gameweeks[0].decisions = [
+        us4Decision({
+          outgoing_live_market_tenths: outgoingLive,
+          incoming_live_price_tenths: incomingLive,
+        }),
+      ];
+      mockFetch(plan);
+      render(<PlanBoard planId={plan.plan_id} />);
+      const details = await screen.findByRole("region", {
+        name: "Transfer price details: P2 to P102",
+      });
+      if (expected === null) {
+        expect(details).not.toHaveTextContent("Latest market");
+      } else {
+        expect(details).toHaveTextContent(
+          `Latest market (not used): ${expected}`,
+        );
+      }
+      expect(details).toHaveTextContent("Saved market assumption £5.4m");
+      expect(details).toHaveTextContent("Selling price used £5.1m");
+      expect(details).toHaveTextContent("Acquisition price paid £6.2m");
+    },
+  );
+
   it("US4 estimated bases are lightweight, provisional and never block planning", async () => {
     const plan = us4Plan();
     plan.gameweeks[0].decisions = [

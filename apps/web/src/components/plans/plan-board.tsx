@@ -81,7 +81,7 @@ function TransferPriceDetails({
   const outgoing = nameOf(decision.outgoing_player_id);
   const incoming = nameOf(decision.incoming_player_id);
   const live =
-    decision.outgoing_live_market_tenths != null &&
+    decision.outgoing_live_market_tenths != null ||
     decision.incoming_live_price_tenths != null;
   return (
     <section
