@@ -102,25 +102,34 @@ Component tests use stateful realistic fixtures and deferred promises, not stati
 
 ## Browser Setup And Journeys
 
-Follow `.github/skills/ui-browser-verification/SKILL.md`. Do not start servers or mutate development state merely to validate this planning document. For implementation browser verification, run existing services in separate terminals; choose unused ports and document any CORS/test-origin adjustment rather than replacing another process. API runs from `apps/api` so its relative environment file resolves correctly.
+Follow `.github/skills/ui-browser-verification/SKILL.md`. Do not start servers or mutate development state merely to validate this planning document. Existing frontend port 3000 (`.next`) and backend port 8000 processes are user-owned: never kill, restart or replace them for verification. Normal `make frontend-dev` remains unchanged. Production verification must use the isolated targets below, never an unqualified production build against `.next`. Do not change CORS policy; reuse the existing test-origin handling and guarded API harness.
 
 ```sh
-mise exec -- make db-up
-mise exec -- make backend-dev
+mise exec -- make frontend-verify-build
 ```
 
-In another terminal:
+Start a tracked temporary preview in a separate owned terminal, only on an
+unused port (3100 below; choose another if occupied):
 
 ```sh
-mise exec -- make frontend-dev
+mise exec -- make frontend-verify-preview FRONTEND_VERIFY_PORT=3100
 ```
 
-Default URLs: frontend `http://localhost:3000`, API `http://127.0.0.1:8000`. Existing Playwright expects frontend `http://127.0.0.1:3000`; use its configured API origin. Do not use the normal development API for synthetic destructive setup. Durable Planner tests should use deterministic stateful intercepted API fixtures for error/timing/price edge cases, paired with actual API/PostgreSQL tests above for true persistence/atomicity proof. A mocked browser response alone does not prove backend saving.
+Both targets use `.next-copilot`, not normal dev output. Register `try/finally`
+or equivalent cleanup before building. On success, failure or interruption,
+stop and await only the exact owned preview/process group (never a broad
+port-based kill), then run `mise exec -- make frontend-verify-clean`. Confirm
+the preview port is released and `.next-copilot` is absent before finishing.
+This also applies to build-only gates. Keep the alternate generated-types
+include in `apps/web/tsconfig.json` so builds do not rewrite that file; remove
+the generated directory, not the include. Never clean normal `.next` output.
+
+Default user URLs: frontend `http://localhost:3000`, API `http://127.0.0.1:8000`. Point Playwright at the temporary preview using `PLANNER_BASE_URL`. Do not use the normal development API for synthetic destructive setup. Durable Planner tests should use deterministic stateful intercepted API fixtures for error/timing/price edge cases, paired with actual API/PostgreSQL tests above for true persistence/atomicity proof. A mocked browser response alone does not prove backend saving.
 
 Run the implemented first-increment journey file:
 
 ```sh
-mise exec -- pnpm --filter web e2e tests/e2e/planner-foundations.spec.ts
+mise exec -- env PLANNER_BASE_URL=http://127.0.0.1:3100 pnpm --filter web e2e tests/e2e/planner-foundations.spec.ts
 ```
 
 Protect important journeys with durable Playwright tests:
@@ -141,8 +150,12 @@ Inspect actual rendered desktop and narrow mobile viewports (e.g. 1440x900 and 3
 mise exec -- make lint
 mise exec -- make typecheck
 mise exec -- make test
-mise exec -- pnpm --filter web build
+mise exec -- make frontend-verify-build
 ```
+
+Run these gates inside the cleanup-managed scope above; after any preview has
+exited, always run `mise exec -- make frontend-verify-clean`, including when
+a gate fails. Do not leave isolated generated types behind.
 
 Also run the guarded SQL/migration and Playwright checks above. Use `.github/skills/code-review/SKILL.md` for independent read-only implementation review, resolve relevant findings, and inspect the final full diff for unintended source/dependency/metadata changes. Report files changed, decisions/trade-offs, SC-001 to SC-009 evidence, actual checks/browser results and anything skipped/unverified. Do not treat an agent's statement, a component-only test, or this plan as runtime verification.
 
@@ -159,7 +172,8 @@ claim that later story UX is finished.
 	plus strict TypeScript). The final browser fixture also passed TypeScript.
 - `mise exec -- make test`: passed; the full engine and ordinary API suites,
 	and 105 web tests. Ordinary API DB cases explicitly skip without opt-in.
-- `mise exec -- pnpm --filter web build`: passed, including static generation.
+- Production build: passed, including static generation (historical evidence;
+	future runs use `mise exec -- make frontend-verify-build` and final cleanup).
 - Focused guarded SQL/API gate: 106 cases passed, including actual receipt
 	races, rollback/uncertain-commit faults, retired-writer zero-write proof,
 	initializer cases and four isolated migration round trips/refusals.
@@ -323,7 +337,8 @@ requirements-quality checklists passed before work (16/16 and 35/35).
 - Focused gates: 28 engine cases, 14 SQL-backed HTTP cases and eight component
 	cases passed. The entire board suite passed all 23 cases.
 - `mise exec -- make lint`, `mise exec -- make typecheck`,
-	`mise exec -- make test` and `mise exec -- pnpm --filter web build`: passed.
+	`mise exec -- make test` and the production build: passed (historical evidence;
+  future builds use `mise exec -- make frontend-verify-build` and final cleanup).
 	Full web regression total: 113 tests; ordinary API runs explicitly skip
 	database/browser opt-ins.
 - The complete guarded command in the preceding section passed 126 cases,

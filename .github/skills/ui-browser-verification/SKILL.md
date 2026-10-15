@@ -48,26 +48,37 @@ Component tests passing is not sufficient evidence that a UI change works.
 From the repository root, using the pinned toolchain:
 
 ```sh
-mise exec -- env NEXT_DIST_DIR=.next-copilot pnpm --filter web build
-mise exec -- env NEXT_DIST_DIR=.next-copilot pnpm --filter web start --hostname 127.0.0.1 --port 3100
+mise exec -- make frontend-verify-build
+mise exec -- make frontend-verify-preview FRONTEND_VERIFY_PORT=3100
 ```
 
-Use the same directory for both commands, replacing 3100 if occupied. Point
-browser tests at that preview, for example:
+These targets set `NEXT_DIST_DIR=.next-copilot` for both commands. Replace
+3100 if occupied. Point browser tests at that preview, for example:
 
 ```sh
 mise exec -- env PLANNER_BASE_URL=http://127.0.0.1:3100 pnpm --filter web e2e tests/e2e/planner-foundations.spec.ts
 ```
 
-Start a temporary preview only inside a cleanup-managed verification scope.
-Record its exact owned terminal/process handle immediately. Use `try/finally`
+Register cleanup before the build, including build-only quality gates. Start a
+temporary preview only inside that cleanup-managed verification scope. Record
+its exact owned terminal/process handle immediately. Use `try/finally`
 or equivalent teardown to stop and await that preview and all other temporary
 verification processes, including child processes, on success, test failure,
 startup failure or interruption. When using an async terminal, terminate that
 owned terminal in the cleanup step; never substitute a port-wide kill or leave
 the preview running for the user. Confirm the owned process has exited and its
-port is released before reporting completion. Do not stop reused user-owned
-services. Build artifacts may remain in the ignored verification directory.
+port is released. Then remove the isolated output, including generated types:
+
+```sh
+mise exec -- make frontend-verify-clean
+```
+
+Cleanup is mandatory after success, build/test/startup failure and interruption;
+never leave `.next-copilot` behind, even for build-only verification. The build
+target removes partial output on build failure, but successful builds still
+require this final cleanup. Confirm the directory is absent before reporting
+completion. Never clean or modify the normal `.next` directory. Do not stop
+reused user-owned services or delete output used by another verification run.
 
 Report the preview URL/port, cleanup result and any verification not completed.
 Do not change API CORS policy to accommodate verification; reuse existing
