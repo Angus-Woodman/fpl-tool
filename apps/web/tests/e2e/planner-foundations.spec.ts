@@ -1541,3 +1541,220 @@ test("foundation loading and uninitialized plans remain read-only", async ({
   ).toBeDisabled();
   expect(server.requests).toEqual([]);
 });
+
+test("US6 real API rearrangement parity between My Team and the Planner", async ({
+  page,
+}, info) => {
+  test.setTimeout(150_000);
+  const api = process.env.PLANNER_TEST_API_URL;
+  const planId = process.env.PLANNER_TEST_PLAN_ID;
+  test.skip(!api || !planId, "Run through the guarded API browser regression");
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const cors = {
+    ...HEADERS,
+    "access-control-allow-methods": "GET,POST,PUT,OPTIONS",
+  };
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: cors });
+    const url = new URL(request.url());
+    const response = await route.fetch({
+      url: `${api}${url.pathname}${url.search}`,
+    });
+    await route
+      .fulfill({ response, headers: { ...response.headers(), ...cors } })
+      .catch((error: Error) => {
+        if (!/disposed|closed/i.test(error.message)) throw error;
+      });
+  });
+
+  type Roles = [boolean, number | null, boolean, boolean];
+  const names = Array.from({ length: 15 }, (_, index) => `P${index + 1}`);
+  const select = (name: string) =>
+    page.getByRole("button", { name: `Select ${name}`, exact: true });
+  const states = async (): Promise<Record<string, string>> =>
+    page.$$eval("article[data-selection-state]", (cards) =>
+      Object.fromEntries(
+        cards.map((card) => [
+          card.querySelector("p.font-semibold")!.textContent!.trim(),
+          card.getAttribute("data-selection-state")!,
+        ]),
+      ),
+    );
+  const targetsOf = async (name: string): Promise<string[]> => {
+    await select(name).click();
+    const marked = await states();
+    expect(marked[name]).toBe("selected");
+    await select(name).click();
+    expect(Object.values(await states()).every((s) => s === "idle")).toBe(true);
+    return Object.entries(marked)
+      .filter(([, value]) => value === "target")
+      .map(([key]) => key)
+      .sort();
+  };
+  const allTargets = async (): Promise<Record<string, string[]>> => {
+    const found: Record<string, string[]> = {};
+    for (const name of names) found[name] = await targetsOf(name);
+    return found;
+  };
+  const benchOrder = async (): Promise<string[]> =>
+    page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("h3")).find(
+        (item) => item.textContent?.trim() === "Bench",
+      )!;
+      return Array.from(
+        heading.parentElement!.querySelectorAll("article p.font-semibold"),
+      ).map((item) => item.textContent!.trim());
+    });
+  const confirmation = page.getByTestId("swap-confirmation");
+  const myTeamLineup = async (): Promise<Record<string, Roles>> => {
+    const body = await (await page.request.get(`${api}/my-team`)).json();
+    return Object.fromEntries(
+      body.players.map(
+        (player: {
+          web_name: string;
+          is_starting: boolean;
+          bench_order: number | null;
+          is_captain: boolean;
+          is_vice_captain: boolean;
+        }): [string, Roles] => [
+          player.web_name,
+          [
+            player.is_starting,
+            player.bench_order,
+            player.is_captain,
+            player.is_vice_captain,
+          ],
+        ],
+      ),
+    );
+  };
+  const planLineup = async (number: number): Promise<Record<string, Roles>> => {
+    const plan: PlanResponse = await (
+      await page.request.get(`${api}/plans/${planId}`)
+    ).json();
+    const week = plan.gameweeks.find(
+      (item) => item.gameweek_number === number,
+    )!;
+    return Object.fromEntries(
+      week.players.map((player): [string, Roles] => [
+        player.web_name,
+        [
+          player.is_starting,
+          player.bench_order,
+          player.is_captain,
+          player.is_vice_captain,
+        ],
+      ]),
+    );
+  };
+  const initial = await myTeamLineup();
+  expect(await planLineup(9)).toEqual(initial);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/my-team");
+  await expect(select("P1")).toBeVisible();
+  const mine = await allTargets();
+  await page.screenshot({
+    path: info.outputPath("us6-my-team-before.png"),
+    fullPage: true,
+  });
+
+  await page.goto(`/plans/${planId}`);
+  await page.getByLabel("Gameweek 9", { exact: true }).click();
+  await expect(select("P1")).toBeVisible();
+  const planned = await allTargets();
+  await page.screenshot({
+    path: info.outputPath("us6-planner-before.png"),
+    fullPage: true,
+  });
+
+  expect(planned).toEqual(mine);
+  expect(mine.P1).toEqual(["P12"]);
+  expect(mine.P12).toEqual(["P1"]);
+  const bench = new Set(["P12", "P13", "P14", "P15"]);
+  for (const name of names.slice(0, 11))
+    expect(mine[name].every((target) => bench.has(target))).toBe(true);
+  expect(mine.P13).toEqual(expect.arrayContaining(["P14", "P15"]));
+  expect(mine.P13).not.toContain("P12");
+  expect(mine.P14).not.toContain("P12");
+  expect(mine.P15).not.toContain("P12");
+  expect(await benchOrder()).toEqual(["P12", "P13", "P14", "P15"]);
+
+  await select("P3").click();
+  await select("P4").click();
+  await expect(select("P4")).toHaveAttribute("aria-pressed", "true");
+  await expect(select("P3")).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("button", { name: "Clear selection" }).click();
+  expect(Object.values(await states()).every((s) => s === "idle")).toBe(true);
+  expect(await planLineup(9)).toEqual(initial);
+
+  const swapOn = async (first: string, second: string, message: string) => {
+    await select(first).click();
+    await select(second).click();
+    await expect(confirmation).toHaveText(message);
+  };
+  const saved = page.getByRole("status").filter({ hasText: /^Saved$/ });
+  await swapOn("P2", "P14", "Swapped P2 with P14.");
+  await expect(saved).toBeVisible();
+  await expect.poll(async () => (await planLineup(9)).P14[2]).toBe(true);
+  await swapOn("P13", "P15", "Swapped bench order of P13 and P15.");
+  await expect.poll(async () => (await planLineup(9)).P15[1]).toBe(2);
+  expect(await benchOrder()).toEqual(["P12", "P15", "P2", "P13"]);
+  expect(await targetsOf("P12")).toEqual(["P1"]);
+  await page.screenshot({
+    path: info.outputPath("us6-planner-after.png"),
+    fullPage: true,
+  });
+
+  await page.goto("/my-team");
+  await expect(select("P1")).toBeVisible();
+  await swapOn("P2", "P14", "Swapped P2 with P14.");
+  await expect.poll(async () => (await myTeamLineup()).P14[2]).toBe(true);
+  await swapOn("P13", "P15", "Swapped bench order of P13 and P15.");
+  await expect.poll(async () => (await myTeamLineup()).P15[1]).toBe(2);
+  expect(await benchOrder()).toEqual(["P12", "P15", "P2", "P13"]);
+  expect(await targetsOf("P12")).toEqual(["P1"]);
+  await page.screenshot({
+    path: info.outputPath("us6-my-team-after.png"),
+    fullPage: true,
+  });
+
+  const mineAfter = await myTeamLineup();
+  expect(mineAfter).toEqual(await planLineup(9));
+  expect(mineAfter.P14).toEqual([true, null, true, false]);
+  expect(mineAfter.P2).toEqual([false, 3, false, false]);
+  expect(mineAfter.P3).toEqual([true, null, false, true]);
+  expect(await planLineup(8)).toEqual(initial);
+  expect(await planLineup(10)).toEqual(initial);
+
+  await page.goto(`/plans/${planId}`);
+  await page.getByLabel("Gameweek 9", { exact: true }).click();
+  await expect(select("P1")).toBeVisible();
+  expect(await benchOrder()).toEqual(["P12", "P15", "P2", "P13"]);
+  await page.getByLabel("Gameweek 10", { exact: true }).click();
+  expect(await benchOrder()).toEqual(["P12", "P13", "P14", "P15"]);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const noOverflow = () =>
+    page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
+  await select("P13").click();
+  expect((await states()).P14).toBe("target");
+  expect(await noOverflow()).toBe(true);
+  await page.screenshot({
+    path: info.outputPath("us6-planner-mobile-selected.png"),
+    fullPage: true,
+  });
+  await page.goto("/my-team");
+  await expect(select("P1")).toBeVisible();
+  await select("P13").click();
+  expect((await states()).P14).toBe("target");
+  expect(await noOverflow()).toBe(true);
+  await page.screenshot({
+    path: info.outputPath("us6-my-team-mobile-selected.png"),
+    fullPage: true,
+  });
+  expect(errors).toEqual([]);
+});

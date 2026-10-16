@@ -25,6 +25,33 @@ function buildRecommendationResponse(): MyTeamRecommendationResponse {
   };
 }
 
+type TargetPlayer = { player_id: number; position: string; is_starting: boolean };
+type ServerTarget = {
+  first_player_id: number;
+  second_player_id: number;
+  kind: "substitution" | "bench_priority";
+};
+
+/** Stand-in for the server's engine-provided targets. It models keeper parity and bench
+ * priority only; formation legality is the engine's job, so shape-specific cases pass explicit lists. */
+function serverTargets(players: TargetPlayer[]): ServerTarget[] {
+  const targets: ServerTarget[] = [];
+  players.forEach((first, index) => {
+    for (const second of players.slice(index + 1)) {
+      if (first.is_starting && second.is_starting) continue;
+      const keepers = [first, second].filter((player) => player.position === "GK").length;
+      if (first.is_starting !== second.is_starting && keepers === 1) continue;
+      if (!first.is_starting && !second.is_starting && keepers > 0) continue;
+      targets.push({
+        first_player_id: first.player_id,
+        second_player_id: second.player_id,
+        kind: first.is_starting !== second.is_starting ? "substitution" : "bench_priority",
+      });
+    }
+  });
+  return targets;
+}
+
 function buildFullSquadResponse() {
   const players = [
     { player_id: 1, web_name: "GK One", team_short_name: "ARS", position: "GK", current_price: 4.0, is_starting: true, bench_order: null, is_captain: false, is_vice_captain: false },
@@ -53,6 +80,7 @@ function buildFullSquadResponse() {
     bench_projection_totals: { horizon_1: 2.0, horizon_3: 4.0, horizon_5: 6.0 },
     captain_adjusted_projection_totals: { horizon_1: 9.0, horizon_3: 22.0, horizon_5: 31.0 },
     gameweek_numbers: [2, 3, 4],
+    legal_rearrangements: serverTargets(players),
     players: players.map((player) => ({
       ...player,
       first_name: player.web_name,
@@ -99,16 +127,14 @@ type PutBody = {
 /** Same 15 players, but only `starterIds` start; the rest take bench orders 1-4 in id order. */
 function withStarters(squad: Squad, starterIds: number[]): Squad {
   let benchOrder = 0;
-  return {
-    ...squad,
-    players: squad.players.map((player) => {
-      const isStarting = starterIds.includes(player.player_id);
-      if (!isStarting) {
-        benchOrder += 1;
-      }
-      return { ...player, is_starting: isStarting, bench_order: isStarting ? null : benchOrder };
-    }),
-  };
+  const players = squad.players.map((player) => {
+    const isStarting = starterIds.includes(player.player_id);
+    if (!isStarting) {
+      benchOrder += 1;
+    }
+    return { ...player, is_starting: isStarting, bench_order: isStarting ? null : benchOrder };
+  });
+  return { ...squad, players, legal_rearrangements: serverTargets(players) };
 }
 
 type BackendOptions = {
@@ -147,6 +173,7 @@ function installBackend(options: BackendOptions = {}) {
           player.is_vice_captain = selection.is_vice_captain;
         }
       }
+      squad.legal_rearrangements = serverTargets(squad.players);
       return { ok: true, json: async () => squad } as Response;
     }
     if (url.endsWith("/my-team")) {
@@ -327,9 +354,9 @@ describe("MyTeamBoard", () => {
 
     it("says so when the selected player has no legal swap targets", async () => {
       const squad = buildFullSquadResponse();
-      // Unusual shape: no bench goalkeeper, so the starting keeper has nobody to swap with.
-      squad.players = squad.players.map((player) =>
-        player.player_id === 2 ? { ...player, position: "MID" } : player,
+      // The server lists nothing for the starting keeper, so the board offers nothing.
+      squad.legal_rearrangements = squad.legal_rearrangements.filter(
+        (pair) => pair.first_player_id !== 1 && pair.second_player_id !== 1,
       );
       installBackend({ squad });
       await renderBoard();
@@ -401,15 +428,48 @@ describe("MyTeamBoard", () => {
       expect(selectButton("DEF One")).not.toBeDisabled();
     });
 
-    it("offers a swap that leads to a 5-2-3 formation", async () => {
-      // Starting 5-3-2: swapping MID One for FWD Three gives 5-2-3, legal under the domain rule (MID 2-5).
+    it("offers exactly the pairs the server lists, with no formation rule of its own", async () => {
+      const squad = buildFullSquadResponse();
+      // A pair a client keeper/formation rule would reject, and none for the starting keeper.
+      squad.legal_rearrangements = [
+        { first_player_id: 3, second_player_id: 2, kind: "substitution" },
+      ];
+      const { putBodies } = installBackend({ squad });
+      await renderBoard();
+
+      fireEvent.click(selectButton("DEF One"));
+      expect(selectionState("GK Two")).toBe("target");
+      expect(selectionState("DEF Five")).toBe("not-target");
+      expect(selectionState("MID Five")).toBe("not-target");
+
+      fireEvent.click(selectButton("GK One"));
+      expect(screen.getByText("No valid swap targets for GK One.")).toBeInTheDocument();
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("GK Two"));
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      expect(selectionFor(putBodies[0], 3)).toMatchObject({ is_starting: false, bench_order: 1 });
+      expect(selectionFor(putBodies[0], 2)).toMatchObject({ is_starting: true, bench_order: null });
+    });
+
+    it("sends a swap for a server-listed 5-2-3 result without second-guessing it", async () => {
       const squad = withStarters(buildFullSquadResponse(), [1, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14]);
-      installBackend({ squad });
+      squad.legal_rearrangements = [
+        { first_player_id: 8, second_player_id: 15, kind: "substitution" },
+      ];
+      const { putBodies } = installBackend({ squad });
       await renderBoard();
 
       fireEvent.click(selectButton("MID One"));
-
       expect(selectionState("FWD Three")).toBe("target");
+      fireEvent.click(selectButton("FWD Three"));
+
+      await waitFor(() => {
+        expect(putBodies).toHaveLength(1);
+      });
+      expect(selectionFor(putBodies[0], 15)).toMatchObject({ is_starting: true });
     });
 
     it("disables selection while an optimiser mode is showing and restores it for None", async () => {
@@ -615,6 +675,46 @@ describe("MyTeamBoard", () => {
       // GK Two is still the bench goalkeeper (bench 1); GK One still starts.
       expect(screen.getByText("AVL · GK · Bench 1")).toBeInTheDocument();
       expect(screen.queryByText("ARS · GK · Bench 1")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("bench order", () => {
+    function benchCardNames(): string[] {
+      const bench = screen.getByRole("heading", { name: "Bench" }).parentElement as HTMLElement;
+      return within(bench)
+        .getAllByRole("button", { name: /^Select / })
+        .map((button) => button.getAttribute("aria-label")?.replace("Select ", "") ?? "");
+    }
+
+    it("lists substitutes in priority order, not grouped by position", async () => {
+      const squad = buildFullSquadResponse();
+      // Priority: GK Two, MID Five, FWD Three, DEF Five (position order would be GK, DEF, MID, FWD).
+      const orders: Record<number, number> = { 2: 1, 12: 2, 15: 3, 7: 4 };
+      for (const player of squad.players) {
+        if (player.player_id in orders) player.bench_order = orders[player.player_id];
+      }
+      installBackend({ squad });
+
+      await renderBoard();
+
+      expect(benchCardNames()).toEqual(["GK Two", "MID Five", "FWD Three", "DEF Five"]);
+      expect(screen.getByText("SOU · MID · Bench 2")).toBeInTheDocument();
+    });
+
+    it("re-orders the displayed bench after a priority swap is saved", async () => {
+      installBackend();
+      await renderBoard();
+      expect(benchCardNames()).toEqual(["GK Two", "DEF Five", "MID Five", "FWD Three"]);
+
+      fireEvent.click(selectButton("DEF Five"));
+      fireEvent.click(selectButton("FWD Three"));
+
+      await waitFor(() => {
+        expect(benchCardNames()).toEqual(["GK Two", "FWD Three", "MID Five", "DEF Five"]);
+      });
+      expect(screen.getByTestId("swap-confirmation")).toHaveTextContent(
+        "Swapped bench order of DEF Five and FWD Three.",
+      );
     });
   });
 

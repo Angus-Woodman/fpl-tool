@@ -1433,15 +1433,351 @@ describe("PlanBoard", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("offers only authoritative server-provided swap targets", async () => {
-    mockFetch(buildPlan([{ gameweek_number: 1 }]));
+  describe("direct rearrangement", () => {
+    function selectButton(name: string): HTMLElement {
+      return screen.getByRole("button", { name: `Select ${name}` });
+    }
 
-    render(<PlanBoard planId={1} />);
-    fireEvent.click(await screen.findByLabelText("Swap GK One with bench"));
-    expect(
-      screen.queryByLabelText("Swap GK One for DEF Five"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Swap GK One for GK Two")).toBeInTheDocument();
+    function selectionState(name: string): string | null | undefined {
+      return selectButton(name)
+        .closest("article")
+        ?.getAttribute("data-selection-state");
+    }
+
+    function benchNames(): string[] {
+      const bench = screen.getByRole("heading", { name: "Bench" })
+        .parentElement as HTMLElement;
+      return within(bench)
+        .getAllByRole("button", { name: /^Select / })
+        .map(
+          (button) =>
+            button.getAttribute("aria-label")?.replace("Select ", "") ?? "",
+        );
+    }
+
+    function planWithTargets(
+      targets: PlanResponse["gameweeks"][number]["legal_rearrangements"],
+    ): PlanResponse {
+      const plan = buildPlan([{ gameweek_number: 1 }]);
+      plan.gameweeks[0].legal_rearrangements = targets;
+      return plan;
+    }
+
+    const targets: PlanResponse["gameweeks"][number]["legal_rearrangements"] = [
+      { first_player_id: 1, second_player_id: 2, kind: "substitution" },
+      { first_player_id: 3, second_player_id: 7, kind: "substitution" },
+      { first_player_id: 7, second_player_id: 12, kind: "bench_priority" },
+    ];
+
+    it("replaces the dropdown swap with a Select control on every starter and bench card", async () => {
+      mockFetch(planWithTargets(targets));
+
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      expect(screen.getAllByRole("button", { name: /^Select / })).toHaveLength(
+        15,
+      );
+      expect(
+        screen.queryByRole("button", { name: /^Swap .* with bench$/ }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /^Swap .* for / }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("Swap With Bench")).not.toBeInTheDocument();
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("marks only the server's targets when a starter is selected", async () => {
+      mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+
+      expect(selectButton("DEF One")).toHaveAttribute("aria-pressed", "true");
+      expect(selectionState("DEF One")).toBe("selected");
+      expect(selectionState("DEF Five")).toBe("target");
+      expect(selectionState("MID Five")).toBe("not-target");
+      expect(selectionState("GK Two")).toBe("not-target");
+      expect(selectionState("MID One")).toBe("not-target");
+    });
+
+    it("marks starters and bench-priority targets when a substitute is selected first", async () => {
+      mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF Five"));
+
+      expect(selectionState("DEF One")).toBe("target");
+      expect(selectionState("MID Five")).toBe("target");
+      expect(selectionState("GK Two")).toBe("not-target");
+      expect(selectionState("GK One")).toBe("not-target");
+    });
+
+    it("never offers the bench goalkeeper against outfield substitutes unless the server lists it", async () => {
+      mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("GK Two"));
+
+      expect(selectionState("GK One")).toBe("target");
+      for (const name of ["DEF Five", "MID Five", "FWD Three"]) {
+        expect(selectionState(name)).toBe("not-target");
+      }
+    });
+
+    it("replaces or cancels a selection without saving anything", async () => {
+      const saveCalls = mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(selectButton("DEF One"));
+      expect(selectButton("DEF One")).toHaveAttribute("aria-pressed", "true");
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
+
+      fireEvent.click(selectButton("DEF One"));
+      expect(selectButton("DEF One")).toHaveAttribute("aria-pressed", "false");
+
+      fireEvent.click(selectButton("GK One"));
+      fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
+      expect(selectButton("GK One")).toHaveAttribute("aria-pressed", "false");
+      expect(
+        screen.queryByRole("button", { name: "Clear selection" }),
+      ).not.toBeInTheDocument();
+      expect(saveCalls).toHaveLength(0);
+    });
+
+    it("says so when the selected player has no legal targets", async () => {
+      mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("MID One"));
+
+      expect(
+        screen.getByText("No valid swap targets for MID One."),
+      ).toBeInTheDocument();
+    });
+
+    it("sends one swap intent for the shown gameweek on the second selection and announces it", async () => {
+      const saveCalls = mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("DEF Five"));
+
+      await waitFor(() => expect(saveCalls).toHaveLength(1));
+      const body = saveCalls[0].body as {
+        intents: unknown[];
+        players?: unknown;
+      };
+      expect(body.intents).toEqual([
+        {
+          kind: "swap_lineup_players",
+          gameweek_number: 1,
+          first_player_id: 3,
+          second_player_id: 7,
+        },
+      ]);
+      expect(body.players).toBeUndefined();
+      const announcement = screen.getByTestId("swap-confirmation");
+      expect(announcement).toHaveAttribute("aria-live", "polite");
+      await waitFor(() =>
+        expect(announcement).toHaveTextContent(
+          "Swapped DEF One with DEF Five.",
+        ),
+      );
+      expect(selectButton("DEF One")).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("sends a bench-priority swap and words the announcement for it", async () => {
+      const saveCalls = mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("MID Five"));
+      fireEvent.click(selectButton("DEF Five"));
+
+      await waitFor(() => expect(saveCalls).toHaveLength(1));
+      expect((saveCalls[0].body as { intents: unknown[] }).intents).toEqual([
+        {
+          kind: "swap_lineup_players",
+          gameweek_number: 1,
+          first_player_id: 12,
+          second_player_id: 7,
+        },
+      ]);
+      await waitFor(() =>
+        expect(screen.getByTestId("swap-confirmation")).toHaveTextContent(
+          "Swapped bench order of MID Five and DEF Five.",
+        ),
+      );
+    });
+
+    it("shows the bench in substitute-priority order, not grouped by position", async () => {
+      const plan = planWithTargets(targets);
+      const orders: Record<number, number> = { 2: 1, 12: 2, 15: 3, 7: 4 };
+      for (const player of plan.gameweeks[0].players) {
+        if (player.player_id in orders)
+          player.bench_order = orders[player.player_id];
+      }
+      mockFetch(plan);
+
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      expect(benchNames()).toEqual([
+        "GK Two",
+        "MID Five",
+        "FWD Three",
+        "DEF Five",
+      ]);
+      expect(
+        screen.getByText(/ARS · MID · 5\.0 · Bench 2/),
+      ).toBeInTheDocument();
+    });
+
+    it("shows the reordered bench once the swap is acknowledged", async () => {
+      const plan = planWithTargets(targets);
+      const saved = structuredClone(plan);
+      for (const player of saved.gameweeks[0].players) {
+        if (player.player_id === 7) player.bench_order = 3;
+        if (player.player_id === 12) player.bench_order = 2;
+      }
+      mockFetch(plan, saved);
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+      expect(benchNames()).toEqual([
+        "GK Two",
+        "DEF Five",
+        "MID Five",
+        "FWD Three",
+      ]);
+
+      fireEvent.click(selectButton("MID Five"));
+      fireEvent.click(selectButton("DEF Five"));
+
+      await waitFor(() =>
+        expect(benchNames()).toEqual([
+          "GK Two",
+          "MID Five",
+          "DEF Five",
+          "FWD Three",
+        ]),
+      );
+    });
+
+    it("clears the selection when another gameweek is shown", async () => {
+      const plan = buildPlan([{ gameweek_number: 1 }, { gameweek_number: 2 }]);
+      for (const week of plan.gameweeks) week.legal_rearrangements = targets;
+      mockFetch(plan);
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(await screen.findByLabelText("Gameweek 2"));
+
+      await waitFor(() =>
+        expect(selectButton("DEF One")).toHaveAttribute(
+          "aria-pressed",
+          "false",
+        ),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Clear selection" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("drops a selection whose player has left the gameweek instead of dimming every card", async () => {
+      const plan = planWithTargets(targets);
+      const saved = structuredClone(plan);
+      saved.gameweeks[0].players = saved.gameweeks[0].players.filter(
+        (player) => player.player_id !== 3,
+      );
+      mockFetch(plan, saved);
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+      expect(selectionState("DEF Two")).toBe("not-target");
+      fireEvent.click(screen.getByLabelText("Triple Captain"));
+
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "Select DEF One" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(selectionState("DEF Two")).toBe("idle");
+      expect(selectionState("GK One")).toBe("idle");
+      expect(
+        screen.queryByRole("button", { name: "Clear selection" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not offer selection while a save is in flight", async () => {
+      const gate = deferred<void>();
+      const plan = planWithTargets(targets);
+      vi.spyOn(global, "fetch").mockImplementation(async (_input, init) => {
+        if (init?.method !== "POST") {
+          return new Response(JSON.stringify(plan), { status: 200 });
+        }
+        const envelope = JSON.parse(String(init.body)) as Envelope;
+        await gate.promise;
+        return new Response(
+          JSON.stringify({
+            status: "committed",
+            mutation_id: envelope.mutation_id,
+            committed_revision: envelope.expected_revision + 1,
+            plan: { ...plan, revision: envelope.expected_revision + 1 },
+            candidate: null,
+          }),
+          { status: 200 },
+        );
+      });
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("DEF Five"));
+
+      await waitFor(() => expect(selectButton("DEF One")).toBeDisabled());
+      expect(selectButton("GK One")).toBeDisabled();
+
+      gate.resolve();
+      await waitFor(() => expect(selectButton("GK One")).not.toBeDisabled());
+    });
+
+    it("shows the rule explanation and no confirmation when the server rejects a swap", async () => {
+      const plan = planWithTargets(targets);
+      vi.spyOn(global, "fetch").mockImplementation(async (_input, init) =>
+        init?.method === "POST"
+          ? new Response(
+              JSON.stringify({
+                detail: {
+                  code: "formation",
+                  message: "Starting XI must contain between 3 and 5 DEF",
+                },
+              }),
+              { status: 422 },
+            )
+          : new Response(JSON.stringify(plan), { status: 200 }),
+      );
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("DEF Five"));
+
+      expect(
+        await screen.findByText("Starting XI must contain between 3 and 5 DEF"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("swap-confirmation")).toBeEmptyDOMElement();
+    });
   });
 
   it("automatically sends a bound transfer decision, never a membership snapshot", async () => {

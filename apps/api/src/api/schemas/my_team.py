@@ -1,3 +1,4 @@
+from api.schemas.lineup import LineupRearrangementResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -63,6 +64,7 @@ class CurrentSquadResponse(BaseModel):
     bench_projection_totals: HorizonProjectionTotalsResponse | None = None
     captain_adjusted_projection_totals: HorizonProjectionTotalsResponse | None = None
     gameweek_numbers: list[int] = Field(default_factory=list)
+    legal_rearrangements: list[LineupRearrangementResponse] = Field(default_factory=list)
     players: list[CurrentSquadPlayerResponse]
 
 

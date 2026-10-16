@@ -6,6 +6,7 @@ from typing import ClassVar
 import pytest
 from fpl_engine.domain import PlayerPosition
 from fpl_engine.rules import (
+    STARTING_POSITION_LIMITS,
     Chip,
     RuleViolationError,
     SeasonHalf,
@@ -288,6 +289,173 @@ class TestSquadValidation:
         with pytest.raises(RuleViolationError) as error:
             validate_squad(squad)
         assert error.value.code == "formation"
+
+
+class TestRearrangement:
+    """Shared starter/bench rearrangement used by My Team and the Planner (FR-043 to FR-045)."""
+
+    @staticmethod
+    def pairs(slots: list[SquadSlot]) -> set[tuple[frozenset[int], str]]:
+        from fpl_engine.rules import legal_rearrangements
+
+        return {
+            (frozenset({choice.first_player_id, choice.second_player_id}), choice.kind)
+            for choice in legal_rearrangements(slots)
+        }
+
+    @staticmethod
+    def by_id(slots: object) -> dict[int, SquadSlot]:
+        return {slot.player_id: slot for slot in slots}  # type: ignore[attr-defined]
+
+    def test_offers_each_legal_pair_once_with_its_kind(self) -> None:
+        from fpl_engine.rules import legal_rearrangements
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        choices = legal_rearrangements(slots)
+        assert len(choices) == len(
+            {frozenset({c.first_player_id, c.second_player_id}) for c in choices}
+        )
+        found = self.pairs(slots)
+        # 4-4-2 XI, bench GK/DEF/MID/FWD: GK swaps with GK only; outfield starters swap with
+        # outfield subs when the formation survives; only the three outfield subs reorder.
+        assert (frozenset({1, 12}), "substitution") in found
+        assert (frozenset({2, 13}), "substitution") in found
+        assert (frozenset({2, 14}), "substitution") in found
+        assert (frozenset({13, 14}), "bench_priority") in found
+        assert (frozenset({13, 15}), "bench_priority") in found
+        assert (frozenset({14, 15}), "bench_priority") in found
+
+    def test_goalkeeper_is_never_a_target_for_outfield_players_or_bench_priority(self) -> None:
+        found = self.pairs(build_squad(captain_id=2, vice_captain_id=3))
+        keepers = {1, 12}
+        for players, kind in found:
+            if players & keepers:
+                assert players == keepers
+                assert kind == "substitution"
+        assert not any(kind == "bench_priority" and players & keepers for players, kind in found)
+
+    def test_formation_limits_filter_targets(self) -> None:
+        # Three defenders in the XI: only a defender may replace one of them.
+        squad = build_squad(captain_id=2, vice_captain_id=3)
+        squad[4] = replace(squad[4], is_starting=False, bench_order=3)
+        squad[13] = replace(squad[13], is_starting=True, bench_order=None)
+        validate_squad(squad)
+        found = self.pairs(squad)
+        assert (frozenset({2, 13}), "substitution") in found
+        assert (frozenset({2, 5}), "substitution") in found
+        assert (frozenset({2, 15}), "substitution") not in found
+        assert (frozenset({10, 15}), "substitution") in found
+
+    def test_starter_with_bench_swap_moves_roles_and_captaincy_follows_the_slot(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        result = self.by_id(rearrange_lineup(slots, 2, 14))
+        assert (result[14].is_starting, result[14].bench_order) == (True, None)
+        assert (result[14].is_captain, result[14].is_vice_captain) == (True, False)
+        assert (result[2].is_starting, result[2].bench_order) == (False, 3)
+        assert (result[2].is_captain, result[2].is_vice_captain) == (False, False)
+        untouched = {
+            player_id: slot
+            for player_id, slot in self.by_id(slots).items()
+            if player_id not in {2, 14}
+        }
+        assert all(result[player_id] == slot for player_id, slot in untouched.items())
+
+    def test_vice_captain_is_inherited_in_the_same_way(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        result = self.by_id(rearrange_lineup(slots, 15, 3))
+        assert (result[15].is_starting, result[15].is_vice_captain, result[15].is_captain) == (
+            True,
+            True,
+            False,
+        )
+        assert (result[3].is_starting, result[3].bench_order, result[3].is_vice_captain) == (
+            False,
+            4,
+            False,
+        )
+
+    def test_argument_order_does_not_change_the_result(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        assert rearrange_lineup(slots, 2, 14) == rearrange_lineup(slots, 14, 2)
+        assert rearrange_lineup(slots, 13, 15) == rearrange_lineup(slots, 15, 13)
+
+    def test_outfield_bench_priority_swaps_only_the_bench_order(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        result = self.by_id(rearrange_lineup(slots, 13, 15))
+        assert (result[13].bench_order, result[15].bench_order) == (4, 2)
+        assert (result[14].bench_order, result[12].bench_order) == (3, 1)
+        assert all(
+            result[player_id] == slot
+            for player_id, slot in self.by_id(slots).items()
+            if player_id not in {13, 15}
+        )
+
+    @pytest.mark.parametrize("pair", [(12, 13), (14, 12), (12, 15)])
+    def test_bench_goalkeeper_cannot_reorder_with_outfield_substitutes(self, pair) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        with pytest.raises(RuleViolationError) as error:
+            rearrange_lineup(build_squad(), *pair)
+        assert error.value.code == "invalid_swap"
+        assert "Goalkeeper" in str(error.value)
+
+    def test_two_starters_the_same_player_and_unknown_players_are_rejected(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad()
+        for pair in [(2, 3), (2, 2), (2, 99), (99, 98)]:
+            with pytest.raises(RuleViolationError) as error:
+                rearrange_lineup(slots, *pair)
+            assert error.value.code == "invalid_swap"
+
+    def test_illegal_formation_swap_is_rejected_by_the_squad_rules(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        with pytest.raises(RuleViolationError) as error:
+            rearrange_lineup(build_squad(captain_id=2, vice_captain_id=3), 5, 12)
+        assert error.value.code == "formation"
+
+    def test_enumeration_and_execution_always_agree(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        offered = {pair for pair, _ in self.pairs(slots)}
+        for first in slots:
+            for second in slots:
+                if first.player_id >= second.player_id:
+                    continue
+                pair = frozenset({first.player_id, second.player_id})
+                try:
+                    result = rearrange_lineup(slots, first.player_id, second.player_id)
+                except RuleViolationError:
+                    assert pair not in offered
+                else:
+                    assert pair in offered
+                    validate_squad(result)
+
+    def test_inputs_are_not_mutated_and_invalid_squads_offer_nothing(self) -> None:
+        from fpl_engine.rules import legal_rearrangements
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        before = list(slots)
+        legal_rearrangements(slots)
+        assert slots == before
+        assert legal_rearrangements([replace(slot, team_id=1) for slot in slots]) == ()
+
+    def test_formation_limits_are_the_single_authority(self, monkeypatch) -> None:
+        # Tightening the shared limit must change the offered targets; no copy exists elsewhere.
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        assert (frozenset({2, 14}), "substitution") in self.pairs(slots)
+        monkeypatch.setitem(STARTING_POSITION_LIMITS, PlayerPosition.DEFENDER, (4, 4))
+        assert (frozenset({2, 14}), "substitution") not in self.pairs(slots)
 
 
 class TestChips:

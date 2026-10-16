@@ -1,6 +1,7 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
+from api.schemas.lineup import LineupRearrangementResponse
 from fpl_engine.planning.models import Diagnostic, LineupRole, PurchaseProvenance
 from fpl_engine.rules import Chip
 from fpl_engine.rules.chips import ChipAvailability
@@ -253,12 +254,6 @@ class GameweekAccountingResponse(BaseModel):
     unlimited_transfers: bool
     transfers_made: int | None = Field(ge=0)
     points_hit: int | None = Field(ge=0)
-
-
-class LineupRearrangementResponse(BaseModel):
-    first_player_id: int
-    second_player_id: int
-    kind: Literal["substitution", "bench_priority"]
 
 
 class PlanGameweekResponse(BaseModel):

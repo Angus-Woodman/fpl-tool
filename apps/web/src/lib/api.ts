@@ -1,3 +1,5 @@
+import type { LegalRearrangement } from "@/lib/squad-rearrangement";
+
 export type PlayerItem = {
   id: number;
   web_name: string;
@@ -103,6 +105,7 @@ export type MyTeamResponse = {
   bench_projection_totals: HorizonProjectionTotals | null;
   captain_adjusted_projection_totals: HorizonProjectionTotals | null;
   gameweek_numbers: number[];
+  legal_rearrangements: LegalRearrangement[];
   players: MyTeamPlayerItem[];
 };
 
@@ -551,11 +554,7 @@ export type PlanGameweek = {
     points_hit: number | null;
   } | null;
   chip_availability: Partial<Record<PlanChip, PlanChipAvailability>>;
-  legal_rearrangements: {
-    first_player_id: number;
-    second_player_id: number;
-    kind: "substitution" | "bench_priority";
-  }[];
+  legal_rearrangements: LegalRearrangement[];
   evaluation_status: "complete" | "blocked";
 };
 

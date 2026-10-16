@@ -1,6 +1,6 @@
 # Planner Foundations Validation Guide
 
-This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) and T054-T065 (US4 Official Selling Prices And Financial Resolution) and T066-T075 (US5 Persistence And Navigation Safety) are implemented and verified as recorded here. US6 and later stories are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) and T054-T065 (US4 Official Selling Prices And Financial Resolution) and T066-T075 (US5 Persistence And Navigation Safety) and T076-T083 (US6 Rearrange XI And Bench Like My Team) are implemented and verified as recorded here. Phase 9 polish and later work are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
 
 ## Prerequisites And Safety
 
@@ -664,3 +664,90 @@ and T072 pin existing behaviour.
 - The guard covers `beforeunload` and link clicks, not Next router
   back/forward or programmatic navigation.
 - No cross-tab merge; no unload-time persistence is promised.
+
+## Increment 6: US6 Evidence (2026-10-15)
+
+Scope: T076-T083 only. T084 and later tasks remain unchecked. Both
+requirements-quality checklists passed before work (35/35 and 16/16) and were
+not edited. No extension hooks are registered.
+
+### Behaviour Evidence (SC-008 / SC-009)
+
+- One rule authority: `fpl_engine.rules.squad` now owns `rearrange_lineup` and
+  `legal_rearrangements`. The Planner's swap intent and its `legal_rearrangements`
+  field delegate to them (the former duplicate in `planning/mutations.py` is
+  gone), and My Team's GET and PUT responses carry the same targets through
+  the additive `legal_rearrangements` field. Tightening the shared
+  `STARTING_POSITION_LIMITS` changes the targets on both screens.
+- Same squad, same targets, same result: with the squad of the guarded plan
+  (4-4-2, captain P2, vice P3, bench GK/DEF/MID/FWD) the real browser offered
+  identical targets for all 15 players on My Team and on Planner GW9
+  (`planned == mine`). The bench goalkeeper's only target was the starting
+  keeper and vice versa; no starter was ever offered against another starter.
+- Swaps: P2 (captain) with P14 gave P14 the armband and P2 bench order 3 on
+  both screens; P13 with P15 swapped only bench order. Both screens announced
+  "Swapped P2 with P14." and "Swapped bench order of P13 and P15." and the
+  resulting lineups were identical through each API (`My Team == Planner GW9`).
+- Per-gameweek isolation: after the Planner swaps in GW9, GW8 and GW10 lineups
+  were unchanged through the API and SQL (canonical revision 2); the Planner
+  edits also did not alter the saved My Team squad until My Team made its own
+  identical swaps. Pages keep independent state.
+- Autosave: the Planner issues one `swap_lineup_players` intent for the shown
+  gameweek on the second selection, never a lineup snapshot, and shows
+  "Saved" without any other action. My Team keeps its whole-lineup PUT with
+  the saved bank and free transfers unchanged.
+- Direct requests (SC-009): through HTTP, an illegal formation swap (5 with the
+  bench goalkeeper), goalkeeper-against-outfield reorders, starter-with-starter,
+  the same player twice and an unknown player all return 422 with the engine's
+  code and message and write no SQL rows; the formation message equals the one
+  My Team's save rejects the same lineup with.
+- Bench order defect found and fixed: My Team's `Bench` grouped substitutes by
+  position, so the visual order did not match substitute priority. Both screens
+  now render the bench strictly in priority order (tests and browser).
+- Stale selection defect found by review and fixed (test first): a Planner
+  selection whose player left the gameweek dimmed every card with no Clear
+  control; the selection is now derived from the players actually shown.
+- Presentation: shared `SquadPitch`/`Bench`/`SquadPlayerCard` plus
+  `lib/squad-rearrangement.ts` and `rearrangement-controls.tsx`; the Planner's
+  dropdown swap and My Team's client-side formation/target rules were
+  removed. My Team still owns the optimiser's own formation table (a
+  hypothetical-lineup display, not a legality rule).
+
+### Verification Run
+
+- Root `make lint typecheck test`: ruff and ESLint clean, mypy 34 and 80 source
+  files clean, engine 412 passed, API 308 passed and 167 skipped without the
+  guarded database, web 181 passed in 13 files.
+- New/changed automated cases: engine 26 (15 shared rules, 11 Planner), API 5
+  My Team service/router plus 7 guarded HTTP, web 7 helper + 14 Planner
+  rearrangement + 4 My Team cases (and updated existing My Team fixtures).
+- Guarded (isolated `fpl_test`, owned preview on 3101): the entire API suite,
+  475 collected, passed including six real frontend to API to PostgreSQL
+  journeys (horizon, chips, transfers, pricing, persistence, rearrangement);
+  8 fixture Planner journeys passed; 7 My Team stub and smoke specs passed.
+  Cleanup confirmed: preview exited, port 3101 free, `.next-copilot` absent.
+  User-owned listeners on 3000, 3100 and 8000 were not used.
+- Mutation checks (each failed the suite, files restored): no keeper
+  exclusion, no captaincy inheritance, no legality validation (engine); every
+  player a target, reversed swap order, unsorted bench, announcement despite
+  rejection, selection allowed while saving (web); every player a target also
+  failed the real browser journey.
+- Rendered desktop (1440) and mobile (390) screenshots of both screens showed
+  selected (green) and valid-target (blue) states, dimmed non-targets, the bench
+  in priority order and no horizontal overflow (asserted in the journey).
+
+### Known Limits And Unverified
+
+- `validate_squad` was deliberately not changed, so a full-lineup PUT or a
+  persisted lineup can still hold the bench goalkeeper outside bench slot 1;
+  only the rearrangement operation refuses to move it against outfield
+  substitutes. Tightening that would affect persisted data and was not in scope.
+- My Team still persists the lineup composed in the browser (inherited
+  captaincy included) validated by the engine, so result parity there is shown
+  by tests and the browser journey rather than by a server-computed swap.
+- The Planner shows the swapped lineup after the server acknowledges it (no
+  optimistic lineup), and the "Swapped ..." announcement is withheld whenever
+  the save status is unsaved, conflicting, missing or rejected.
+- Keyboard-only traversal and screen-reader output were reviewed by markup
+  (buttons with `aria-pressed`, a polite live region) but not with a screen
+  reader.

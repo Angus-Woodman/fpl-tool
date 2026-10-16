@@ -810,6 +810,121 @@ def test_legal_rearrangements_are_executable_domain_intents() -> None:
         ).evaluation.diagnostics
 
 
+def _planner_pairs(plan: Plan, gameweek: int) -> set[tuple[frozenset[int], str]]:
+    from fpl_engine.planning.mutations import legal_rearrangements
+
+    return {
+        (frozenset({int(c["first_player_id"]), int(c["second_player_id"])}), str(c["kind"]))
+        for c in legal_rearrangements(plan, gameweek, metadata())
+    }
+
+
+def _evaluated_squad(plan: Plan, gameweek: int) -> list[SquadSlot]:
+    from fpl_engine.planning.evaluate import evaluate_plan, squad_slots
+
+    week = next(
+        item
+        for item in evaluate_plan(plan, metadata()).gameweeks
+        if item.gameweek_number == gameweek
+    )
+    assert week.players is not None
+    return list(squad_slots(week.players, week.lineup, metadata()))
+
+
+def test_us6_planner_targets_equal_the_shared_my_team_targets_for_the_same_squad() -> None:
+    from fpl_engine.rules import legal_rearrangements as shared_targets
+
+    plan = build_plan()
+    expected = {
+        (frozenset({c.first_player_id, c.second_player_id}), c.kind)
+        for c in shared_targets(_evaluated_squad(plan, 8))
+    }
+    assert expected
+    assert _planner_pairs(plan, 8) == expected
+
+
+@pytest.mark.parametrize("pair", [(2, 13), (2, 14), (14, 15), (1, 12), (3, 15)])
+def test_us6_planner_swap_result_equals_the_shared_my_team_result(pair: tuple[int, int]) -> None:
+    from fpl_engine.planning.models import SwapLineupPlayers
+    from fpl_engine.planning.mutations import apply_intents
+    from fpl_engine.rules import rearrange_lineup
+
+    plan = build_plan()
+    expected = {slot.player_id: slot for slot in rearrange_lineup(_evaluated_squad(plan, 8), *pair)}
+    changed = apply_intents(plan, (SwapLineupPlayers(8, *pair),), metadata()).plan
+    assert {slot.player_id: slot for slot in _evaluated_squad(changed, 8)} == expected
+
+
+def test_us6_planner_has_no_private_formation_definition(monkeypatch) -> None:
+    from fpl_engine.planning.models import SwapLineupPlayers
+    from fpl_engine.planning.mutations import apply_intents
+    from fpl_engine.rules import STARTING_POSITION_LIMITS
+
+    plan = build_plan()
+    assert (frozenset({2, 14}), "substitution") in _planner_pairs(plan, 8)
+    monkeypatch.setitem(STARTING_POSITION_LIMITS, PlayerPosition.DEFENDER, (4, 4))
+    assert (frozenset({2, 14}), "substitution") not in _planner_pairs(plan, 8)
+    with pytest.raises(RuleViolationError) as error:
+        apply_intents(plan, (SwapLineupPlayers(8, 2, 14),), metadata())
+    assert error.value.code == "formation"
+
+
+def test_us6_captaincy_follows_my_team_and_roles_stay_local_to_the_gameweek() -> None:
+    from fpl_engine.planning.models import SwapLineupPlayers
+    from fpl_engine.planning.mutations import apply_intents
+
+    plan = build_plan()
+    changed = apply_intents(plan, (SwapLineupPlayers(8, 2, 14),), metadata()).plan
+    roles = {role.slot_id: role for role in changed.gameweeks[0].lineup}
+    assert (roles[identity(14)].is_starting, roles[identity(14)].is_captain) == (True, True)
+    assert (roles[identity(2)].is_starting, roles[identity(2)].bench_order) == (False, 3)
+    assert not roles[identity(2)].is_captain
+    assert changed.gameweeks[1:] == plan.gameweeks[1:]
+    assert changed.boundary == plan.boundary
+
+
+def test_us6_bench_priority_swap_is_local_and_never_touches_the_goalkeeper() -> None:
+    from fpl_engine.planning.models import SwapLineupPlayers
+    from fpl_engine.planning.mutations import apply_intents
+
+    plan = build_plan()
+    changed = apply_intents(plan, (SwapLineupPlayers(9, 13, 15),), metadata()).plan
+    roles = {role.slot_id: role for role in changed.gameweeks[1].lineup}
+    assert (roles[identity(13)].bench_order, roles[identity(15)].bench_order) == (4, 2)
+    assert roles[identity(12)].bench_order == 1
+    assert changed.gameweeks[0] == plan.gameweeks[0]
+    for pair in [(12, 13), (14, 12)]:
+        with pytest.raises(RuleViolationError) as error:
+            apply_intents(plan, (SwapLineupPlayers(9, *pair),), metadata())
+        assert error.value.code == "invalid_swap"
+
+
+def test_us6_illegal_direct_swaps_are_rejected_and_leave_the_plan_unchanged() -> None:
+    from fpl_engine.planning.models import SwapLineupPlayers
+    from fpl_engine.planning.mutations import apply_intents
+
+    plan = build_plan()
+    for pair, code in [((2, 3), "invalid_swap"), ((2, 2), "invalid_swap"), ((5, 12), "formation")]:
+        with pytest.raises(RuleViolationError) as error:
+            apply_intents(plan, (SwapLineupPlayers(8, *pair),), metadata())
+        assert error.value.code == code
+    assert plan == build_plan()
+
+
+def test_us6_replacement_occupant_inherits_the_slot_role_before_a_later_rearrangement() -> None:
+    from fpl_engine.planning.models import SwapLineupPlayers
+    from fpl_engine.planning.mutations import apply_intents
+
+    plan = with_week(build_plan(), 8, transfers=(build_transfer(),))
+    squad = {slot.player_id: slot for slot in _evaluated_squad(plan, 9)}
+    assert squad[102].is_starting and squad[102].is_captain and 2 not in squad
+    changed = apply_intents(plan, (SwapLineupPlayers(9, 102, 14),), metadata()).plan
+    after = {slot.player_id: slot for slot in _evaluated_squad(changed, 9)}
+    assert (after[14].is_starting, after[14].is_captain) == (True, True)
+    assert (after[102].is_starting, after[102].bench_order) == (False, 3)
+    assert changed.gameweeks[0] == plan.gameweeks[0]
+
+
 @pytest.mark.parametrize(
     ("market", "sale"), [(40, 40), (48, 48), (50, 50), (51, 50), (52, 51), (53, 51), (54, 52)]
 )

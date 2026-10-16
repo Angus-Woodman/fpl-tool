@@ -19,11 +19,25 @@ import {
   PlanSaveSnapshot,
   getPlanSaveCoordinator,
 } from "@/lib/plan-save-coordinator";
+import {
+  hasTargets,
+  resolveSelection,
+  selectionStateFor,
+  sortByBenchOrder,
+  swapAnnouncement,
+} from "@/lib/squad-rearrangement";
+import { Bench } from "@/components/team/bench";
+import {
+  ClearSelectionButton,
+  NoTargetsNotice,
+  SwapAnnouncement,
+} from "@/components/team/rearrangement-controls";
+import { SquadPitch } from "@/components/team/squad-pitch";
+import { SquadPlayerCard } from "@/components/team/squad-player-card";
+import { POSITION_ORDER, type Position } from "@/components/team/types";
 
 const EMPTY_SUBSCRIBE = () => () => {};
 const EMPTY_SNAPSHOT = () => null;
-
-type Position = "GK" | "DEF" | "MID" | "FWD";
 
 type LoadState =
   | { type: "loading" }
@@ -31,7 +45,6 @@ type LoadState =
   | { type: "missing" }
   | { type: "loaded"; plan: PlanResponse };
 
-const POSITION_ORDER: Position[] = ["GK", "DEF", "MID", "FWD"];
 const CHIPS: { value: PlanChip; label: string }[] = [
   { value: "WILDCARD", label: "Wildcard" },
   { value: "FREE_HIT", label: "Free Hit" },
@@ -558,7 +571,8 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
-  const [swapStarterId, setSwapStarterId] = useState<number | null>(null);
+  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
+  const [swapConfirmation, setSwapConfirmation] = useState("");
   const [transferOutId, setTransferOutId] = useState<number | null>(null);
   const [transferPool, setTransferPool] = useState<PlayerItem[]>([]);
   const [renaming, setRenaming] = useState(false);
@@ -618,9 +632,10 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   }, [plan, selectedGameweek]);
 
   useEffect(() => {
-    setSwapStarterId(null);
+    setSelectedPlayerId(null);
+    setSwapConfirmation("");
     setTransferOutId(null);
-  }, [gameweek]);
+  }, [gameweek?.gameweek_number]);
 
   useEffect(() => {
     if (!coordinator) return;
@@ -683,6 +698,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
 
   function send(intents: PlanIntent[]): void {
     setActionError(null);
+    setSwapConfirmation("");
     coordinator?.enqueue(intents);
   }
 
@@ -742,17 +758,38 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     setTransferOutId(null);
   }
 
-  function handleSwap(starterId: number, benchId: number): void {
+  function handleSelect(playerId: number): void {
     if (!gameweek) return;
+    const outcome = resolveSelection(
+      gameweek.legal_rearrangements,
+      gameweek.players?.some((player) => player.player_id === selectedPlayerId)
+        ? selectedPlayerId
+        : null,
+      playerId,
+    );
+    if (outcome.type !== "swap") {
+      setSelectedPlayerId(outcome.type === "clear" ? null : outcome.playerId);
+      return;
+    }
+    const nameOf = (id: number): string =>
+      gameweek.players?.find((player) => player.player_id === id)?.web_name ??
+      `#${id}`;
     send([
       {
         kind: "swap_lineup_players",
         gameweek_number: gameweek.gameweek_number,
-        first_player_id: starterId,
-        second_player_id: benchId,
+        first_player_id: outcome.firstPlayerId,
+        second_player_id: outcome.secondPlayerId,
       },
     ]);
-    setSwapStarterId(null);
+    setSwapConfirmation(
+      swapAnnouncement(
+        outcome.kind,
+        nameOf(outcome.firstPlayerId),
+        nameOf(outcome.secondPlayerId),
+      ),
+    );
+    setSelectedPlayerId(null);
   }
 
   function handleCaptain(playerId: number, role: "captain" | "vice"): void {
@@ -796,9 +833,65 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     snapshot?.status === "conflict" ||
     snapshot?.status === "missing";
   const starters = (draft ?? []).filter((player) => player.is_starting);
-  const bench = (draft ?? [])
-    .filter((player) => !player.is_starting)
-    .sort((a, b) => (a.bench_order ?? 0) - (b.bench_order ?? 0));
+  const bench = sortByBenchOrder(
+    (draft ?? []).filter((player) => !player.is_starting),
+  );
+  const startersByPosition = new Map<Position, PlanPlayer[]>(
+    POSITION_ORDER.map((position) => [
+      position,
+      starters.filter((player) => player.position === position),
+    ]),
+  );
+  const saveStatus = snapshot?.status;
+  const swapUnconfirmed =
+    saveStatus === "not_saved" ||
+    saveStatus === "conflict" ||
+    saveStatus === "missing" ||
+    saveStatus === "error";
+  const selectedPlayer =
+    selectedPlayerId !== null
+      ? draft?.find((player) => player.player_id === selectedPlayerId)
+      : undefined;
+
+  function selectionProps(playerId: number) {
+    return {
+      selectionState: selectionStateFor(
+        gameweek?.legal_rearrangements ?? [],
+        selectedPlayer?.player_id ?? null,
+        playerId,
+      ),
+      onSelect: () => handleSelect(playerId),
+      selectionDisabled: saveStatus === "saving",
+    };
+  }
+
+  function transferOptions(player: PlanPlayer): JSX.Element | null {
+    if (transferOutId !== player.player_id) return null;
+    return (
+      <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-xs">
+        {transferPool
+          .filter(
+            (option) =>
+              !(draft ?? []).some(
+                (selected) => selected.player_id === option.id,
+              ),
+          )
+          .map((option) => (
+            <li key={option.id}>
+              <button
+                type="button"
+                aria-label={`Transfer in ${option.web_name}`}
+                className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
+                onClick={() => handleTransfer(player, option)}
+              >
+                {option.web_name} · {option.team_short_name} ·{" "}
+                {option.current_price.toFixed(1)}
+              </button>
+            </li>
+          ))}
+      </ul>
+    );
+  }
 
   return (
     <section className="space-y-5">
@@ -1155,229 +1248,102 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
             )}
           </section>
 
-          <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
-            <section>
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
-                Starting XI
-              </h3>
-              <div className="space-y-5">
-                {POSITION_ORDER.map((position) => {
-                  const rows = starters.filter(
-                    (player) => player.position === position,
-                  );
-                  if (rows.length === 0) {
-                    return null;
-                  }
-
-                  return (
-                    <section key={position}>
-                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        {position}
-                      </h4>
-                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        {rows.map((player) => (
-                          <article
-                            key={player.player_id}
-                            className="rounded-lg border border-slate-200 p-3"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-semibold text-slate-900">
-                                  {player.web_name}
-                                </p>
-                                <p className="text-xs text-slate-600">
-                                  {player.team_short_name} · {player.position} ·{" "}
-                                  {player.current_price.toFixed(1)}
-                                </p>
-                              </div>
-                              {(player.is_captain ||
-                                player.is_vice_captain) && (
-                                <span className="rounded-full bg-slate-900 px-2 py-1 text-[10px] font-semibold text-white">
-                                  {player.is_captain ? "C" : "VC"}
-                                </span>
-                              )}
-                            </div>
-                            <p className="mt-2 text-xs text-slate-600">
-                              Opponent: {opponentLabel(player)}
-                            </p>
-                            <p className="mt-1 text-xs text-slate-600">
-                              GW xPts: {player.projected_points.toFixed(1)}
-                            </p>
-                            <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                              <button
-                                type="button"
-                                aria-label={`Swap ${player.web_name} with bench`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() =>
-                                  setSwapStarterId(
-                                    swapStarterId === player.player_id
-                                      ? null
-                                      : player.player_id,
-                                  )
-                                }
-                              >
-                                Swap With Bench
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Transfer ${player.web_name}`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() => void handleOpenTransfer(player)}
-                              >
-                                Transfer
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Make ${player.web_name} captain`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() =>
-                                  handleCaptain(player.player_id, "captain")
-                                }
-                              >
-                                C
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Make ${player.web_name} vice-captain`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() =>
-                                  handleCaptain(player.player_id, "vice")
-                                }
-                              >
-                                VC
-                              </button>
-                            </div>
-
-                            {swapStarterId === player.player_id && (
-                              <ul className="mt-3 space-y-1 text-xs">
-                                {bench
-                                  .filter((benchPlayer) =>
-                                    gameweek.legal_rearrangements.some(
-                                      (choice) =>
-                                        (choice.first_player_id ===
-                                          player.player_id &&
-                                          choice.second_player_id ===
-                                            benchPlayer.player_id) ||
-                                        (choice.second_player_id ===
-                                          player.player_id &&
-                                          choice.first_player_id ===
-                                            benchPlayer.player_id),
-                                    ),
-                                  )
-                                  .map((benchPlayer) => (
-                                    <li key={benchPlayer.player_id}>
-                                      <button
-                                        type="button"
-                                        aria-label={`Swap ${player.web_name} for ${benchPlayer.web_name}`}
-                                        className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                        onClick={() =>
-                                          handleSwap(
-                                            player.player_id,
-                                            benchPlayer.player_id,
-                                          )
-                                        }
-                                      >
-                                        {benchPlayer.web_name} (
-                                        {benchPlayer.position})
-                                      </button>
-                                    </li>
-                                  ))}
-                              </ul>
-                            )}
-
-                            {transferOutId === player.player_id && (
-                              <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-xs">
-                                {transferPool
-                                  .filter(
-                                    (option) =>
-                                      !draft.some(
-                                        (selected) =>
-                                          selected.player_id === option.id,
-                                      ),
-                                  )
-                                  .map((option) => (
-                                    <li key={option.id}>
-                                      <button
-                                        type="button"
-                                        aria-label={`Transfer in ${option.web_name}`}
-                                        className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                        onClick={() =>
-                                          handleTransfer(player, option)
-                                        }
-                                      >
-                                        {option.web_name} ·{" "}
-                                        {option.team_short_name} ·{" "}
-                                        {option.current_price.toFixed(1)}
-                                      </button>
-                                    </li>
-                                  ))}
-                              </ul>
-                            )}
-                          </article>
-                        ))}
-                      </div>
-                    </section>
-                  );
-                })}
+          <div className="space-y-3">
+            {selectedPlayer && (
+              <div className="flex flex-wrap items-center gap-3">
+                <ClearSelectionButton
+                  onClick={() => setSelectedPlayerId(null)}
+                />
+                {!hasTargets(
+                  gameweek.legal_rearrangements,
+                  selectedPlayer.player_id,
+                ) && <NoTargetsNotice name={selectedPlayer.web_name} />}
               </div>
-            </section>
+            )}
+            <SwapAnnouncement
+              message={swapUnconfirmed ? "" : swapConfirmation}
+            />
+          </div>
 
-            <section>
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
-                Bench
-              </h3>
-              <div className="space-y-3">
-                {bench.map((player) => (
-                  <article
-                    key={player.player_id}
-                    className="rounded-lg border border-slate-200 p-3"
-                  >
-                    <p className="text-sm font-semibold text-slate-900">
-                      {player.bench_order}. {player.web_name}
-                    </p>
-                    <p className="text-xs text-slate-600">
-                      {player.team_short_name} · {player.position} ·{" "}
-                      {player.current_price.toFixed(1)}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-600">
-                      GW xPts: {player.projected_points.toFixed(1)}
-                    </p>
+          <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+            <SquadPitch
+              title="Starting XI"
+              itemsByPosition={startersByPosition}
+              keyFor={(player) => player.player_id}
+              renderCard={(player) => (
+                <SquadPlayerCard
+                  webName={player.web_name}
+                  teamShortName={player.team_short_name}
+                  position={player.position}
+                  price={player.current_price}
+                  badge={
+                    player.is_captain
+                      ? "C"
+                      : player.is_vice_captain
+                        ? "VC"
+                        : null
+                  }
+                  projectedPoints={player.projected_points}
+                  opponentLabel={opponentLabel(player)}
+                  {...selectionProps(player.player_id)}
+                >
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
                     <button
                       type="button"
                       aria-label={`Transfer ${player.web_name}`}
-                      className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
                       onClick={() => void handleOpenTransfer(player)}
                     >
                       Transfer
                     </button>
-                    {transferOutId === player.player_id && (
-                      <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-xs">
-                        {transferPool
-                          .filter(
-                            (option) =>
-                              !draft.some(
-                                (selected) => selected.player_id === option.id,
-                              ),
-                          )
-                          .map((option) => (
-                            <li key={option.id}>
-                              <button
-                                type="button"
-                                aria-label={`Transfer in ${option.web_name}`}
-                                className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                onClick={() => handleTransfer(player, option)}
-                              >
-                                {option.web_name} · {option.team_short_name} ·{" "}
-                                {option.current_price.toFixed(1)}
-                              </button>
-                            </li>
-                          ))}
-                      </ul>
-                    )}
-                  </article>
-                ))}
-              </div>
-            </section>
+                    <button
+                      type="button"
+                      aria-label={`Make ${player.web_name} captain`}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
+                      onClick={() => handleCaptain(player.player_id, "captain")}
+                    >
+                      C
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Make ${player.web_name} vice-captain`}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
+                      onClick={() => handleCaptain(player.player_id, "vice")}
+                    >
+                      VC
+                    </button>
+                  </div>
+                  {transferOptions(player)}
+                </SquadPlayerCard>
+              )}
+            />
+
+            <Bench
+              items={bench}
+              keyFor={(player) => player.player_id}
+              renderCard={(player) => (
+                <SquadPlayerCard
+                  webName={player.web_name}
+                  teamShortName={player.team_short_name}
+                  position={player.position}
+                  price={player.current_price}
+                  benchOrder={player.bench_order}
+                  projectedPoints={player.projected_points}
+                  opponentLabel={opponentLabel(player)}
+                  {...selectionProps(player.player_id)}
+                >
+                  <button
+                    type="button"
+                    aria-label={`Transfer ${player.web_name}`}
+                    className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                    onClick={() => void handleOpenTransfer(player)}
+                  >
+                    Transfer
+                  </button>
+                  {transferOptions(player)}
+                </SquadPlayerCard>
+              )}
+            />
           </div>
         </fieldset>
       )}

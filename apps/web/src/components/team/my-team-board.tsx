@@ -23,8 +23,21 @@ import { opponentLabelForGameweek, pointsForGameweek } from "@/components/team/p
 import { RecommendationSummary, RecommendationState, ViewMode } from "@/components/team/recommendation-summary";
 import { RecommendedSquadView } from "@/components/team/recommended-squad-view";
 import { SquadPitch } from "@/components/team/squad-pitch";
+import {
+  ClearSelectionButton,
+  NoTargetsNotice,
+  SwapAnnouncement,
+} from "@/components/team/rearrangement-controls";
 import { SquadPlayerCard, type SelectionState } from "@/components/team/squad-player-card";
 import { POSITION_ORDER, type Position } from "@/components/team/types";
+import {
+  hasTargets,
+  resolveSelection,
+  selectionStateFor,
+  sortByBenchOrder,
+  swapAnnouncement,
+  type RearrangementKind,
+} from "@/lib/squad-rearrangement";
 
 type LoadState =
   | { type: "loading" }
@@ -327,122 +340,8 @@ function lineupPointsForGameweek(
   return starterPoints + captainPoints;
 }
 
-// UX pre-filter mirroring fpl_engine.rules.squad.STARTING_POSITION_LIMITS; the server stays authoritative.
-const STARTING_POSITION_LIMITS: Record<Position, readonly [number, number]> = {
-  GK: [1, 1],
-  DEF: [3, 5],
-  MID: [2, 5],
-  FWD: [1, 3],
-};
-
-function isLegalStartingFormation(
-  starterIds: Set<number>,
-  playersById: Map<number, MyTeamPlayerItem>
-): boolean {
-  if (starterIds.size !== 11) {
-    return false;
-  }
-
-  const counts: Record<Position, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
-  for (const playerId of starterIds) {
-    const player = playersById.get(playerId);
-    if (!player) {
-      return false;
-    }
-    counts[player.position] += 1;
-  }
-
-  return POSITION_ORDER.every((position) => {
-    const [minimum, maximum] = STARTING_POSITION_LIMITS[position];
-    return counts[position] >= minimum && counts[position] <= maximum;
-  });
-}
-
-function canSwapStarterWithBench(
-  starterId: number,
-  benchId: number,
-  selections: SaveMyTeamPlayerSelection[],
-  playersById: Map<number, MyTeamPlayerItem>
-): boolean {
-  const starterSelection = selections.find((selection) => selection.player_id === starterId);
-  const benchSelection = selections.find((selection) => selection.player_id === benchId);
-  if (!starterSelection || !benchSelection || !starterSelection.is_starting || benchSelection.is_starting) {
-    return false;
-  }
-
-  const starterPlayer = playersById.get(starterId);
-  const benchPlayer = playersById.get(benchId);
-  if (!starterPlayer || !benchPlayer) {
-    return false;
-  }
-
-  if ((starterPlayer.position === "GK") !== (benchPlayer.position === "GK")) {
-    return false;
-  }
-
-  const starterIds = new Set(
-    selections.filter((selection) => selection.is_starting).map((selection) => selection.player_id)
-  );
-  starterIds.delete(starterId);
-  starterIds.add(benchId);
-
-  return isLegalStartingFormation(starterIds, playersById);
-}
-
-// Substitute priority only: the bench goalkeeper is not reorderable against outfield subs.
-function canReorderBench(
-  benchIdA: number,
-  benchIdB: number,
-  selections: SaveMyTeamPlayerSelection[],
-  playersById: Map<number, MyTeamPlayerItem>
-): boolean {
-  if (benchIdA === benchIdB) {
-    return false;
-  }
-
-  const first = selections.find((selection) => selection.player_id === benchIdA);
-  const second = selections.find((selection) => selection.player_id === benchIdB);
-  if (!first || !second || first.is_starting || second.is_starting) {
-    return false;
-  }
-
-  const firstPlayer = playersById.get(benchIdA);
-  const secondPlayer = playersById.get(benchIdB);
-  if (!firstPlayer || !secondPlayer) {
-    return false;
-  }
-
-  return firstPlayer.position !== "GK" && secondPlayer.position !== "GK";
-}
-
-type SwapKind = "starter-bench" | "bench-order";
-
-function swapKindFor(
-  firstId: number,
-  secondId: number,
-  selections: SaveMyTeamPlayerSelection[],
-  playersById: Map<number, MyTeamPlayerItem>
-): SwapKind | null {
-  const first = selections.find((selection) => selection.player_id === firstId);
-  const second = selections.find((selection) => selection.player_id === secondId);
-  if (!first || !second || firstId === secondId) {
-    return null;
-  }
-
-  if (first.is_starting !== second.is_starting) {
-    const [starterId, benchId] = first.is_starting ? [firstId, secondId] : [secondId, firstId];
-    return canSwapStarterWithBench(starterId, benchId, selections, playersById) ? "starter-bench" : null;
-  }
-
-  if (!first.is_starting) {
-    return canReorderBench(firstId, secondId, selections, playersById) ? "bench-order" : null;
-  }
-
-  return null;
-}
-
 function applySwap(
-  kind: SwapKind,
+  kind: RearrangementKind,
   firstId: number,
   secondId: number,
   selections: SaveMyTeamPlayerSelection[]
@@ -453,7 +352,7 @@ function applySwap(
     return selections;
   }
 
-  if (kind === "bench-order") {
+  if (kind === "bench_priority") {
     return selections.map((selection) => {
       if (selection.player_id === firstId) {
         return { ...selection, bench_order: second.bench_order };
@@ -657,7 +556,7 @@ export function MyTeamBoard(): JSX.Element {
   }
 
   async function performSwap(
-    kind: SwapKind,
+    kind: RearrangementKind,
     firstId: number,
     secondId: number,
     team: MyTeamResponse
@@ -678,11 +577,7 @@ export function MyTeamBoard(): JSX.Element {
       });
       await loadMyTeam({ keepGameweek: true });
       setSelectedPlayerId(null);
-      setSwapConfirmation(
-        kind === "bench-order"
-          ? `Swapped bench order of ${first.web_name} and ${second.web_name}.`
-          : `Swapped ${first.web_name} with ${second.web_name}.`
-      );
+      setSwapConfirmation(swapAnnouncement(kind, first.web_name, second.web_name));
       setSwapState({ type: "idle" });
     } catch (error) {
       setSelectedPlayerId(null);
@@ -698,22 +593,13 @@ export function MyTeamBoard(): JSX.Element {
     }
 
     setSwapState((current) => (current.type === "error" ? { type: "idle" } : current));
-    if (selectedPlayerId === playerId) {
-      setSelectedPlayerId(null);
+    const outcome = resolveSelection(team.legal_rearrangements, selectedPlayerId, playerId);
+    if (outcome.type === "swap") {
+      await performSwap(outcome.kind, outcome.firstPlayerId, outcome.secondPlayerId, team);
       return;
     }
 
-    if (selectedPlayerId !== null) {
-      const selections = draftFromTeam(team).players;
-      const playersByIdForTeam = new Map(team.players.map((player) => [player.player_id, player]));
-      const kind = swapKindFor(selectedPlayerId, playerId, selections, playersByIdForTeam);
-      if (kind !== null) {
-        await performSwap(kind, selectedPlayerId, playerId, team);
-        return;
-      }
-    }
-
-    setSelectedPlayerId(playerId);
+    setSelectedPlayerId(outcome.type === "clear" ? null : outcome.playerId);
   }
 
   if (state.type === "loading") {
@@ -797,15 +683,15 @@ export function MyTeamBoard(): JSX.Element {
   });
 
   const starters = playerRows.filter((row) => row.selection.is_starting);
-  const bench = playerRows
-    .filter((row) => !row.selection.is_starting)
-    .sort((left, right) => (left.selection.bench_order ?? 99) - (right.selection.bench_order ?? 99));
+  const bench = sortByBenchOrder(
+    playerRows
+      .filter((row) => !row.selection.is_starting)
+      .map((row) => ({ ...row, bench_order: row.selection.bench_order }))
+  );
 
   const startersByPosition = new Map<Position, typeof starters>();
-  const benchByPosition = new Map<Position, typeof bench>();
   for (const position of POSITION_ORDER) {
     startersByPosition.set(position, starters.filter((row) => row.player.position === position));
-    benchByPosition.set(position, bench.filter((row) => row.player.position === position));
   }
 
   function horizonTotal(horizonSize: number): number | null {
@@ -851,24 +737,9 @@ export function MyTeamBoard(): JSX.Element {
   // Rearrangement applies only to the actual saved lineup, not to a hypothetical optimiser view.
   const selectionEnabled = optimiseMode === "none";
 
-  function selectionStateFor(playerId: number): SelectionState {
-    if (selectedPlayerId === null) {
-      return "idle";
-    }
-    if (playerId === selectedPlayerId) {
-      return "selected";
-    }
-    return swapKindFor(selectedPlayerId, playerId, userSelections, playersById) !== null
-      ? "target"
-      : "not-target";
-  }
-
   const selectedPlayer = selectedPlayerId !== null ? playersById.get(selectedPlayerId) : undefined;
   const selectedHasNoTargets =
-    selectedPlayerId !== null &&
-    !loadedTeam.players.some(
-      (player) => swapKindFor(selectedPlayerId, player.player_id, userSelections, playersById) !== null
-    );
+    selectedPlayerId !== null && !hasTargets(loadedTeam.legal_rearrangements, selectedPlayerId);
 
   function selectionProps(playerId: number): {
     selectionState: SelectionState;
@@ -876,7 +747,7 @@ export function MyTeamBoard(): JSX.Element {
     selectionDisabled: boolean;
   } {
     return {
-      selectionState: selectionStateFor(playerId),
+      selectionState: selectionStateFor(loadedTeam.legal_rearrangements, selectedPlayerId, playerId),
       onSelect: selectionEnabled ? () => void handleSelect(playerId, loadedTeam) : undefined,
       selectionDisabled: swapState.type === "saving",
     };
@@ -913,14 +784,7 @@ export function MyTeamBoard(): JSX.Element {
             {pointsRevealed ? "Hide projected points" : "Show projected points"}
           </button>
           {selectedPlayerId !== null && (
-            <button
-              type="button"
-              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
-              onClick={clearSelection}
-              disabled={swapState.type === "saving"}
-            >
-              Clear selection
-            </button>
+            <ClearSelectionButton onClick={clearSelection} disabled={swapState.type === "saving"} />
           )}
           <span className="rounded-md bg-slate-100 px-3 py-2 text-sm text-slate-700">Cost: {totalCost.toFixed(1)}</span>
           <span className="rounded-md bg-slate-100 px-3 py-2 text-sm text-slate-700">Bank: {bank.toFixed(1)}</span>
@@ -993,17 +857,9 @@ export function MyTeamBoard(): JSX.Element {
 
           {refreshState.type === "success" && <p className="mb-4 text-sm text-emerald-700">{refreshState.message}</p>}
           {refreshState.type === "error" && <p className="mb-4 text-sm text-red-700">{refreshState.message}</p>}
-          <p
-            aria-live="polite"
-            data-testid="swap-confirmation"
-            className={swapConfirmation ? "mb-4 text-sm text-emerald-700" : "sr-only"}
-          >
-            {swapConfirmation}
-          </p>
+          <SwapAnnouncement message={swapConfirmation} />
           {swapState.type === "error" && <p className="mb-4 text-sm text-red-700">{swapState.message}</p>}
-          {selectedPlayer && selectedHasNoTargets && (
-            <p className="mb-4 text-sm text-slate-700">No valid swap targets for {selectedPlayer.web_name}.</p>
-          )}
+          {selectedPlayer && selectedHasNoTargets && <NoTargetsNotice name={selectedPlayer.web_name} />}
 
           {pointsRevealed && (
             <div className="mb-5 grid gap-3 sm:grid-cols-3">
@@ -1050,7 +906,7 @@ export function MyTeamBoard(): JSX.Element {
             />
 
             <Bench
-              itemsByPosition={benchByPosition}
+              items={bench}
               keyFor={(row) => row.player.player_id}
               renderCard={(row) => {
                 const gwPoints =

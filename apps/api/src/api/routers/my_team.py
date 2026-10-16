@@ -12,6 +12,7 @@ from api.schemas.apply_transfer import (
     ApplyTransferRequestBody,
     ApplyTransferUnavailableResponse,
 )
+from api.schemas.lineup import LineupRearrangementResponse
 from api.schemas.my_team import (
     CurrentSquadPlayerResponse,
     CurrentSquadResponse,
@@ -51,6 +52,7 @@ from api.services.get_transfer_preview import (
     GetTransferPreviewService,
     TransferPreviewFailure,
 )
+from api.services.squad_rearrangements import current_squad_rearrangements
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -146,6 +148,14 @@ def _map_my_team_view_to_response(result: MyTeamViewRecord) -> CurrentSquadRespo
             else None
         ),
         gameweek_numbers=result.gameweek_numbers,
+        legal_rearrangements=[
+            LineupRearrangementResponse(
+                first_player_id=choice.first_player_id,
+                second_player_id=choice.second_player_id,
+                kind=choice.kind,
+            )
+            for choice in result.legal_rearrangements
+        ],
         players=[
             CurrentSquadPlayerResponse(
                 player_id=player.player_id,
@@ -227,6 +237,14 @@ def put_my_team(
         bench_projection_totals=None,
         captain_adjusted_projection_totals=None,
         gameweek_numbers=[],
+        legal_rearrangements=[
+            LineupRearrangementResponse(
+                first_player_id=choice.first_player_id,
+                second_player_id=choice.second_player_id,
+                kind=choice.kind,
+            )
+            for choice in current_squad_rearrangements(result.players)
+        ],
         players=[CurrentSquadPlayerResponse.model_validate(player) for player in result.players],
     )
 

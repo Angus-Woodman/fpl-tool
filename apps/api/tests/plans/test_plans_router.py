@@ -477,7 +477,9 @@ def test_chip_http_clear_move_reset_and_reopen_use_only_canonical_chip(
     assert planner_session.get(PlanGameweekModel, legacy.id).chip == PlanChip.WILDCARD
 
 
-@pytest.mark.parametrize("journey", ["horizon", "chips", "transfers", "pricing", "persistence"])
+@pytest.mark.parametrize(
+    "journey", ["horizon", "chips", "transfers", "pricing", "persistence", "rearrangement"]
+)
 @pytest.mark.skipif(
     __import__("os").getenv("RUN_PLANNER_BROWSER_TESTS") != "1",
     reason="Requires guarded SQL, installed Playwright and a running frontend",
@@ -507,6 +509,7 @@ def test_planner_story_through_actual_browser_and_api(
         "transfers": (8, 12),
         "pricing": (8, 11),
         "persistence": (8, 10),
+        "rearrangement": (8, 10),
     }[journey]
     plan = replace(
         planner_plan,
@@ -516,7 +519,7 @@ def test_planner_story_through_actual_browser_and_api(
             planner_plan.boundary,
             free_transfers=2 if journey == "transfers" else planner_plan.boundary.free_transfers,
             used_chips=frozenset()
-            if journey in ("transfers", "pricing", "persistence")
+            if journey in ("transfers", "pricing", "persistence", "rearrangement")
             else frozenset({Chip.WILDCARD if journey == "horizon" else Chip.FREE_HIT}),
         ),
         gameweeks=tuple(
@@ -563,6 +566,37 @@ def test_planner_story_through_actual_browser_and_api(
         planner_session.get(PlayerModel, 113).current_price = 5.2
         planner_session.commit()
     fault_file = tmp_path / "canonical-write-fault"
+    if journey == "rearrangement":
+        from api.repositories.current_squad_repository import CurrentSquadRepository
+        from api.repositories.squad_player_lookup_repository import (
+            SquadPlayerLookupRepository,
+        )
+        from api.services.current_squad import (
+            CurrentSquadPlayerSelection,
+            UpsertCurrentSquadRequest,
+            UpsertCurrentSquadService,
+        )
+
+        by_slot = {p.slot_id: p.player_id for p in plan.boundary.players}
+        UpsertCurrentSquadService(
+            CurrentSquadRepository(planner_session), SquadPlayerLookupRepository(planner_session)
+        ).execute(
+            UpsertCurrentSquadRequest(
+                bank=1.0,
+                free_transfers=1,
+                players=[
+                    CurrentSquadPlayerSelection(
+                        by_slot[role.slot_id],
+                        role.is_starting,
+                        role.bench_order,
+                        role.is_captain,
+                        role.is_vice_captain,
+                    )
+                    for role in plan.boundary.lineup
+                ],
+            )
+        )
+        planner_session.commit()
     if journey == "persistence":
         from api.models.entities import PlayerModel
         from api.repositories.plan_repository import PlanRepository as FaultRepository
@@ -655,6 +689,7 @@ def test_planner_story_through_actual_browser_and_api(
                         "transfers": "US3 real API transfers",
                         "pricing": "US4 real API pricing",
                         "persistence": "US5 real API persistence",
+                        "rearrangement": "US6 real API rearrangement",
                     }[journey],
                     "--workers=1",
                     "--reporter=line",
@@ -685,6 +720,7 @@ def test_planner_story_through_actual_browser_and_api(
             "transfers": 8,
             "pricing": 9,
             "persistence": 8,
+            "rearrangement": 8,
         }[journey]
     )
     assert not reopened.boundary.used_chips
@@ -715,6 +751,38 @@ def test_planner_story_through_actual_browser_and_api(
         assert roles(9) == (10, 9)
         assert roles(8) == roles(10) == (2, 3)
         assert reopened.boundary.bank_tenths == 10
+    if journey == "rearrangement":
+        from api.models.entities import PlayerModel, SquadPlayerModel
+        from sqlalchemy import select
+
+        by_slot = {p.slot_id: p.player_id for p in reopened.boundary.players}
+
+        def lineup(number):
+            week = next(w for w in reopened.gameweeks if w.gameweek_number == number)
+            return {
+                by_slot[r.slot_id]: (r.is_starting, r.bench_order, r.is_captain, r.is_vice_captain)
+                for r in week.lineup
+            }
+
+        assert reopened.revision == 2
+        assert not any(week.transfers for week in reopened.gameweeks)
+        initial = {
+            by_slot[r.slot_id]: (r.is_starting, r.bench_order, r.is_captain, r.is_vice_captain)
+            for r in plan.boundary.lineup
+        }
+        assert lineup(8) == lineup(10) == initial
+        assert lineup(9)[14] == (True, None, True, False)
+        assert lineup(9)[2] == (False, 3, False, False)
+        assert lineup(9)[3] == (True, None, False, True)
+        assert (lineup(9)[12][1], lineup(9)[15][1], lineup(9)[13][1]) == (1, 2, 4)
+        planner_session.rollback()
+        saved = {
+            row.player_id: (row.is_starting, row.bench_order, row.is_captain, row.is_vice_captain)
+            for row in planner_session.execute(select(SquadPlayerModel)).scalars()
+        }
+        assert {planner_session.get(PlayerModel, pid).web_name: v for pid, v in saved.items()} == {
+            f"P{pid}": value for pid, value in lineup(9).items()
+        }
     if journey == "pricing":
         decision = reopened.gameweeks[0].transfers[0]
         carried = next(p for p in reopened.boundary.players if p.player_id == 113)
@@ -1035,3 +1103,224 @@ def test_us5_http_missing_plan_is_distinct_from_an_unknown_receipt(guarded_clien
     assert lookup.json()["detail"]["code"] == "plan_not_found"
     unknown = _receipt(client, plan_id, 12345)
     assert unknown.json()["detail"]["code"] == "mutation_not_found"
+
+
+def _us6_week(client, plan_id, gameweek):
+    plan = client.get(f"/plans/{plan_id}").json()
+    return next(week for week in plan["gameweeks"] if week["gameweek_number"] == gameweek)
+
+
+def _us6_pairs(choices):
+    return {
+        (frozenset({choice["first_player_id"], choice["second_player_id"]}), choice["kind"])
+        for choice in choices
+    }
+
+
+def _us6_my_team_services(week, metadata):
+    """My Team's real view and save services over the same squad the Planner shows."""
+    from api.repositories.current_squad_repository import (
+        CurrentSquadPlayerRecord,
+        CurrentSquadRecord,
+    )
+    from api.repositories.squad_player_lookup_repository import SquadPlayerLookupItem
+    from api.services.current_squad import UpsertCurrentSquadService
+    from api.services.get_my_team_view import GetMyTeamViewService
+
+    record = CurrentSquadRecord(
+        squad_id=1,
+        name="My Team",
+        bank=1.0,
+        free_transfers=1,
+        players=[
+            CurrentSquadPlayerRecord(
+                player_id=player["player_id"],
+                web_name=player["web_name"],
+                first_name="First",
+                second_name="Second",
+                team_name="Team",
+                team_short_name=player["team_short_name"],
+                position=player["position"],
+                current_price=player["current_price"],
+                status="a",
+                is_starting=player["is_starting"],
+                bench_order=player["bench_order"],
+                is_captain=player["is_captain"],
+                is_vice_captain=player["is_vice_captain"],
+                team_id=metadata[player["player_id"]].team_id,
+            )
+            for player in week["players"]
+        ],
+    )
+
+    class Repository:
+        def get_current(self):
+            return record
+
+        def save_current(self, *, bank, free_transfers, players):
+            return record
+
+    class Lookup:
+        def get_by_ids(self, player_ids):
+            return [
+                SquadPlayerLookupItem(
+                    player_id=player_id,
+                    team_id=metadata[player_id].team_id,
+                    web_name=f"P{player_id}",
+                    position=metadata[player_id].position.value,
+                    current_price=5.0,
+                )
+                for player_id in player_ids
+            ]
+
+    repository = Repository()
+    return (
+        GetMyTeamViewService(repository, _EmptyProjectionRepository()),
+        UpsertCurrentSquadService(repository, Lookup()),
+    )
+
+
+def _us6_swap(gameweek, first, second):
+    return {
+        "kind": "swap_lineup_players",
+        "gameweek_number": gameweek,
+        "first_player_id": first,
+        "second_player_id": second,
+    }
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us6_http_planner_and_my_team_offer_the_same_targets_and_reach_the_same_lineup(
+    guarded_client, planner_metadata
+):
+    from api.services.current_squad import CurrentSquadPlayerSelection, UpsertCurrentSquadRequest
+
+    client, plan_id = guarded_client
+    for gameweek in (8, 9, 10):
+        week = _us6_week(client, plan_id, gameweek)
+        view, _ = _us6_my_team_services(week, planner_metadata)
+        offered = _us6_pairs(week["legal_rearrangements"])
+        assert offered
+        assert (
+            _us6_pairs(
+                {
+                    "first_player_id": c.first_player_id,
+                    "second_player_id": c.second_player_id,
+                    "kind": c.kind,
+                }
+                for c in view.execute().legal_rearrangements
+            )
+            == offered
+        )
+    before = {number: _us6_week(client, plan_id, number) for number in (8, 9, 10)}
+
+    swapped = _post(client, plan_id, 1, 0, [_us6_swap(9, 2, 14)])
+    assert swapped.status_code == 200, swapped.text
+    assert swapped.json()["plan"]["revision"] == 1
+
+    week = _us6_week(client, plan_id, 9)
+    roles = {player["player_id"]: player for player in week["players"]}
+    assert (roles[14]["is_starting"], roles[14]["is_captain"]) == (True, True)
+    assert (roles[2]["is_starting"], roles[2]["bench_order"], roles[2]["is_captain"]) == (
+        False,
+        3,
+        False,
+    )
+    view, upsert = _us6_my_team_services(week, planner_metadata)
+    assert _us6_pairs(week["legal_rearrangements"]) == _us6_pairs(
+        {
+            "first_player_id": c.first_player_id,
+            "second_player_id": c.second_player_id,
+            "kind": c.kind,
+        }
+        for c in view.execute().legal_rearrangements
+    )
+    upsert.execute(
+        UpsertCurrentSquadRequest(
+            bank=1.0,
+            free_transfers=1,
+            players=[
+                CurrentSquadPlayerSelection(
+                    player["player_id"],
+                    player["is_starting"],
+                    player["bench_order"],
+                    player["is_captain"],
+                    player["is_vice_captain"],
+                )
+                for player in week["players"]
+            ],
+        )
+    )
+    for number in (8, 10):
+        assert _us6_week(client, plan_id, number) == before[number]
+
+
+@pytest.mark.parametrize(
+    ("pair", "code", "reason"),
+    [
+        ((5, 12), "formation", "Starting XI must contain between 1 and 1 GK"),
+        ((12, 13), "invalid_swap", "Goalkeeper cannot reorder with outfield bench"),
+        ((14, 12), "invalid_swap", "Goalkeeper cannot reorder with outfield bench"),
+        ((2, 3), "invalid_swap", "Select a starter and bench player or two outfield substitutes"),
+        ((2, 2), "invalid_swap", "Select two distinct owned players"),
+        ((2, 999), "invalid_swap", "Select two distinct owned players"),
+    ],
+)
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_us6_http_illegal_direct_swaps_reject_with_the_rule_explanation_and_write_nothing(
+    guarded_client, planner_session, planner_metadata, pair, code, reason
+):
+    from api.models.entities import PlanModel
+    from api.services.current_squad import CurrentSquadPlayerSelection, UpsertCurrentSquadRequest
+    from sqlalchemy import select
+
+    client, plan_id = guarded_client
+    tables = [table for name, table in PlanModel.metadata.tables.items() if name.startswith("plan")]
+
+    def snapshot():
+        return [
+            list(
+                planner_session.execute(
+                    select(table).order_by(*table.primary_key.columns)
+                ).mappings()
+            )
+            for table in tables
+        ]
+
+    before = snapshot()
+    planner_session.rollback()
+    current = client.get(f"/plans/{plan_id}").json()
+
+    response = _post(client, plan_id, 1, 0, [_us6_swap(9, *pair)])
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == code
+    assert reason in detail["message"]
+    assert snapshot() == before
+    assert client.get(f"/plans/{plan_id}").json() == current
+
+    if code == "formation":
+        week = _us6_week(client, plan_id, 9)
+        _, upsert = _us6_my_team_services(week, planner_metadata)
+        players = {player["player_id"]: dict(player) for player in week["players"]}
+        first, second = players[pair[0]], players[pair[1]]
+        for field in ("is_starting", "bench_order", "is_captain", "is_vice_captain"):
+            first[field], second[field] = second[field], first[field]
+        with pytest.raises(ValueError, match=reason):
+            upsert.execute(
+                UpsertCurrentSquadRequest(
+                    bank=1.0,
+                    free_transfers=1,
+                    players=[
+                        CurrentSquadPlayerSelection(
+                            p["player_id"],
+                            p["is_starting"],
+                            p["bench_order"],
+                            p["is_captain"],
+                            p["is_vice_captain"],
+                        )
+                        for p in players.values()
+                    ],
+                )
+            )

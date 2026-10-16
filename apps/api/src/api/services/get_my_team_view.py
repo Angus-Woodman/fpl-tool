@@ -4,8 +4,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Protocol
 
+from fpl_engine.rules import Rearrangement
+
 from api.repositories.current_squad_repository import CurrentSquadRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
+from api.services.squad_rearrangements import current_squad_rearrangements
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,7 @@ class MyTeamViewRecord:
     bench_projection_totals: HorizonProjectionTotals | None
     captain_adjusted_projection_totals: HorizonProjectionTotals | None
     gameweek_numbers: list[int]
+    legal_rearrangements: tuple[Rearrangement, ...] = ()
 
 
 class CurrentSquadRepositoryPort(Protocol):
@@ -131,6 +135,7 @@ class GetMyTeamViewService:
             bench_projection_totals=bench_projection_totals,
             captain_adjusted_projection_totals=captain_adjusted_projection_totals,
             gameweek_numbers=gameweek_numbers,
+            legal_rearrangements=current_squad_rearrangements(current_squad.players),
         )
 
     def _build_fixtures_by_player(

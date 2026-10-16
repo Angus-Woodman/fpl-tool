@@ -15,6 +15,7 @@ from fpl_engine.planning.models import (
     EditTransfer,
     GameweekDecision,
     Intent,
+    LineupRole,
     MoveChip,
     Plan,
     PlanEvaluation,
@@ -26,7 +27,14 @@ from fpl_engine.planning.models import (
     SetStartingTransfers,
     SwapLineupPlayers,
 )
-from fpl_engine.rules import Chip, RuleViolationError, season_half, validate_squad
+from fpl_engine.rules import (
+    Chip,
+    RuleViolationError,
+    rearrange_lineup,
+    season_half,
+    validate_squad,
+)
+from fpl_engine.rules import legal_rearrangements as shared_legal_rearrangements
 
 
 class MutationRejectedError(RuleViolationError):
@@ -275,7 +283,6 @@ def _lineup_change(
     if owned is None:
         raise RuleViolationError("lineup_unavailable", "Cannot edit an unavailable lineup")
     players = {player.player_id: player for player in owned}
-    roles = {role.slot_id: role for role in evaluated.lineup}
     if isinstance(intent, ChangeCaptain | ChangeViceCaptain):
         if intent.player_id not in players:
             raise RuleViolationError("player_not_owned", "Selected player is no longer owned")
@@ -287,31 +294,23 @@ def _lineup_change(
             for role in evaluated.lineup
         )
     else:
-        first = players.get(intent.first_player_id)
-        second = players.get(intent.second_player_id)
-        if first is None or second is None or first == second:
-            raise RuleViolationError("invalid_swap", "Select two distinct owned players")
-        first_role, second_role = roles[first.slot_id], roles[second.slot_id]
-        if first_role.is_starting and second_role.is_starting:
-            raise RuleViolationError(
-                "invalid_swap", "Select a starter and bench player or two outfield substitutes"
+        exchanged = rearrange_lineup(
+            squad_slots(owned, evaluated.lineup, metadata),
+            intent.first_player_id,
+            intent.second_player_id,
+        )
+        slot_of = {player.player_id: player.slot_id for player in owned}
+        updated = {
+            slot_of[slot.player_id]: LineupRole(
+                slot_of[slot.player_id],
+                slot.is_starting,
+                slot.bench_order,
+                slot.is_captain,
+                slot.is_vice_captain,
             )
-        if (
-            not first_role.is_starting
-            and not second_role.is_starting
-            and (
-                metadata[first.player_id].position.value == "GK"
-                or metadata[second.player_id].position.value == "GK"
-            )
-        ):
-            raise RuleViolationError(
-                "invalid_swap", "Goalkeeper cannot reorder with outfield bench"
-            )
-        replacements = {
-            first.slot_id: replace(second_role, slot_id=first.slot_id),
-            second.slot_id: replace(first_role, slot_id=second.slot_id),
+            for slot in exchanged
         }
-        lineup = tuple(replacements.get(role.slot_id, role) for role in evaluated.lineup)
+        lineup = tuple(updated.get(role.slot_id, role) for role in evaluated.lineup)
     validate_squad(squad_slots(owned, lineup, metadata))
     return replace(
         plan,
@@ -335,41 +334,16 @@ def legal_rearrangements(
     )
     if evaluated is None or evaluated.players is None:
         return ()
-    roles = {role.slot_id: role for role in evaluated.lineup}
-    output: list[dict[str, int | str]] = []
-    for first_index, first in enumerate(evaluated.players):
-        for second in evaluated.players[first_index + 1 :]:
-            first_role, second_role = roles[first.slot_id], roles[second.slot_id]
-            if first_role.is_starting and second_role.is_starting:
-                continue
-            if (
-                not first_role.is_starting
-                and not second_role.is_starting
-                and (
-                    metadata[first.player_id].position.value == "GK"
-                    or metadata[second.player_id].position.value == "GK"
-                )
-            ):
-                continue
-            replacements = {
-                first.slot_id: replace(second_role, slot_id=first.slot_id),
-                second.slot_id: replace(first_role, slot_id=second.slot_id),
-            }
-            lineup = tuple(replacements.get(role.slot_id, role) for role in evaluated.lineup)
-            try:
-                validate_squad(squad_slots(evaluated.players, lineup, metadata))
-            except RuleViolationError:
-                continue
-            output.append(
-                {
-                    "first_player_id": first.player_id,
-                    "second_player_id": second.player_id,
-                    "kind": "substitution"
-                    if first_role.is_starting != second_role.is_starting
-                    else "bench_priority",
-                }
-            )
-    return tuple(output)
+    return tuple(
+        {
+            "first_player_id": choice.first_player_id,
+            "second_player_id": choice.second_player_id,
+            "kind": choice.kind,
+        }
+        for choice in shared_legal_rearrangements(
+            squad_slots(evaluated.players, evaluated.lineup, metadata)
+        )
+    )
 
 
 def apply_intents(

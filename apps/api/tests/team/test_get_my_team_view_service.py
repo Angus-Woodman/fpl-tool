@@ -141,3 +141,86 @@ def test_get_my_team_view_service_combines_squad_and_horizon_totals() -> None:
     assert result.captain_adjusted_projection_totals.horizon_1 == 14.5
     assert result.gameweek_numbers == [2, 3, 4]
     assert result.players[0].fixture_projections[0].opponent_team_short_name == "CHE"
+
+
+_FULL_POSITIONS = ["GK"] + ["DEF"] * 4 + ["MID"] * 4 + ["FWD"] * 2 + ["GK", "DEF", "MID", "FWD"]
+
+
+class _FullSquadRepository:
+    """A legal 4-4-2 with captain 2, vice-captain 3 and bench GK/DEF/MID/FWD."""
+
+    def get_current(self) -> CurrentSquadRecord | None:
+        return CurrentSquadRecord(
+            squad_id=1,
+            name="My Team",
+            bank=1.5,
+            free_transfers=2,
+            players=[
+                CurrentSquadPlayerRecord(
+                    player_id=index + 1,
+                    web_name=f"P{index + 1}",
+                    first_name="First",
+                    second_name=f"P{index + 1}",
+                    team_name=f"Team {index % 5 + 1}",
+                    team_short_name=f"T{index % 5 + 1}",
+                    position=position,
+                    current_price=5.0,
+                    status="a",
+                    is_starting=index < 11,
+                    bench_order=None if index < 11 else index - 10,
+                    is_captain=index == 1,
+                    is_vice_captain=index == 2,
+                    team_id=index % 5 + 1,
+                )
+                for index, position in enumerate(_FULL_POSITIONS)
+            ],
+        )
+
+
+class _NoProjectionRepository:
+    def list_latest_player_fixture_projections(
+        self, player_ids: list[int]
+    ) -> list[PlayerProjectionFixtureRecord]:
+        return []
+
+
+def test_us6_my_team_view_offers_the_engine_legal_rearrangements() -> None:
+    from fpl_engine.domain import PlayerPosition
+    from fpl_engine.rules import SquadSlot, legal_rearrangements
+
+    result = GetMyTeamViewService(_FullSquadRepository(), _NoProjectionRepository()).execute()
+
+    assert result is not None
+    expected = legal_rearrangements(
+        [
+            SquadSlot(
+                player.player_id,
+                PlayerPosition(player.position),
+                player.team_id,
+                player.is_starting,
+                player.bench_order,
+                player.is_captain,
+                player.is_vice_captain,
+            )
+            for player in _FullSquadRepository().get_current().players  # type: ignore[union-attr]
+        ]
+    )
+    assert expected
+    assert result.legal_rearrangements == expected
+    offered = {
+        (frozenset({choice.first_player_id, choice.second_player_id}), choice.kind)
+        for choice in result.legal_rearrangements
+    }
+    assert (frozenset({1, 12}), "substitution") in offered
+    assert (frozenset({2, 14}), "substitution") in offered
+    assert (frozenset({13, 14}), "bench_priority") in offered
+    assert not any(kind == "bench_priority" and players & {1, 12} for players, kind in offered)
+
+
+def test_us6_my_team_view_offers_nothing_for_a_squad_that_is_not_a_legal_fifteen() -> None:
+    result = GetMyTeamViewService(
+        _FakeCurrentSquadRepository(), _FakeProjectionRepository()
+    ).execute()
+
+    assert result is not None
+    assert result.legal_rearrangements == ()
