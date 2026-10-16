@@ -1463,6 +1463,42 @@ describe("PlanBoard", () => {
       return plan;
     }
 
+    function exchangeRoles(
+      plan: PlanResponse,
+      gameweek: number,
+      firstId: number,
+      secondId: number,
+    ): PlanResponse {
+      const week = plan.gameweeks.find(
+        (item) => item.gameweek_number === gameweek,
+      )!;
+      const first = week.players.find((p) => p.player_id === firstId)!;
+      const second = week.players.find((p) => p.player_id === secondId)!;
+      const roles = (p: PlanPlayer) => ({
+        is_starting: p.is_starting,
+        bench_order: p.bench_order,
+        is_captain: p.is_captain,
+        is_vice_captain: p.is_vice_captain,
+      });
+      const [firstRoles, secondRoles] = [roles(first), roles(second)];
+      Object.assign(first, secondRoles);
+      Object.assign(second, firstRoles);
+      return plan;
+    }
+
+    function applySwaps(plan: PlanResponse, intents: PlanIntent[]) {
+      for (const intent of intents) {
+        if (intent.kind === "swap_lineup_players")
+          exchangeRoles(
+            plan,
+            intent.gameweek_number,
+            intent.first_player_id,
+            intent.second_player_id,
+          );
+      }
+      return applyPlannerIntents(plan, intents);
+    }
+
     const targets: PlanResponse["gameweeks"][number]["legal_rearrangements"] = [
       { first_player_id: 1, second_player_id: 2, kind: "substitution" },
       { first_player_id: 3, second_player_id: 7, kind: "substitution" },
@@ -1564,7 +1600,11 @@ describe("PlanBoard", () => {
     });
 
     it("sends one swap intent for the shown gameweek on the second selection and announces it", async () => {
-      const saveCalls = mockFetch(planWithTargets(targets));
+      const plan = planWithTargets(targets);
+      const saveCalls = mockFetch(
+        plan,
+        exchangeRoles(structuredClone(plan), 1, 3, 7),
+      );
       render(<PlanBoard planId={1} />);
       await screen.findByRole("button", { name: "Select GK One" });
 
@@ -1596,7 +1636,11 @@ describe("PlanBoard", () => {
     });
 
     it("sends a bench-priority swap and words the announcement for it", async () => {
-      const saveCalls = mockFetch(planWithTargets(targets));
+      const plan = planWithTargets(targets);
+      const saveCalls = mockFetch(
+        plan,
+        exchangeRoles(structuredClone(plan), 1, 12, 7),
+      );
       render(<PlanBoard planId={1} />);
       await screen.findByRole("button", { name: "Select GK One" });
 
@@ -1717,6 +1761,107 @@ describe("PlanBoard", () => {
       expect(
         screen.queryByRole("button", { name: "Clear selection" }),
       ).not.toBeInTheDocument();
+    });
+
+    async function rejectedSwapBoard() {
+      const plan = buildPlan([{ gameweek_number: 1 }, { gameweek_number: 2 }]);
+      for (const week of plan.gameweeks) week.legal_rearrangements = targets;
+      const { posts } = plannerServer(plan, {
+        apply: applySwaps,
+        post: async (_envelope, call) =>
+          call === 1
+            ? json(
+                {
+                  detail: {
+                    code: "formation",
+                    message: "Starting XI must contain between 3 and 5 DEF",
+                    diagnostics: [],
+                  },
+                },
+                422,
+              )
+            : undefined,
+      });
+      render(<PlanBoard planId={plan.plan_id} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("DEF Five"));
+      expect(
+        await screen.findByText("Starting XI must contain between 3 and 5 DEF"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("swap-confirmation")).toBeEmptyDOMElement();
+      return posts;
+    }
+
+    const savedStatus = () =>
+      waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Saved"),
+      );
+
+    it("never announces a swap the server rejected after a later successful captain change", async () => {
+      const posts = await rejectedSwapBoard();
+
+      fireEvent.click(screen.getByLabelText("Make MID Two captain"));
+      await waitFor(() => expect(posts).toHaveLength(2));
+      await savedStatus();
+
+      expect(screen.getByTestId("swap-confirmation")).toBeEmptyDOMElement();
+      expect(screen.queryByText(/^Swapped /)).not.toBeInTheDocument();
+    });
+
+    it("never announces a swap the server rejected after a later successful horizon edit", async () => {
+      const posts = await rejectedSwapBoard();
+
+      fireEvent.change(screen.getByLabelText("To GW"), {
+        target: { value: "1" },
+      });
+      await waitFor(() => expect(posts).toHaveLength(2));
+      await savedStatus();
+
+      expect(screen.getByTestId("swap-confirmation")).toBeEmptyDOMElement();
+      expect(screen.queryByText(/^Swapped /)).not.toBeInTheDocument();
+    });
+
+    it("announces an accepted swap only after the retried same edit is durably saved", async () => {
+      const plan = planWithTargets(targets);
+      const candidate = exchangeRoles(structuredClone(plan), 1, 3, 7);
+      const { posts } = plannerServer(plan, {
+        apply: applySwaps,
+        post: async (_envelope, call) =>
+          call === 1
+            ? json(
+                {
+                  detail: {
+                    code: "accepted_not_saved",
+                    message:
+                      "Accepted edit is not saved; retry the same mutation ID",
+                    plan,
+                    candidate,
+                  },
+                },
+                503,
+              )
+            : undefined,
+      });
+      render(<PlanBoard planId={plan.plan_id} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+
+      fireEvent.click(selectButton("DEF One"));
+      fireEvent.click(selectButton("DEF Five"));
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Not saved"),
+      );
+      expect(screen.getByTestId("swap-confirmation")).toBeEmptyDOMElement();
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry Same Edit" }));
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Saved"),
+      );
+      expect(posts[1]).toEqual(posts[0]);
+      expect(screen.getByTestId("swap-confirmation")).toHaveTextContent(
+        "Swapped DEF One with DEF Five.",
+      );
     });
 
     it("does not offer selection while a save is in flight", async () => {

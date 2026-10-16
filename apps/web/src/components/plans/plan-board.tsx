@@ -51,6 +51,31 @@ const CHIPS: { value: PlanChip; label: string }[] = [
   { value: "BENCH_BOOST", label: "Bench Boost" },
   { value: "TRIPLE_CAPTAIN", label: "Triple Captain" },
 ];
+type SwapSide = { id: number; starting: boolean; order: number | null };
+type PendingSwap = {
+  gameweek: number;
+  message: string;
+  first: SwapSide;
+  second: SwapSide;
+};
+
+// Announce only once the saved plan shows the two players holding each other's former roles.
+function swapIsAcknowledged(plan: PlanResponse, swap: PendingSwap): boolean {
+  const players = plan.gameweeks.find(
+    (week) => week.gameweek_number === swap.gameweek,
+  )?.players;
+  const first = players?.find((player) => player.player_id === swap.first.id);
+  const second = players?.find((player) => player.player_id === swap.second.id);
+  return (
+    !!first &&
+    !!second &&
+    first.is_starting === swap.second.starting &&
+    first.bench_order === swap.second.order &&
+    second.is_starting === swap.first.starting &&
+    second.bench_order === swap.first.order
+  );
+}
+
 function opponentLabel(player: PlanPlayer): string {
   if (player.fixtures.length === 0) {
     return "-";
@@ -572,7 +597,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   );
   const [actionError, setActionError] = useState<string | null>(null);
   const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
-  const [swapConfirmation, setSwapConfirmation] = useState("");
+  const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null);
   const [transferOutId, setTransferOutId] = useState<number | null>(null);
   const [transferPool, setTransferPool] = useState<PlayerItem[]>([]);
   const [renaming, setRenaming] = useState(false);
@@ -633,7 +658,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
 
   useEffect(() => {
     setSelectedPlayerId(null);
-    setSwapConfirmation("");
+    setPendingSwap(null);
     setTransferOutId(null);
   }, [gameweek?.gameweek_number]);
 
@@ -698,7 +723,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
 
   function send(intents: PlanIntent[]): void {
     setActionError(null);
-    setSwapConfirmation("");
+    setPendingSwap(null);
     coordinator?.enqueue(intents);
   }
 
@@ -771,9 +796,10 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
       setSelectedPlayerId(outcome.type === "clear" ? null : outcome.playerId);
       return;
     }
-    const nameOf = (id: number): string =>
-      gameweek.players?.find((player) => player.player_id === id)?.web_name ??
-      `#${id}`;
+    const shown = (id: number): PlanPlayer | undefined =>
+      gameweek.players?.find((player) => player.player_id === id);
+    const first = shown(outcome.firstPlayerId);
+    const second = shown(outcome.secondPlayerId);
     send([
       {
         kind: "swap_lineup_players",
@@ -782,13 +808,26 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
         second_player_id: outcome.secondPlayerId,
       },
     ]);
-    setSwapConfirmation(
-      swapAnnouncement(
-        outcome.kind,
-        nameOf(outcome.firstPlayerId),
-        nameOf(outcome.secondPlayerId),
-      ),
-    );
+    if (first && second) {
+      setPendingSwap({
+        gameweek: gameweek.gameweek_number,
+        message: swapAnnouncement(
+          outcome.kind,
+          first.web_name,
+          second.web_name,
+        ),
+        first: {
+          id: first.player_id,
+          starting: first.is_starting,
+          order: first.bench_order,
+        },
+        second: {
+          id: second.player_id,
+          starting: second.is_starting,
+          order: second.bench_order,
+        },
+      });
+    }
     setSelectedPlayerId(null);
   }
 
@@ -843,11 +882,12 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     ]),
   );
   const saveStatus = snapshot?.status;
-  const swapUnconfirmed =
-    saveStatus === "not_saved" ||
-    saveStatus === "conflict" ||
-    saveStatus === "missing" ||
-    saveStatus === "error";
+  const swapAnnouncementText =
+    pendingSwap &&
+    snapshot &&
+    swapIsAcknowledged(snapshot.acknowledged, pendingSwap)
+      ? pendingSwap.message
+      : "";
   const selectedPlayer =
     selectedPlayerId !== null
       ? draft?.find((player) => player.player_id === selectedPlayerId)
@@ -1260,9 +1300,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                 ) && <NoTargetsNotice name={selectedPlayer.web_name} />}
               </div>
             )}
-            <SwapAnnouncement
-              message={swapUnconfirmed ? "" : swapConfirmation}
-            />
+            <SwapAnnouncement message={swapAnnouncementText} />
           </div>
 
           <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
