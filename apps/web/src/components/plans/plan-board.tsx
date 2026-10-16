@@ -19,6 +19,7 @@ import {
   PlanSaveSnapshot,
   getPlanSaveCoordinator,
 } from "@/lib/plan-save-coordinator";
+import { installHistoryDepartureGuard } from "@/lib/history-departure-guard";
 import {
   hasTargets,
   resolveSelection,
@@ -720,8 +721,9 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     if (!coordinator) return;
     const warning =
       "Your latest Planner edit is not saved yet. Leave this page anyway?";
+    const historyGuard = installHistoryDepartureGuard(coordinator, warning);
     const onUnload = (event: BeforeUnloadEvent): void => {
-      if (!coordinator.hasUnsavedWork()) return;
+      if (historyGuard.leaving() || !coordinator.hasUnsavedWork()) return;
       event.preventDefault();
       event.returnValue = warning;
     };
@@ -756,6 +758,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     return () => {
       window.removeEventListener("beforeunload", onUnload);
       document.removeEventListener("click", onClick, true);
+      historyGuard.dispose();
     };
   }, [coordinator]);
 

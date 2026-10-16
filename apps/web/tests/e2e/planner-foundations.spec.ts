@@ -1941,3 +1941,137 @@ test("Phase 9 rendered states at 1440x900 and 390x844: layout, keyboard, tap tar
     ),
   ).toEqual([]);
 });
+
+test("FR-038 browser Back and Forward never silently leave unsaved Planner work", async ({
+  page,
+}, info) => {
+  test.setTimeout(120_000);
+  const warning =
+    "Your latest Planner edit is not saved yet. Leave this page anyway?";
+  const plan = buildPlannerPlan(12, 14);
+  let writesFail = false;
+  const posts: string[] = [];
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: HEADERS });
+    if (request.method() === "POST") {
+      const envelope = request.postDataJSON();
+      posts.push(envelope.mutation_id);
+      if (writesFail) return route.abort("failed");
+      const intent = envelope.intents[0];
+      for (const week of plan.gameweeks)
+        if (week.gameweek_number === intent.gameweek_number)
+          for (const player of week.players)
+            player.is_captain = player.player_id === intent.player_id;
+      plan.revision = envelope.expected_revision + 1;
+      return route.fulfill({
+        json: {
+          status: "committed",
+          mutation_id: envelope.mutation_id,
+          committed_revision: plan.revision,
+          plan,
+          candidate: null,
+        },
+        headers: HEADERS,
+      });
+    }
+    return route.fulfill({
+      json: path === "/plans" ? { plans: [plan] } : plan,
+      headers: HEADERS,
+    });
+  });
+  const dialogs: string[] = [];
+  let answer: "accept" | "dismiss" = "dismiss";
+  page.on("dialog", async (dialog) => {
+    dialogs.push(dialog.message());
+    await (answer === "accept" ? dialog.accept() : dialog.dismiss());
+  });
+  const status = page.getByRole("status");
+  const historyLength = () => page.evaluate(() => history.length);
+  const listing = page.getByRole("link", { name: plan.name });
+  const captain = page.getByLabel("Make P5 captain", { exact: true });
+  const back = () => page.evaluate(() => history.back());
+  const forward = () => page.evaluate(() => history.forward());
+  const onPlanner = new RegExp(`/plans/${plan.plan_id}$`);
+
+  await page.goto("/plans");
+  await listing.click();
+  await expect(page).toHaveURL(onPlanner);
+  await expect(captain).toBeVisible();
+
+  // Nothing unsaved: Back and Forward behave normally, no prompt, no extra entries.
+  const baseline = await historyLength();
+  await back();
+  await expect(page).toHaveURL(/\/plans$/);
+  await expect(listing).toBeVisible();
+  await forward();
+  await expect(page).toHaveURL(onPlanner);
+  await expect(captain).toBeVisible();
+  expect(dialogs).toEqual([]);
+  expect(await historyLength()).toBe(baseline);
+
+  // Unsaved work: Back prompts once per press and, when the user stays, nothing changes.
+  writesFail = true;
+  await captain.click();
+  await expect(status.filter({ hasText: /^Not saved$/ })).toBeVisible();
+  const armed = await historyLength();
+  expect(armed).toBe(baseline + 1);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await back();
+    await expect.poll(() => dialogs.length).toBe(attempt);
+    await expect(page).toHaveURL(onPlanner);
+    await expect(status.filter({ hasText: /^Not saved$/ })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry Same Edit" }),
+    ).toBeVisible();
+    expect(await historyLength()).toBe(armed);
+  }
+  expect(dialogs).toEqual([warning, warning]);
+  expect(posts).toHaveLength(1);
+
+  // Confirming leaves exactly once (no loop, no second prompt) and the list renders.
+  answer = "accept";
+  await back();
+  await expect(page).toHaveURL(/\/plans$/);
+  await expect(listing).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(dialogs).toHaveLength(3);
+
+  // Forward returns to the Planner with the unsaved edit retained and still guarded.
+  answer = "dismiss";
+  await forward();
+  await expect(page).toHaveURL(onPlanner);
+  await expect(status.filter({ hasText: /^Not saved$/ })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry Same Edit" }),
+  ).toBeVisible();
+  await back();
+  await expect.poll(() => dialogs.length).toBe(4);
+  await expect(page).toHaveURL(onPlanner);
+  await expect(status.filter({ hasText: /^Not saved$/ })).toBeVisible();
+
+  // The in-app link guard is unchanged: cancelling keeps the user here.
+  await page.getByRole("link", { name: "Back to plans" }).first().click();
+  await expect.poll(() => dialogs.length).toBe(5);
+  await expect(page).toHaveURL(onPlanner);
+
+  // Once durably saved, Back passes straight through with no prompt.
+  writesFail = false;
+  await page.getByRole("button", { name: "Retry Same Edit" }).click();
+  await expect(status.filter({ hasText: /^Saved$/ })).toBeVisible();
+  expect(posts[1]).toBe(posts[0]);
+  await back();
+  await expect(page).toHaveURL(/\/plans$/);
+  await expect(listing).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(dialogs).toHaveLength(5);
+  await page.screenshot({
+    path: info.outputPath("fr038-after-saved-back.png"),
+    fullPage: true,
+  });
+  expect(consoleErrors).toEqual([]);
+});

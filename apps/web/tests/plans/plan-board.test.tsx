@@ -2580,4 +2580,134 @@ describe("PlanBoard US5 persistence", () => {
     expect(reached).toEqual([false, false]);
     link.remove();
   });
+
+  describe("browser history departure guard (FR-038)", () => {
+    const warning =
+      "Your latest Planner edit is not saved yet. Leave this page anyway?";
+    const popstate = (state: unknown = {}) =>
+      window.dispatchEvent(new PopStateEvent("popstate", { state }));
+    const sentinel = () =>
+      (window.history.state as Record<string, unknown> | null)
+        ?.plannerDepartureGuard;
+
+    async function unsavedBoard() {
+      const plan = buildPlannerPlan(12, 13);
+      const gate = deferred<void>();
+      const { posts } = plannerServer(plan, {
+        post: async (_envelope, call) => {
+          if (call === 1) await gate.promise;
+          return undefined;
+        },
+      });
+      render(<PlanBoard planId={plan.plan_id} />);
+      await screen.findByLabelText("Make P4 captain");
+      return { plan, gate, posts };
+    }
+
+    it("leaves history alone and never prompts while nothing is unsaved", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const back = vi.spyOn(window.history, "back");
+      const go = vi.spyOn(window.history, "go");
+      const length = window.history.length;
+      const { gate } = await unsavedBoard();
+      expect(window.history.length).toBe(length);
+      expect(sentinel()).toBeUndefined();
+
+      popstate();
+      expect(confirm).not.toHaveBeenCalled();
+      expect(back).not.toHaveBeenCalled();
+      expect(go).not.toHaveBeenCalled();
+      gate.resolve();
+    });
+
+    it("adds exactly one guard entry while work is unsaved, however many edits follow", async () => {
+      const { gate } = await unsavedBoard();
+      const length = window.history.length;
+      fireEvent.click(screen.getByLabelText("Make P4 captain"));
+      await waitFor(() => expect(statusText()).toBe("Saving..."));
+      expect(sentinel()).toBe(true);
+      expect(window.history.length).toBe(length + 1);
+
+      gate.resolve();
+      await waitFor(() => expect(statusText()).toBe("Saved"));
+      fireEvent.click(screen.getByLabelText("Make P5 captain"));
+      await waitFor(() => expect(statusText()).toBe("Saved"));
+      expect(window.history.length).toBe(length + 1);
+    });
+
+    it("prompts on Back and, when the user stays, restores the entry and keeps the unsaved work", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const back = vi.spyOn(window.history, "back");
+      const go = vi.spyOn(window.history, "go").mockImplementation(() => {});
+      const { gate, posts } = await unsavedBoard();
+      fireEvent.click(screen.getByLabelText("Make P4 captain"));
+      await waitFor(() => expect(statusText()).toBe("Saving..."));
+
+      popstate();
+
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(confirm).toHaveBeenCalledWith(warning);
+      expect(go).toHaveBeenCalledWith(1);
+      expect(back).not.toHaveBeenCalled();
+      expect(statusText()).toBe("Saving...");
+      popstate({ plannerDepartureGuard: true });
+      expect(confirm).toHaveBeenCalledTimes(1);
+
+      popstate();
+      expect(confirm).toHaveBeenCalledTimes(2);
+      gate.resolve();
+      await waitFor(() => expect(statusText()).toBe("Saved"));
+      expect(posts).toHaveLength(1);
+    });
+
+    it("lets the user leave once confirmed, without a second native prompt", async () => {
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      const back = vi
+        .spyOn(window.history, "back")
+        .mockImplementation(() => {});
+      const { gate } = await unsavedBoard();
+      fireEvent.click(screen.getByLabelText("Make P4 captain"));
+      await waitFor(() => expect(statusText()).toBe("Saving..."));
+
+      popstate();
+
+      expect(back).toHaveBeenCalledTimes(1);
+      const unload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(unload);
+      expect(unload.defaultPrevented).toBe(false);
+      popstate();
+      expect(back).toHaveBeenCalledTimes(1);
+      gate.resolve();
+    });
+
+    it("stops prompting once the edit is durably saved and passes Back straight through", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const back = vi
+        .spyOn(window.history, "back")
+        .mockImplementation(() => {});
+      const { gate } = await unsavedBoard();
+      fireEvent.click(screen.getByLabelText("Make P4 captain"));
+      await waitFor(() => expect(statusText()).toBe("Saving..."));
+      gate.resolve();
+      await waitFor(() => expect(statusText()).toBe("Saved"));
+
+      popstate();
+
+      expect(confirm).not.toHaveBeenCalled();
+      expect(back).toHaveBeenCalledTimes(1);
+      const unload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(unload);
+      expect(unload.defaultPrevented).toBe(false);
+    });
+
+    it("still guards beforeunload while the edit is unsaved", async () => {
+      const { gate } = await unsavedBoard();
+      fireEvent.click(screen.getByLabelText("Make P4 captain"));
+      await waitFor(() => expect(statusText()).toBe("Saving..."));
+      const unload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(unload);
+      expect(unload.defaultPrevented).toBe(true);
+      gate.resolve();
+    });
+  });
 });

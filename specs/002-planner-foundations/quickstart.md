@@ -661,8 +661,9 @@ and T072 pin existing behaviour.
 
 ### Known Limits
 
-- The guard covers `beforeunload` and link clicks, not Next router
-  back/forward or programmatic navigation.
+- The guard covers `beforeunload` and link clicks, not programmatic
+  navigation. (Browser Back/Forward was added later by the FR-038 remediation
+  in "T089 FR-038 History Navigation Remediation" below.)
 - No cross-tab merge; no unload-time persistence is promised.
 
 ## Increment 6: US6 Evidence (2026-10-15)
@@ -872,12 +873,77 @@ helpers remain behind the 410 routes (removal is a separate cleanup); `provision
 plan provisional whenever any held player has an assumed price (needs a product decision against
 FR-032/FR-036); `set_starting_chips` defaults `free_hit_gameweek_19` to false when omitted; GET and
 receipt lookup take shared row locks; repeated full replays per GET; initialization turns any
-`ValueError` into `legacy_pending`; the departure guard does not cover Back/forward navigation or an
-uncommitted typed field, and `PlansList` rename has no guard; `PlansList` rename completion matches any
+`ValueError` into `legacy_pending`; the departure guard does not cover an uncommitted typed field
+(Back/Forward was closed by the FR-038 remediation below), and `PlansList` rename has no guard; `PlansList` rename completion matches any
 newer revision; uncontrolled starting-state fields keep a rejected value on screen; the transfer picker
 can show a stale pool after a late response; `reconcile()` is not guarded against a concurrent retry;
 non-JSON 5xx responses lose their status in the mutation reader; some accessible names use raw player
 IDs and several controls are 24-28px.
+
+### T089 FR-038 History Navigation Remediation
+
+Closed the final merge-readiness finding: the departure guard covered
+`beforeunload` and http(s) link clicks but not browser Back/Forward.
+
+Approach (`apps/web/src/lib/history-departure-guard.ts`, installed from the
+existing guard effect in `plan-board.tsx`; no coordinator change, no global
+state, no new dependency):
+
+- Back/Forward cannot be cancelled, so while `PlanSaveCoordinator.hasUnsavedWork()`
+  is true one same-URL history entry carrying a sentinel state is pushed above
+  the Planner entry (armed via the coordinator's `subscribe`). Nothing is
+  pushed, and no prompt is shown, while nothing is unsaved.
+- Back lands on the entry underneath: `popstate` asks the same `window.confirm`
+  warning. Stay restores the guard entry with `history.go(1)` (URL, React state
+  and the coordinator are untouched); leave continues with one `history.back()`.
+  A one-second leaving flag stops a repeat prompt and makes `beforeunload` skip
+  during the confirmed departure, then re-arms if the page is still mounted with
+  unsaved work. If work was saved in the meantime the guard entry is simply
+  stepped over without prompting.
+- A stale sentinel left by a reload is replaced on install. Link-click and
+  `beforeunload` guards are unchanged apart from the `leaving` skip.
+
+Evidence (failing tests first):
+
+- Component: six cases in `plan-board.test.tsx` ("browser history departure
+  guard (FR-038)"): history untouched and no prompt while nothing is unsaved,
+  exactly one guard entry however many edits follow, Back prompts and cancel
+  restores the entry and keeps the unsaved work, confirm leaves without a
+  second prompt, no prompt once durably saved (Back passes through), and
+  `beforeunload` still guarded. Baseline against the unguarded code: 4 failed,
+  2 passed; now all pass. The
+  Planner client suites pass 106 tests, and the whole web suite 199 in 13 files.
+- Real browser (Chromium, owned preview on 3101, stubbed API,
+  `FR-038 browser Back and Forward never silently leave unsaved Planner work`):
+  Back/Forward with nothing unsaved go to /plans and back with no dialog and
+  unchanged `history.length`; with a failed save, Back twice shows the warning
+  twice, stays on the Planner with "Not saved" and Retry Same Edit visible and
+  `history.length` unchanged, and no second write is sent; accepting leaves
+  to /plans exactly once (no loop or extra dialog after 500ms); Forward returns
+  to the Planner with the unsaved edit retained and still guarded (Back prompts
+  again and cancel keeps it); the in-app "Back to plans" link still prompts and
+  cancel stays; after Retry Same Edit saves the same mutation ID, Back leaves
+  with no prompt. Baseline against the unguarded code failed at the guard-entry
+  assertion; now 1 passed.
+- Regression: the whole fixture Planner spec (excluding real-API cases) 10
+  passed; the guarded real frontend to API to PostgreSQL browser journeys
+  (isolated `fpl_test`) 6 passed; every run ended with the owned preview exited,
+  port 3101 free and `.next-copilot` absent. `pnpm --filter web lint` and
+  `typecheck` were clean; the 3000, 3100 and 8000 listeners were not touched.
+
+New or still-open limits (not silently removed):
+
+- Arming truncates forward history above the Planner entry, and the same-URL
+  guard entry stays in the stack if the user saves and stays (Back still needs
+  one press: the guard steps over it without a prompt, but the extra entry is
+  visible in the history list).
+- Multi-step `history.go(-n)` or long-press history jumps are not guarded as a
+  unit; only the single-step entry below the Planner is. Programmatic
+  navigation remains unguarded.
+- Verified in Chromium only; Safari/Firefox history semantics were not run. The
+  after-saved-Back screenshot was not inspected.
+- Every other limit listed above (uncommitted typed field, `PlansList` rename,
+  and the rest) is unchanged.
 
 ### T090 Final Diff
 
