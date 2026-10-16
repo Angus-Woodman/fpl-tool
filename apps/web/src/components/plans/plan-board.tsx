@@ -51,6 +51,58 @@ const CHIPS: { value: PlanChip; label: string }[] = [
   { value: "BENCH_BOOST", label: "Bench Boost" },
   { value: "TRIPLE_CAPTAIN", label: "Triple Captain" },
 ];
+type HorizonField = "start_gameweek" | "end_gameweek";
+
+// Commits on blur or Enter so intermediate keystrokes never reach the server.
+function HorizonBoundInput({
+  label,
+  field,
+  value,
+  resetKey,
+  disabled,
+  onCommit,
+  onError,
+}: {
+  label: string;
+  field: HorizonField;
+  value: number;
+  resetKey: number;
+  disabled: boolean;
+  onCommit: (field: HorizonField, value: number) => void;
+  onError: (message: string | null) => void;
+}): JSX.Element {
+  return (
+    <input
+      type="number"
+      aria-label={label}
+      disabled={disabled}
+      min={1}
+      max={38}
+      key={`${field}-${value}-${resetKey}`}
+      defaultValue={value}
+      className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+      }}
+      onBlur={(event) => {
+        const entered = Number(event.currentTarget.value);
+        if (
+          !event.currentTarget.value ||
+          !Number.isInteger(entered) ||
+          entered < 1 ||
+          entered > 38
+        ) {
+          onError("Enter a whole gameweek from 1 to 38");
+          event.currentTarget.value = String(value);
+          return;
+        }
+        onError(null);
+        if (entered !== value) onCommit(field, entered);
+      }}
+    />
+  );
+}
+
 type SwapSide = { id: number; starting: boolean; order: number | null };
 type PendingSwap = {
   gameweek: number;
@@ -597,11 +649,13 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   );
   const [actionError, setActionError] = useState<string | null>(null);
   const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
+  const [rejectionCount, setRejectionCount] = useState(0);
   const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null);
   const [transferOutId, setTransferOutId] = useState<number | null>(null);
   const [transferPool, setTransferPool] = useState<PlayerItem[]>([]);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [renameSubmitted, setRenameSubmitted] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -714,12 +768,19 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     }
     if (
       renaming &&
+      renameSubmitted !== null &&
       snapshot?.status === "saved" &&
-      snapshot.acknowledged.name === renameValue.trim()
+      snapshot.acknowledged.name === renameSubmitted
     ) {
       setRenaming(false);
+      setRenameSubmitted(null);
     }
-  }, [plan, selectedGameweek, renaming, renameValue, snapshot]);
+  }, [plan, selectedGameweek, renaming, renameSubmitted, snapshot]);
+
+  const rejection = snapshot?.rejection ?? null;
+  useEffect(() => {
+    if (rejection) setRejectionCount((count) => count + 1);
+  }, [rejection]);
 
   function send(intents: PlanIntent[]): void {
     setActionError(null);
@@ -951,16 +1012,20 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   type="button"
                   className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                   disabled={renameValue.trim().length === 0}
-                  onClick={() =>
-                    send([{ kind: "rename_plan", name: renameValue.trim() }])
-                  }
+                  onClick={() => {
+                    setRenameSubmitted(renameValue.trim());
+                    send([{ kind: "rename_plan", name: renameValue.trim() }]);
+                  }}
                 >
                   Save
                 </button>
                 <button
                   type="button"
                   className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
-                  onClick={() => setRenaming(false)}
+                  onClick={() => {
+                    setRenaming(false);
+                    setRenameSubmitted(null);
+                  }}
                 >
                   Cancel
                 </button>
@@ -991,38 +1056,26 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1 text-sm text-slate-700">
               From GW
-              <input
-                type="number"
-                aria-label="Plan start gameweek"
-                disabled={editingUnavailable}
-                min={1}
-                max={38}
-                className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+              <HorizonBoundInput
+                label="Plan start gameweek"
+                field="start_gameweek"
                 value={currentPlan.start_gameweek}
-                onChange={(event) =>
-                  void handleHorizonChange(
-                    "start_gameweek",
-                    Number(event.target.value),
-                  )
-                }
+                resetKey={rejectionCount}
+                disabled={editingUnavailable}
+                onCommit={handleHorizonChange}
+                onError={setActionError}
               />
             </label>
             <label className="flex flex-col gap-1 text-sm text-slate-700">
               To GW
-              <input
-                type="number"
-                aria-label="Plan end gameweek"
-                disabled={editingUnavailable}
-                min={1}
-                max={38}
-                className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+              <HorizonBoundInput
+                label="Plan end gameweek"
+                field="end_gameweek"
                 value={currentPlan.end_gameweek}
-                onChange={(event) =>
-                  void handleHorizonChange(
-                    "end_gameweek",
-                    Number(event.target.value),
-                  )
-                }
+                resetKey={rejectionCount}
+                disabled={editingUnavailable}
+                onCommit={handleHorizonChange}
+                onError={setActionError}
               />
             </label>
           </div>
@@ -1294,12 +1347,19 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                 <ClearSelectionButton
                   onClick={() => setSelectedPlayerId(null)}
                 />
-                {!hasTargets(
-                  gameweek.legal_rearrangements,
-                  selectedPlayer.player_id,
-                ) && <NoTargetsNotice name={selectedPlayer.web_name} />}
               </div>
             )}
+            <NoTargetsNotice
+              name={
+                selectedPlayer &&
+                !hasTargets(
+                  gameweek.legal_rearrangements,
+                  selectedPlayer.player_id,
+                )
+                  ? selectedPlayer.web_name
+                  : null
+              }
+            />
             <SwapAnnouncement message={swapAnnouncementText} />
           </div>
 
@@ -1329,6 +1389,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                     <button
                       type="button"
                       aria-label={`Transfer ${player.web_name}`}
+                      aria-expanded={transferOutId === player.player_id}
                       className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
                       onClick={() => void handleOpenTransfer(player)}
                     >
@@ -1373,6 +1434,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   <button
                     type="button"
                     aria-label={`Transfer ${player.web_name}`}
+                    aria-expanded={transferOutId === player.player_id}
                     className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
                     onClick={() => void handleOpenTransfer(player)}
                   >

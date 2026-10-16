@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 import type { Position } from "@/components/team/types";
 import type { SelectionState } from "@/lib/squad-rearrangement";
 
@@ -54,6 +56,7 @@ export function SquadPlayerCard({
   children,
 }: SquadPlayerCardProps): JSX.Element {
   const selectable = onSelect !== undefined;
+  const targetHintId = useId();
 
   return (
     <article
@@ -103,14 +106,17 @@ export function SquadPlayerCard({
             type="button"
             aria-label={`Select ${webName}`}
             aria-pressed={selectionState === "selected"}
-            disabled={selectionDisabled}
-            onClick={onSelect}
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+            aria-disabled={selectionDisabled || undefined}
+            aria-describedby={selectionState === "target" ? targetHintId : undefined}
+            onClick={selectionDisabled ? undefined : onSelect}
+            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 hover:bg-slate-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-white disabled:opacity-50"
           >
             {selectionState === "selected" ? "Selected" : "Select"}
           </button>
           {selectionState === "target" && (
-            <span className="text-xs font-medium text-sky-800">Valid swap target</span>
+            <span id={targetHintId} className="text-xs font-medium text-sky-800">
+              Valid swap target
+            </span>
           )}
         </div>
       )}

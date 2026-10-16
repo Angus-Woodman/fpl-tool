@@ -436,10 +436,17 @@ def apply_intents(
         if isinstance(intent, AddTransfer | EditTransfer):
             decision_id = intent.decision.decision_id
             target = next(
-                week.gameweek_number
-                for week in candidate.gameweeks
-                if any(decision.decision_id == decision_id for decision in week.transfers)
+                (
+                    week.gameweek_number
+                    for week in candidate.gameweeks
+                    if any(decision.decision_id == decision_id for decision in week.transfers)
+                ),
+                None,
             )
+            if target is None:
+                raise RuleViolationError(
+                    "gameweek_not_in_plan", "The edited transfer's gameweek is outside the plan"
+                )
             result = next(week for week in evaluation.gameweeks if week.gameweek_number == target)
             if result.closing_bank_tenths is None:
                 raise RuleViolationError(

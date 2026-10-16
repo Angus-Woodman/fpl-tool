@@ -413,8 +413,9 @@ describe("MyTeamBoard", () => {
       });
 
       // While the first save is pending, selection is disabled and further clicks do nothing.
-      expect(selectButton("GK Two")).toBeDisabled();
-      expect(selectButton("DEF One")).toBeDisabled();
+      expect(selectButton("GK Two")).toHaveAttribute("aria-disabled", "true");
+      expect(selectButton("DEF One")).toHaveAttribute("aria-disabled", "true");
+      expect(selectButton("DEF One")).toBeEnabled();
       fireEvent.click(selectButton("GK Two"));
       fireEvent.click(selectButton("DEF One"));
       fireEvent.click(selectButton("DEF Five"));
@@ -425,7 +426,7 @@ describe("MyTeamBoard", () => {
         expect(screen.getByTestId("swap-confirmation")).toHaveTextContent("Swapped GK One with GK Two.");
       });
       expect(putBodies).toHaveLength(1);
-      expect(selectButton("DEF One")).not.toBeDisabled();
+      expect(selectButton("DEF One")).not.toHaveAttribute("aria-disabled");
     });
 
     it("offers exactly the pairs the server lists, with no formation rule of its own", async () => {

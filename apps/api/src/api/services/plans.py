@@ -898,7 +898,14 @@ class PlanMutationService:
             )
         except SQLAlchemyError as error:
             self._session.rollback()
-            pending = self.lookup(plan_id, body.mutation_id)
+            try:
+                pending = self.lookup(plan_id, body.mutation_id)
+            except SQLAlchemyError:
+                raise PlannerMutationError(
+                    "outcome_unknown",
+                    503,
+                    "Save outcome is unknown; reconcile the same mutation ID",
+                ) from error
             if pending.status == "already_committed":
                 return pending
             raise PlannerMutationError(

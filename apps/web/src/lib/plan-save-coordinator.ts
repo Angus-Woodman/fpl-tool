@@ -50,6 +50,7 @@ export class PlanSaveCoordinator {
   private snapshot: PlanSaveSnapshot;
   private queue: QueuedPlanIntent[][] = [];
   private active: PlanMutationEnvelope | null = null;
+  private activeSource: QueuedPlanIntent[] | null = null;
   private listeners = new Set<() => void>();
   private transport: Transport;
 
@@ -212,6 +213,7 @@ export class PlanSaveCoordinator {
         });
         Object.freeze(envelope.intents);
         this.active = Object.freeze(envelope);
+        this.activeSource = batch;
       } catch (error) {
         // An unresolvable intent is surfaced for reselection, never retargeted.
         this.publish({
@@ -373,7 +375,10 @@ export class PlanSaveCoordinator {
       );
       if (!plan) throw new Error("Plan no longer exists");
       if (this.active !== envelope) return;
-      this.queue.unshift(structuredClone(envelope.intents));
+      // Re-resolve the original edit against the fresh plan; never replay stale absolute values.
+      this.queue.unshift(
+        structuredClone(this.activeSource ?? envelope.intents),
+      );
       this.active = null;
       this.publish({
         acknowledged: plan,

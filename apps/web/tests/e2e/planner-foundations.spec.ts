@@ -390,7 +390,9 @@ for (const viewport of [
       return startingEdit(plan, intents);
     });
     await page.goto(`/plans/${initial.plan_id}`);
-    await page.getByLabel("Plan start gameweek", { exact: true }).fill("13");
+    const start = page.getByLabel("Plan start gameweek", { exact: true });
+    await start.fill("13");
+    await start.blur();
     await expect(
       page.getByRole("heading", { name: "Starting state at GW13" }),
     ).toBeVisible();
@@ -556,9 +558,9 @@ test("US1 real API horizon changes never reinterpret chip history", async ({
       await used.click();
       await saved(page);
     }
-    await page
-      .getByLabel("Plan start gameweek", { exact: true })
-      .fill(String(target));
+    const start = page.getByLabel("Plan start gameweek", { exact: true });
+    await start.fill(String(target));
+    await start.blur();
     await expect(
       page.getByRole("heading", {
         name: `Starting state at GW${target}`,
@@ -1023,6 +1025,7 @@ test("US4 real API pricing inspection, correction shortfall, repair and rebased 
   await write(async () => {
     const input = page.getByLabel("Plan start gameweek", { exact: true });
     await input.fill("9");
+    await input.blur();
   });
   await select(9);
   const carried = (await read()).starting_state!;
@@ -1484,7 +1487,9 @@ test("US2 real API chips across periods, clear/move and frozen FH/WC toggles", a
   ).toBeVisible();
   await select(20);
   await toggle("Free Hit");
-  await page.getByLabel("Plan start gameweek", { exact: true }).fill("1");
+  const first = page.getByLabel("Plan start gameweek", { exact: true });
+  await first.fill("1");
+  await first.blur();
   await expect(
     page.getByRole("heading", { name: "Starting state at GW1", exact: true }),
   ).toBeVisible();
@@ -1757,4 +1762,182 @@ test("US6 real API rearrangement parity between My Team and the Planner", async 
     fullPage: true,
   });
   expect(errors).toEqual([]);
+});
+
+test("Phase 9 rendered states at 1440x900 and 390x844: layout, keyboard, tap targets, console and requests", async ({
+  page,
+}, info) => {
+  test.setTimeout(150_000);
+  const longName = "Extraordinarily-Long-Surname Mc'Fadyen-Smythe";
+  const plan = buildPlannerPlan(12, 14);
+  plan.name =
+    "A very long plan name that must wrap instead of clipping at narrow widths 2026/27";
+  for (const week of plan.gameweeks)
+    for (const player of week.players)
+      if ([4, 12].includes(player.player_id)) player.web_name = longName;
+  plan.gameweeks[1].chip = "WILDCARD";
+  plan.gameweeks[1].chip_availability.WILDCARD = {
+    state: "planned_here",
+    reason: null,
+    conflicting_gameweek: null,
+  };
+  plan.gameweeks[1].chip_availability.FREE_HIT = {
+    state: "planned_elsewhere",
+    reason: "Planned for gameweek 12",
+    conflicting_gameweek: 12,
+  };
+  plan.gameweeks[1].chip_availability.BENCH_BOOST = {
+    state: "used_before",
+    reason: "Used before this plan",
+    conflicting_gameweek: null,
+  };
+
+  const consoleErrors: string[] = [];
+  const requests: string[] = [];
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  let mode: "ok" | "error" | "missing" | "slow" | "write-fails" = "ok";
+  const held: (() => void)[] = [];
+  await page.route("http://127.0.0.1:8000/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "OPTIONS")
+      return route.fulfill({ status: 204, headers: HEADERS });
+    requests.push(`${request.method()} ${url.pathname}`);
+    if (request.method() === "POST") {
+      if (mode === "write-fails") return route.abort("failed");
+      return route.fulfill({
+        status: 422,
+        json: { detail: { code: "x", message: "unexpected" } },
+        headers: HEADERS,
+      });
+    }
+    if (mode === "error")
+      return route.fulfill({
+        status: 500,
+        json: { detail: "boom" },
+        headers: HEADERS,
+      });
+    if (mode === "missing")
+      return route.fulfill({
+        status: 404,
+        json: { detail: "missing" },
+        headers: HEADERS,
+      });
+    if (mode === "slow")
+      await new Promise<void>((resolve) => held.push(resolve));
+    return route.fulfill({ json: plan, headers: HEADERS });
+  });
+
+  const overflow = () =>
+    page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
+  const smallTargets = async () =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll("button, a[href], input, select"))
+        .filter((el) => {
+          const box = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return (
+            box.width > 0 &&
+            style.visibility !== "hidden" &&
+            !(el as HTMLButtonElement).disabled &&
+            (box.height < 24 || box.width < 24) &&
+            !(
+              el instanceof HTMLInputElement &&
+              ["checkbox", "radio"].includes(el.type)
+            )
+          );
+        })
+        .map(
+          (el) =>
+            `${el.tagName} ${el.getAttribute("aria-label") ?? el.textContent?.trim()}`,
+        ),
+    );
+  const status = page.getByRole("status");
+
+  for (const viewport of [
+    { name: "desktop", width: 1440, height: 900 },
+    { name: "mobile", width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize({
+      width: viewport.width,
+      height: viewport.height,
+    });
+    const shot = (name: string) =>
+      page.screenshot({
+        path: info.outputPath(`p9-${viewport.name}-${name}.png`),
+        fullPage: true,
+      });
+
+    mode = "slow";
+    const before = requests.length;
+    const loading = page.goto(`/plans/${plan.plan_id}`);
+    await expect(
+      page.getByText("Loading plan...", { exact: true }),
+    ).toBeVisible();
+    await shot("loading");
+    await expect.poll(() => held.length).toBeGreaterThan(0);
+    mode = "ok";
+    held.splice(0).forEach((resolve) => resolve());
+    await loading;
+    mode = "ok";
+    await expect(
+      page.getByRole("button", { name: "Select P1", exact: true }),
+    ).toBeVisible();
+    expect(
+      requests.slice(before).filter((r) => r.startsWith("GET /plans/")).length,
+    ).toBeLessThanOrEqual(2);
+
+    await page.getByLabel("Gameweek 13", { exact: true }).click();
+    await expect(page.getByRole("heading", { name: plan.name })).toBeVisible();
+    expect(await overflow()).toBe(true);
+    await shot("plan-chips-long-names");
+    expect(await smallTargets()).toEqual([]);
+
+    const select = page
+      .getByRole("button", { name: `Select ${longName}`, exact: true })
+      .first();
+    await select.scrollIntoViewIfNeeded();
+    await select.focus();
+    await expect(select).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(select).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      page.getByRole("button", { name: "Clear selection" }),
+    ).toBeVisible();
+    expect(await overflow()).toBe(true);
+    await shot("selected-long-name");
+    await page.keyboard.press("Enter");
+    await expect(select).toHaveAttribute("aria-pressed", "false");
+
+    mode = "write-fails";
+    await page.getByLabel("Make P5 captain", { exact: true }).click();
+    await expect(status.filter({ hasText: /^Not saved$/ })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry Same Edit" }),
+    ).toBeVisible();
+    expect(await overflow()).toBe(true);
+    await shot("not-saved");
+    mode = "ok";
+
+    for (const [state, text] of [
+      ["error", /boom|Failed|500|error/i],
+      ["missing", /no longer exists/i],
+    ] as const) {
+      mode = state;
+      await page.goto(`/plans/${plan.plan_id}`);
+      await expect(page.getByText(text).first()).toBeVisible();
+      expect(await overflow()).toBe(true);
+      await shot(state);
+    }
+    mode = "ok";
+  }
+  expect(
+    consoleErrors.filter(
+      (entry) =>
+        !/Failed to load resource|net::ERR|status of (404|500)/i.test(entry),
+    ),
+  ).toEqual([]);
 });

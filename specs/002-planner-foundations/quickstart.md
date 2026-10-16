@@ -1,6 +1,6 @@
 # Planner Foundations Validation Guide
 
-This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) and T054-T065 (US4 Official Selling Prices And Financial Resolution) and T066-T075 (US5 Persistence And Navigation Safety) and T076-T083 (US6 Rearrange XI And Bench Like My Team) are implemented and verified as recorded here. Phase 9 polish and later work are not certified by these increments. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
+This guide retains the full feature's validation scenarios below. T001-T037 (shared foundations and US1 Starting State), T038-T044 (US2 Plan Chips Across Both Periods) and T045-T053 (US3 Transfers, Hits And Squad Flow) and T054-T065 (US4 Official Selling Prices And Financial Resolution) and T066-T075 (US5 Persistence And Navigation Safety) and T076-T083 (US6 Rearrange XI And Bench Like My Team) and T084-T090 (Phase 9 polish and cross-cutting verification) are implemented and verified as recorded here. See [plan.md](plan.md), [data-model.md](data-model.md) and [contracts/planner-api.md](contracts/planner-api.md); [spec.md](spec.md) remains the acceptance authority.
 
 ## Prerequisites And Safety
 
@@ -751,3 +751,138 @@ not edited. No extension hooks are registered.
 - Keyboard-only traversal and screen-reader output were reviewed by markup
   (buttons with `aria-pressed`, a polite live region) but not with a screen
   reader.
+
+## Phase 9: Cross-Cutting Verification Evidence (2026-10-16)
+
+Scope: T084-T090 only. Both requirements-quality checklists passed before work (35/35 and 16/16)
+and were not edited. No extension hooks are registered. Nothing was committed by the agent.
+
+### T084 Acceptance Evidence Map (FR-001-FR-049, SC-001-SC-009)
+
+Built by reading the tests (not by trusting earlier narratives); `ENG` = `packages/fpl_engine/tests`,
+`API` = `apps/api/tests`, `PB` = `apps/web/tests/plans/plan-board.test.tsx`, `E2E` =
+`apps/web/tests/e2e/planner-foundations.spec.ts`. J1-J7 are the quickstart journeys above.
+
+| Requirements | Owning-layer evidence | Browser |
+|---|---|---|
+| FR-001-FR-008 starting state | ENG `test_starting_state_*`, `test_period_boundary_*`, `test_contradictory_starting_chip_*`; API `test_new_plan_captures_an_independent_ready_boundary_*`, `test_legacy_initialization_is_once_only_*`, migration round-trip; PB starting-state, FT0 and basis-correction cases | J1 (stub), J7 |
+| FR-009-FR-018, SC-003/004 chips | ENG `TestPlannerChipPeriods::*`, `test_chip_reasons_*`; API `test_chip_http_bypass_*` (15 HTTP zero-write cases incl. FR-007 declarations), `test_chip_http_clear_move_*`; PB chip-state cases incl. all four chips together | J4 (real API) |
+| FR-019-FR-025, SC-002 allowance/hits | ENG `test_us3_allowance_hits_and_cap_matrix`, `test_us3_hand_calculated_chain_*`, plus new FR-021/022/023 cases | J4 |
+| FR-026-FR-029 flow-forward/legality | ENG `test_wildcard_*`, `test_example_a_*`, `test_example_b_*`; API `test_us3_direct_api_rejects_illegal_state_after_propagation`, new SC-009 HTTP zero-write cases | J4, J6 |
+| FR-030-FR-036, FR-048/049, SC-005 prices/resolution | ENG `test_official_sale_steps`, `test_us4_*`; API `test_us4_*` (view, SQL freeze, reopen) | J3 |
+| FR-037-FR-042, SC-006/007 persistence | coordinator and PB cases, API/SQL fault-boundary cases | J2, J5 |
+| FR-043-FR-047, SC-008/009 rearrangement | ENG `TestRearrangement`, `test_us6_*`; API `test_us6_http_*`; PB direct-rearrangement | J6 (real API) |
+
+Acceptance cases added in this phase after the audit found them weak or missing:
+
+- FR-021: following gameweek after Wildcard/Free Hit across banked 0-5 and 0/3 moves (32 engine cases).
+- FR-022/FR-023: Bench Boost/Triple Captain in GW1 stay hit-free with GW2 exactly 1; only WC/FH/GW1 are unlimited.
+- FR-049 relocation: the (-1,-3) to (0,-2) case asserted before and after in the engine and again after a
+  guarded SQL reopen (earliest failure GW9 then GW10, derived from replay only).
+- FR-007 and SC-009 over HTTP: used-chip declaration contradicting a planned chip, and illegal formation,
+  club-limit, squad-shape and unknown-captain requests all reject 422 with zero SQL writes.
+- FR-016/SC-004: all four chips with different states and reasons in one gameweek.
+- FR-041/FR-038: an accepted provenance correction stays visible, "Not saved", guarded on departure and
+  retries with the same mutation ID (component level).
+
+Mutation checks: FR-021 (removing the banked-transfer rule failed 16 cases) and FR-022 (changing the GW1
+carry value failed 2 cases).
+
+Still Partial after the audit (limits, not hidden): J1 first-gameweek transfer accounting and the FT3 plan
+run only against a stub in the browser (accounting itself is asserted in the engine and over HTTP/SQL); J5
+real-browser coverage uses captain edits, not transfer quote retention (covered at API/SQL and, for a
+provenance correction, component level); J7 legacy start-later rebase has stub browser coverage plus
+API/service tests but no real-API browser journey; FR-008 legacy plans after `--apply` have no browser
+journey; FR-036 inspection is tested per transfer, not for every shown bank figure.
+
+### T085 Guarded Database Suite
+
+`mise exec -- make test-integration` (applies Alembic head `c6f91a2d83b0` to `fpl_test`, then the
+whole API suite with `RUN_DB_TESTS=1` and only `TEST_DATABASE_URL`): 488 tests, 6 skipped (the real
+browser journeys, which need `RUN_PLANNER_BROWSER_TESTS=1`), no failures; includes the isolated
+upgrade/backfill/downgrade/re-upgrade and downgrade-refusal-after-new-writes cases. The
+development database was not touched and the `_test` safeguard was not bypassed. After the review
+remediations the whole suite was rerun with browser tests enabled: 489 passed, 0 skipped.
+
+### T086 Gates And Browser Suite
+
+- Root `make lint typecheck test` after final changes: ruff and ESLint clean; mypy clean on 34 and 80
+  files; engine 445 passed; API 314 passed and 175 skipped without the guarded DB; web 193 passed
+  in 13 files.
+- Guarded API suite with real frontend to API to PostgreSQL journeys (horizon, chips, transfers,
+  pricing, persistence, rearrangement): 489 passed. Fixture Planner journeys plus the Phase 9 rendered
+  states spec: 9 passed. My Team stub and smoke specs: 7 passed.
+- Production build ran through `make frontend-verify-build` on an owned preview at 127.0.0.1:3101 (3100
+  was held by an old user-owned listener and left alone; 3000 and 8000 were never used). Cleanup was
+  registered before building; after every run the owned preview had exited, port 3101 was free and
+  `.next-copilot` was absent.
+
+### T087 Rendered UI (desktop 1440x900, mobile 390x844)
+
+The durable Phase 9 spec drives a stateful stubbed API (never development data) and records
+screenshots per state at both viewports. Observed and asserted:
+
+- Loading, plan with a long plan name and 44-character player names, chip states (planned here,
+  planned elsewhere, used before), selected card, accepted-but-not-saved with Retry Same Edit, API
+  error and missing plan: no horizontal overflow, long names wrap, nothing overlaps.
+- Keyboard: Select receives focus, Enter selects and deselects (`aria-pressed`), Clear selection appears.
+- Tap targets: every enabled control is at least 24x24 CSS px (WCAG 2.2 minimum); the standalone "Back
+  to plans" link was 20px high and was padded. The compact buttons do not reach the 44px
+  recommendation.
+- Console and network: no page errors or unexpected console errors; at most two `GET /plans/{id}`
+  per load.
+- Previously captured desktop/mobile evidence for the starting panel, price inspection and financial
+  resolution states (increments 1-4) was not re-screenshotted in this phase.
+- Observed, not changed: the global app navigation is clipped at 390px (last items cut off). It is
+  pre-existing shell code outside this feature.
+- Not verified: screen-reader output, Safari/Firefox (Chromium only).
+
+### T088 Operator Documentation
+
+`README.md` now has a "Planner foundations rollout" section: backup, additive migration, coordinated
+web/API writer switch (old PUT/PATCH return 410), read-only `--check`, explicit-approval `--apply`,
+pending-plan diagnostics and rollback limits (no lossless downgrade after new-only writes). The
+`--check` command was run against the isolated `_test` database only (returned `[]`, exit 0); `--apply`
+was never run on persistent data.
+
+### T089 Independent Review And Remediation
+
+A read-only review (code-review skill, separate agents for engine/API and web, then a second review of
+the remediation diff) found no High defect in replay, accounting or idempotency. Defects fixed, each
+with a failing test first:
+
+- Rename editor closed the moment it opened (High): now closes only when its own submitted name is
+  acknowledged.
+- Horizon From/To inputs saved on every keystroke, so typing a two-digit gameweek could trim and drop
+  plan content: now commit on blur/Enter with 1-38 validation, and reset after a server rejection.
+- `revalidate()` replayed already-resolved absolute values over a concurrent writer's change: it now
+  re-resolves the original edit against the fresh plan.
+- A transfer plus a horizon trim in one batch crashed with `StopIteration` (500): now a 422 rule
+  violation.
+- Unbounded request integers could be accepted, then fail forever as retryable: ids are bounded to
+  int4, prices to 1000.0m, batches to 100 intents.
+- A database outage during the post-failure lookup surfaced as a bare 500: now `outcome_unknown` 503;
+  the response-building catch-all is logged.
+- Swap controls: `aria-disabled` instead of `disabled` while saving (focus is kept), described valid
+  targets, a live no-target notice, `aria-expanded` on Transfer toggles.
+- README order, backup directory, rehearsal URL and `mise exec` prefixes corrected.
+
+Findings reviewed and deliberately not changed (open limits): legacy writers/services and unused engine
+helpers remain behind the 410 routes (removal is a separate cleanup); `provisional_dependencies` marks a
+plan provisional whenever any held player has an assumed price (needs a product decision against
+FR-032/FR-036); `set_starting_chips` defaults `free_hit_gameweek_19` to false when omitted; GET and
+receipt lookup take shared row locks; repeated full replays per GET; initialization turns any
+`ValueError` into `legacy_pending`; the departure guard does not cover Back/forward navigation or an
+uncommitted typed field, and `PlansList` rename has no guard; `PlansList` rename completion matches any
+newer revision; uncontrolled starting-state fields keep a rejected value on screen; the transfer picker
+can show a stale pool after a late response; `reconcile()` is not guarded against a concurrent retry;
+non-JSON 5xx responses lose their status in the mutation reader; some accessible names use raw player
+IDs and several controls are 24-28px.
+
+### T090 Final Diff
+
+Inspected `git diff` (19 working-tree files, no dependency, lockfile, toolchain, migration or CI changes)
+and the whole feature diff against the base: the only metadata files touched by the feature are the
+isolated-preview Makefile targets, the `.next-copilot` tsconfig include and the browser-verification
+skill, all intended. `git diff --check` is clean. Material decisions: engine is the single rule
+authority; saved prices are never repriced by refresh; no lossless downgrade is offered.

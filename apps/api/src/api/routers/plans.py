@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Annotated, TypeVar
 from uuid import UUID
@@ -42,6 +43,8 @@ from fastapi.encoders import jsonable_encoder
 from fpl_engine.planning.mutations import MutationRejectedError
 from fpl_engine.rules import RuleViolationError
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/plans", tags=["plans"])
 
@@ -242,6 +245,7 @@ def _mutation_call(
             candidate=view(outcome.candidate),
         )
     except Exception as error:
+        logger.exception("Planner response unavailable for mutation %s", mutation_id)
         raise HTTPException(
             503,
             detail={

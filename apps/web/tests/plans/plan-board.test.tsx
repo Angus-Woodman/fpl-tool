@@ -976,6 +976,116 @@ describe("PlanBoard", () => {
     },
   );
 
+  it("FR-016 shows all four chips in one gameweek with visibly different states and reasons", async () => {
+    const plan = buildPlannerPlan(17, 22);
+    const week = plan.gameweeks[1];
+    week.chip = "WILDCARD";
+    week.chip_availability = {
+      WILDCARD: {
+        state: "planned_here",
+        reason: null,
+        conflicting_gameweek: null,
+      },
+      FREE_HIT: {
+        state: "planned_elsewhere",
+        reason: "Planned for gameweek 17",
+        conflicting_gameweek: 17,
+      },
+      BENCH_BOOST: {
+        state: "used_before",
+        reason: "Used before this plan",
+        conflicting_gameweek: null,
+      },
+      TRIPLE_CAPTAIN: {
+        state: "rule_unavailable",
+        reason: "Triple Captain is unavailable here",
+        conflicting_gameweek: null,
+      },
+    };
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    fireEvent.click(await screen.findByLabelText("Gameweek 18"));
+
+    const chip = (name: string) => screen.getByRole("button", { name });
+    expect(chip("Wildcard")).toHaveAttribute("aria-pressed", "true");
+    expect(chip("Free Hit")).toBeDisabled();
+    expect(chip("Bench Boost")).toBeDisabled();
+    expect(chip("Triple Captain")).toBeDisabled();
+    const reasons = [
+      "Planned for gameweek 17",
+      "Used before this plan",
+      "Triple Captain is unavailable here",
+    ];
+    for (const reason of reasons)
+      expect(screen.getByText(reason, { exact: true })).toBeVisible();
+    expect(new Set(reasons).size).toBe(3);
+    // One chip per gameweek: with Wildcard here, no other chip may be moved in.
+    expect(
+      screen.queryByRole("button", { name: /^Move / }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("FR-041 keeps an accepted provenance correction visible, not saved and retryable with the same ID", async () => {
+    const plan = buildPlannerPlan();
+    const applyCorrection = (current: PlanResponse, intents: PlanIntent[]) => {
+      for (const intent of intents) {
+        if (intent.kind !== "correct_purchase_price") continue;
+        const player = current.starting_state!.players.find(
+          (item) => item.ownership_id === intent.ownership_id,
+        )!;
+        player.provenance.confirmation = "user_confirmed";
+        player.purchase_price_tenths = intent.price_tenths;
+      }
+      return current;
+    };
+    const candidate = applyCorrection(structuredClone(plan), [
+      {
+        kind: "correct_purchase_price",
+        ownership_id: plannerIdentity(1002),
+        price_tenths: 48,
+      },
+    ]);
+    const { posts, server } = plannerServer(plan, {
+      apply: applyCorrection,
+      post: async (_envelope, call) =>
+        call === 1
+          ? json(
+              {
+                detail: {
+                  code: "accepted_not_saved",
+                  message:
+                    "Accepted edit is not saved; retry the same mutation ID",
+                  plan,
+                  candidate,
+                },
+              },
+              503,
+            )
+          : undefined,
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    const price = await screen.findByLabelText("P2 purchase price");
+    fireEvent.change(price, { target: { value: "4.8" } });
+    fireEvent.blur(price);
+
+    await waitFor(() => expect(statusText()).toBe("Not saved"));
+    expect(screen.getByLabelText("P2 purchase price")).toHaveValue(4.8);
+    expect(server.read().revision).toBe(0);
+    const unload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry Same Edit" }));
+    await waitFor(() => expect(statusText()).toBe("Saved"));
+    expect(posts).toHaveLength(2);
+    expect(posts[1]).toEqual(posts[0]);
+    expect(server.read().revision).toBe(1);
+    expect(screen.getByLabelText("P2 purchase price")).toHaveValue(4.8);
+    const calm = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(calm);
+    expect(calm.defaultPrevented).toBe(false);
+  });
+
   it("US2 updates named chip reasons only after acknowledged move and clear", async () => {
     const plan = buildPlannerPlan(17, 22);
     plan.starting_state!.used_chips = ["FREE_HIT"];
@@ -1587,6 +1697,35 @@ describe("PlanBoard", () => {
       expect(saveCalls).toHaveLength(0);
     });
 
+    it("describes valid targets to assistive technology and announces when there are none", async () => {
+      mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      await screen.findByRole("button", { name: "Select GK One" });
+      const notice = screen.getByTestId("no-targets-notice");
+      expect(notice).toHaveAttribute("aria-live", "polite");
+      expect(notice).toBeEmptyDOMElement();
+
+      fireEvent.click(selectButton("DEF One"));
+      expect(selectButton("DEF Five")).toHaveAccessibleDescription(
+        "Valid swap target",
+      );
+      expect(selectButton("MID Five")).not.toHaveAccessibleDescription();
+
+      fireEvent.click(selectButton("MID One"));
+      expect(notice).toHaveTextContent("No valid swap targets for MID One.");
+    });
+
+    it("exposes whether a transfer picker is open", async () => {
+      mockFetch(planWithTargets(targets));
+      render(<PlanBoard planId={1} />);
+      const transfer = await screen.findByLabelText("Transfer MID One");
+      expect(transfer).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(transfer);
+      await waitFor(() =>
+        expect(transfer).toHaveAttribute("aria-expanded", "true"),
+      );
+    });
+
     it("says so when the selected player has no legal targets", async () => {
       mockFetch(planWithTargets(targets));
       render(<PlanBoard planId={1} />);
@@ -1813,9 +1952,9 @@ describe("PlanBoard", () => {
     it("never announces a swap the server rejected after a later successful horizon edit", async () => {
       const posts = await rejectedSwapBoard();
 
-      fireEvent.change(screen.getByLabelText("To GW"), {
-        target: { value: "1" },
-      });
+      const end = screen.getByLabelText("To GW");
+      fireEvent.change(end, { target: { value: "1" } });
+      fireEvent.blur(end);
       await waitFor(() => expect(posts).toHaveLength(2));
       await savedStatus();
 
@@ -1890,11 +2029,20 @@ describe("PlanBoard", () => {
       fireEvent.click(selectButton("DEF One"));
       fireEvent.click(selectButton("DEF Five"));
 
-      await waitFor(() => expect(selectButton("DEF One")).toBeDisabled());
-      expect(selectButton("GK One")).toBeDisabled();
+      await waitFor(() =>
+        expect(selectButton("DEF One")).toHaveAttribute(
+          "aria-disabled",
+          "true",
+        ),
+      );
+      expect(selectButton("GK One")).toHaveAttribute("aria-disabled", "true");
+      // Never natively disabled, so a keyboard user keeps focus on the control.
+      expect(selectButton("GK One")).toBeEnabled();
 
       gate.resolve();
-      await waitFor(() => expect(selectButton("GK One")).not.toBeDisabled());
+      await waitFor(() =>
+        expect(selectButton("GK One")).not.toHaveAttribute("aria-disabled"),
+      );
     });
 
     it("shows the rule explanation and no confirmation when the server rejects a swap", async () => {
@@ -2296,6 +2444,92 @@ describe("PlanBoard US5 persistence", () => {
     );
     await waitFor(() => expect(statusText()).toBe("Saved"));
     expect(posts).toHaveLength(1);
+  });
+
+  it("keeps the rename editor open after Rename and closes it only when its own save is acknowledged", async () => {
+    const plan = buildPlannerPlan(12, 13);
+    const { posts } = plannerServer(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rename plan" }));
+    const input = await screen.findByLabelText("Plan name");
+    expect(input).toHaveValue(plan.name);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByLabelText("Plan name")).toBeInTheDocument();
+    expect(posts).toHaveLength(0);
+
+    fireEvent.change(input, { target: { value: "Renamed plan" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Plan name")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Renamed plan" }),
+    ).toBeInTheDocument();
+  });
+
+  it("commits a horizon bound on blur only, so typing a multi-digit gameweek never saves intermediate values", async () => {
+    const plan = buildPlannerPlan(8, 12);
+    const { posts } = plannerServer(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    const end = await screen.findByLabelText("Plan end gameweek");
+
+    fireEvent.change(end, { target: { value: "1" } });
+    fireEvent.change(end, { target: { value: "15" } });
+    expect(posts).toHaveLength(0);
+    expect(end).toHaveValue(15);
+
+    fireEvent.blur(end);
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0].intents).toEqual([
+      { kind: "change_horizon", start_gameweek: 8, end_gameweek: 15 },
+    ]);
+  });
+
+  it("puts a horizon bound the server rejected back to the saved value", async () => {
+    const plan = buildPlannerPlan(8, 12);
+    const { posts } = plannerServer(plan, {
+      post: async () =>
+        json(
+          {
+            detail: {
+              code: "plan_horizon",
+              message: "Start gameweek must not exceed end gameweek",
+            },
+          },
+          422,
+        ),
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    const end = await screen.findByLabelText("Plan end gameweek");
+
+    fireEvent.change(end, { target: { value: "7" } });
+    fireEvent.blur(end);
+
+    expect(
+      await screen.findByText("Start gameweek must not exceed end gameweek"),
+    ).toBeInTheDocument();
+    expect(posts).toHaveLength(1);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Plan end gameweek")).toHaveValue(12),
+    );
+  });
+
+  it("restores the field and says why when a horizon bound is not a whole gameweek from 1 to 38", async () => {
+    const plan = buildPlannerPlan(8, 12);
+    const { posts } = plannerServer(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    const end = await screen.findByLabelText("Plan end gameweek");
+
+    fireEvent.change(end, { target: { value: "39" } });
+    fireEvent.blur(end);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /whole gameweek from 1 to 38/i,
+    );
+    expect(screen.getByLabelText("Plan end gameweek")).toHaveValue(12);
+    expect(posts).toHaveLength(0);
   });
 
   it("guards native and in-app departure only while work is unsaved", async () => {

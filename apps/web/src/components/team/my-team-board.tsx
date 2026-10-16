@@ -859,7 +859,7 @@ export function MyTeamBoard(): JSX.Element {
           {refreshState.type === "error" && <p className="mb-4 text-sm text-red-700">{refreshState.message}</p>}
           <SwapAnnouncement message={swapConfirmation} />
           {swapState.type === "error" && <p className="mb-4 text-sm text-red-700">{swapState.message}</p>}
-          {selectedPlayer && selectedHasNoTargets && <NoTargetsNotice name={selectedPlayer.web_name} />}
+          <NoTargetsNotice name={selectedPlayer && selectedHasNoTargets ? selectedPlayer.web_name : null} />
 
           {pointsRevealed && (
             <div className="mb-5 grid gap-3 sm:grid-cols-3">

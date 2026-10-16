@@ -2061,3 +2061,24 @@ def test_us4_rebased_correction_has_no_dangling_source_and_is_independent_of_my_
     assert not evaluate_plan(reopened, planner_metadata).diagnostics
     after_edit = mutate({"kind": "change_captain", "gameweek_number": 9, "player_id": 4})
     assert after_edit.boundary == reopened.boundary
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_database_outage_during_post_failure_lookup_is_outcome_unknown_not_a_crash(
+    guarded_mutations, monkeypatch
+):
+    from api.repositories.plan_repository import PlanRepository
+    from api.services.plans import PlanMutationService, PlannerMutationError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    service, plan_id = guarded_mutations
+
+    def fail(*args, **kwargs):
+        raise SQLAlchemyError("Injected outage")
+
+    monkeypatch.setattr(PlanRepository, "save_canonical", fail)
+    monkeypatch.setattr(PlanMutationService, "lookup", fail)
+    with pytest.raises(PlannerMutationError) as failed:
+        service.mutate(plan_id, mutation_body())
+    assert (failed.value.code, failed.value.status_code) == ("outcome_unknown", 503)
+    assert "same mutation ID" in failed.value.message

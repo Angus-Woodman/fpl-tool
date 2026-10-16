@@ -344,6 +344,15 @@ def test_guarded_http_contracts_and_canonical_get(guarded_client):
             {"kind": "set_starting_chips", "used_chips": [], "free_hit_gameweek_19": True},
             "Free Hit conflicts with gameweek 19",
         ),
+        *[
+            (
+                17,
+                [{"kind": "activate_chip", "gameweek_number": 18, "chip": chip}],
+                {"kind": "set_starting_chips", "used_chips": [chip]},
+                "Gameweek 18",
+            )
+            for chip in ("WILDCARD", "BENCH_BOOST")
+        ],
     ],
 )
 @pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
@@ -1324,3 +1333,161 @@ def test_us6_http_illegal_direct_swaps_reject_with_the_rule_explanation_and_writ
                     ],
                 )
             )
+
+
+@pytest.mark.parametrize(
+    ("violation", "reason"),
+    [
+        ("formation", "Starting XI must contain between"),
+        ("club", "more than 3 players from one team"),
+        ("squad", "Squad must contain 2 GK, 5 DEF, 5 MID, and 3 FWD"),
+        ("captain", "no longer owned"),
+    ],
+)
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_sc009_http_squad_lineup_and_captain_violations_reject_with_zero_writes(
+    guarded_client, planner_session, violation, reason
+):
+    from api.models.entities import PlanModel, PlayerModel
+    from sqlalchemy import select
+
+    client, plan_id = guarded_client
+    accepted = _post(
+        client,
+        plan_id,
+        900,
+        0,
+        [
+            {
+                "kind": "add_transfer",
+                "gameweek_number": 8,
+                "outgoing_player_id": 2,
+                "outgoing_ownership_id": "00000000-0000-0000-0000-0000000003ea",
+                "incoming_player_id": 102,
+            }
+        ],
+    )
+    assert accepted.status_code == 200, accepted.text
+    if violation == "club":
+        planner_session.get(PlayerModel, 103).team_id = planner_session.get(PlayerModel, 1).team_id
+        planner_session.commit()
+    swap = lambda first, second: {  # noqa: E731
+        "kind": "swap_lineup_players",
+        "gameweek_number": 9,
+        "first_player_id": first,
+        "second_player_id": second,
+    }
+    transfer_in = lambda incoming: {  # noqa: E731
+        "kind": "add_transfer",
+        "gameweek_number": 9,
+        "outgoing_player_id": 3,
+        "outgoing_ownership_id": "00000000-0000-0000-0000-0000000003eb",
+        "incoming_player_id": incoming,
+    }
+    intents = {
+        "formation": [swap(102, 14), swap(3, 15)],
+        "club": [transfer_in(103)],
+        "squad": [transfer_in(101)],
+        "captain": [{"kind": "change_captain", "gameweek_number": 9, "player_id": 999}],
+    }[violation]
+    tables = [table for name, table in PlanModel.metadata.tables.items() if name.startswith("plan")]
+
+    def snapshot():
+        return [
+            list(
+                planner_session.execute(
+                    select(table).order_by(*table.primary_key.columns)
+                ).mappings()
+            )
+            for table in tables
+        ]
+
+    before = snapshot()
+    planner_session.rollback()
+    current = client.get(f"/plans/{plan_id}").json()
+
+    response = _post(client, plan_id, 901, 1, intents)
+
+    assert response.status_code == 422, response.text
+    assert reason in response.json()["detail"]["message"]
+    assert snapshot() == before
+    assert client.get(f"/plans/{plan_id}").json() == current
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        {
+            "kind": "correct_purchase_price",
+            "ownership_id": "00000000-0000-0000-0000-0000000003ea",
+            "price_tenths": 2**40,
+        },
+        {"kind": "change_captain", "gameweek_number": 9, "player_id": 2**40},
+        {
+            "kind": "swap_lineup_players",
+            "gameweek_number": 9,
+            "first_player_id": 2,
+            "second_player_id": 2**40,
+        },
+        {
+            "kind": "add_transfer",
+            "gameweek_number": 9,
+            "outgoing_player_id": 2,
+            "outgoing_ownership_id": "00000000-0000-0000-0000-0000000003ea",
+            "incoming_player_id": 2**40,
+        },
+    ],
+)
+def test_out_of_range_integers_are_rejected_before_acceptance(intent):
+    from api.schemas.plans import PlanMutationRequestBody
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PlanMutationRequestBody.model_validate(
+            {
+                "mutation_id": "00000000-0000-0000-0000-000000000001",
+                "expected_revision": 0,
+                "intents": [intent],
+            }
+        )
+
+
+def test_a_mutation_batch_is_bounded():
+    from api.schemas.plans import PlanMutationRequestBody
+    from pydantic import ValidationError
+
+    intents = [{"kind": "rename_plan", "name": "Plan"}] * 101
+    with pytest.raises(ValidationError):
+        PlanMutationRequestBody.model_validate(
+            {
+                "mutation_id": "00000000-0000-0000-0000-000000000001",
+                "expected_revision": 0,
+                "intents": intents,
+            }
+        )
+
+
+def test_boundary_values_of_the_new_bounds_are_still_accepted():
+    from api.schemas.plans import (
+        MAX_ID,
+        MAX_INTENTS_PER_MUTATION,
+        MAX_PRICE_TENTHS,
+        PlanMutationRequestBody,
+    )
+
+    intents = [
+        {
+            "kind": "correct_purchase_price",
+            "ownership_id": "00000000-0000-0000-0000-0000000003ea",
+            "price_tenths": MAX_PRICE_TENTHS,
+        },
+        {"kind": "change_captain", "gameweek_number": 9, "player_id": MAX_ID},
+    ] + [{"kind": "rename_plan", "name": "Plan"}] * (MAX_INTENTS_PER_MUTATION - 2)
+    body = PlanMutationRequestBody.model_validate(
+        {
+            "mutation_id": "00000000-0000-0000-0000-000000000001",
+            "expected_revision": 0,
+            "intents": intents,
+        }
+    )
+    assert len(body.intents) == MAX_INTENTS_PER_MUTATION

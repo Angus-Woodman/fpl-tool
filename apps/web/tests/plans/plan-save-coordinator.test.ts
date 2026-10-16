@@ -536,6 +536,39 @@ describe("US5 PlanSaveCoordinator persistence contract", () => {
     expect(coordinator.getSnapshot().acknowledged).toEqual(current);
   });
 
+  it("rebases a revalidated field edit onto the fresh plan instead of replaying its stale absolute values", async () => {
+    const initial = buildPlannerPlan(8, 12);
+    const fresh = { ...buildPlannerPlan(9, 12), revision: 1 };
+    const server = createPlannerFixture<PlanResponse, PlanIntent>(
+      fresh,
+      applyPlannerIntents,
+    );
+    const send = vi.fn(committed(server)).mockRejectedValueOnce(
+      new PlannerMutationError(409, {
+        code: "revision_conflict",
+        message: "The plan changed in another session",
+        plan: fresh,
+      }),
+    );
+    const load = vi.fn().mockResolvedValue(fresh);
+    const coordinator = new PlanSaveCoordinator(initial, { send, load });
+    coordinator.enqueue([
+      { kind: "set_horizon_bound", field: "end_gameweek", value: 15 },
+    ]);
+    await waitFor(() =>
+      expect(coordinator.getSnapshot().status).toBe("conflict"),
+    );
+    expect(send.mock.calls[0][1].intents).toEqual([
+      { kind: "change_horizon", start_gameweek: 8, end_gameweek: 15 },
+    ]);
+
+    await coordinator.revalidate();
+    await waitFor(() => expect(coordinator.getSnapshot().status).toBe("saved"));
+    expect(send.mock.calls[1][1].intents).toEqual([
+      { kind: "change_horizon", start_gameweek: 9, end_gameweek: 15 },
+    ]);
+  });
+
   it("treats an unknown receipt 404 as inconclusive and keeps the same ID for retry or reconcile", async () => {
     const initial = buildPlannerPlan();
     const server = createPlannerFixture<PlanResponse, PlanIntent>(

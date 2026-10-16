@@ -7,6 +7,10 @@ from fpl_engine.rules import Chip
 from fpl_engine.rules.chips import ChipAvailability
 from pydantic import BaseModel, ConfigDict, Field
 
+MAX_ID = 2_147_483_647
+MAX_PRICE_TENTHS = 10_000
+MAX_INTENTS_PER_MUTATION = 100
+
 WireUUID = Annotated[UUID, Field(strict=False)]
 WireChip = Annotated[Chip, Field(strict=False)]
 
@@ -42,7 +46,7 @@ class StartingChipsIntent(PlannerIntentBody):
 class CorrectPurchaseIntent(PlannerIntentBody):
     kind: Literal["correct_purchase_price"]
     ownership_id: WireUUID
-    price_tenths: int = Field(gt=0)
+    price_tenths: int = Field(gt=0, le=MAX_PRICE_TENTHS)
 
 
 class ConfirmPurchaseIntent(PlannerIntentBody):
@@ -53,14 +57,14 @@ class ConfirmPurchaseIntent(PlannerIntentBody):
 class CaptainIntent(PlannerIntentBody):
     kind: Literal["change_captain", "change_vice_captain"]
     gameweek_number: int = Field(ge=1, le=38)
-    player_id: int = Field(gt=0)
+    player_id: int = Field(gt=0, le=MAX_ID)
 
 
 class SwapIntent(PlannerIntentBody):
     kind: Literal["swap_lineup_players"]
     gameweek_number: int = Field(ge=1, le=38)
-    first_player_id: int = Field(gt=0)
-    second_player_id: int = Field(gt=0)
+    first_player_id: int = Field(gt=0, le=MAX_ID)
+    second_player_id: int = Field(gt=0, le=MAX_ID)
 
 
 class ChipIntent(PlannerIntentBody):
@@ -80,18 +84,18 @@ class MoveChipIntent(PlannerIntentBody):
 class AddTransferIntent(PlannerIntentBody):
     kind: Literal["add_transfer"]
     gameweek_number: int = Field(ge=1, le=38)
-    outgoing_player_id: int = Field(gt=0)
+    outgoing_player_id: int = Field(gt=0, le=MAX_ID)
     outgoing_ownership_id: WireUUID
-    incoming_player_id: int = Field(gt=0)
+    incoming_player_id: int = Field(gt=0, le=MAX_ID)
 
 
 class EditTransferIntent(PlannerIntentBody):
     kind: Literal["edit_transfer"]
     decision_id: WireUUID
-    outgoing_player_id: int | None = Field(default=None, gt=0)
+    outgoing_player_id: int | None = Field(default=None, gt=0, le=MAX_ID)
     outgoing_ownership_id: WireUUID | None = None
     outgoing_source_decision_id: WireUUID | None = None
-    incoming_player_id: int | None = Field(default=None, gt=0)
+    incoming_player_id: int | None = Field(default=None, gt=0, le=MAX_ID)
 
 
 class RemoveTransferIntent(PlannerIntentBody):
@@ -122,7 +126,7 @@ class PlanMutationRequestBody(BaseModel):
 
     mutation_id: WireUUID
     expected_revision: int = Field(ge=0)
-    intents: list[PlannerIntent] = Field(min_length=1)
+    intents: list[PlannerIntent] = Field(min_length=1, max_length=MAX_INTENTS_PER_MUTATION)
 
 
 class PlanPlayerSelectionRequest(BaseModel):

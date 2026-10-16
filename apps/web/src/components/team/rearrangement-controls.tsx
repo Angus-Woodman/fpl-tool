@@ -35,8 +35,18 @@ export function ClearSelectionButton({
   );
 }
 
-export function NoTargetsNotice({ name }: { name: string }): JSX.Element {
+export function NoTargetsNotice({
+  name,
+}: {
+  name: string | null;
+}): JSX.Element {
   return (
-    <p className="mb-4 text-sm text-slate-700">{noTargetsMessage(name)}</p>
+    <p
+      aria-live="polite"
+      data-testid="no-targets-notice"
+      className={name ? "mb-4 text-sm text-slate-700" : "sr-only"}
+    >
+      {name ? noTargetsMessage(name) : ""}
+    </p>
   );
 }

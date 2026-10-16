@@ -524,6 +524,75 @@ def test_us4_resolution_is_replay_only_after_reopen_and_moves_with_repairs(
     assert all(not w.financial_issue_gameweeks for w in final.gameweeks)
 
 
+def test_fr049_relocated_earliest_failure_is_replay_derived_after_reopen(
+    planner_session, planner_plan, planner_metadata
+):
+    from dataclasses import replace
+
+    from api.models.entities import PlanGameweekModel, PlayerModel
+    from fpl_engine.planning.models import TransferDecision
+
+    service, repository, plan_id = _us4_service(planner_session, planner_plan, planner_metadata)
+
+    def decision(number, outgoing, incoming, price):
+        return TransferDecision(
+            UUID(int=2000 + number),
+            outgoing,
+            UUID(int=1000 + outgoing),
+            incoming,
+            UUID(int=3000 + number),
+            54,
+            price,
+            "stored_player_observation",
+            "2026-10-14T12:00:00+00:00",
+            "captured",
+        )
+
+    weeks = tuple(
+        replace(week, transfers=(decision(1, 2, 102, 63),))
+        if week.gameweek_number == 9
+        else replace(week, transfers=(decision(2, 3, 103, 54),))
+        if week.gameweek_number == 10
+        else week
+        for week in planner_plan.gameweeks
+    )
+    broken = replace(planner_plan, gameweeks=weeks)
+    repository.save_canonical(plan_id, broken, evaluate_plan(broken, planner_metadata))
+    planner_session.commit()
+    planner_session.execute(update(PlanGameweekModel).values(bank=999.0, points_hit=0))
+    planner_session.commit()
+    planner_session.expire_all()
+    before = evaluate_plan(repository.load_canonical(plan_id), planner_metadata)
+    assert [w.closing_bank_tenths for w in before.gameweeks] == [10, -1, -3]
+    assert before.earliest_shortfall_gameweek == 9
+
+    planner_session.get(PlayerModel, 2).current_price = 5.4
+    planner_session.get(PlayerModel, 102).current_price = 6.2
+    planner_session.commit()
+    edited = service.mutate(
+        plan_id,
+        _us4_body(
+            1,
+            repository.load_canonical(plan_id).revision,
+            [
+                {
+                    "kind": "edit_transfer",
+                    "decision_id": str(UUID(int=2001)),
+                    "incoming_player_id": 102,
+                }
+            ],
+        ),
+    ).plan
+    planner_session.expire_all()
+    reopened = repository.load_canonical(plan_id)
+    assert reopened == edited
+    after = evaluate_plan(reopened, planner_metadata)
+    assert [w.closing_bank_tenths for w in after.gameweeks] == [10, 0, -2]
+    assert after.earliest_shortfall_gameweek == 10
+    assert after.gameweeks[2].financial_issue_gameweeks == frozenset({10})
+    assert reopened.gameweeks[1].transfers[0].incoming_price_tenths == 62
+
+
 def test_us4_free_hit_branch_issue_stays_temporary_after_reopen(
     planner_session, planner_plan, planner_metadata
 ):

@@ -1167,3 +1167,104 @@ def test_us4_sale_exposes_the_basis_and_provenance_that_produced_it() -> None:
     sale = corrected.evaluation.gameweeks[0].sales[0]
     assert (sale.purchase_price_tenths, sale.selling_price_tenths) == (48, 51)
     assert sale.basis_confirmation == "user_confirmed"
+
+
+def _transfers(players: range, number_offset: int = 0) -> tuple[TransferDecision, ...]:
+    return tuple(build_transfer(p, p + 100, p + number_offset) for p in players)
+
+
+@pytest.mark.parametrize("banked", range(6))
+@pytest.mark.parametrize("chip_name", ["WILDCARD", "FREE_HIT"])
+@pytest.mark.parametrize("next_week_moves", [0, 3])
+def test_fr021_week_after_wildcard_or_free_hit_gets_banked_transfers_plus_one(
+    banked: int, chip_name: str, next_week_moves: int
+) -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    plan = replace(build_plan(), boundary=replace(build_plan().boundary, free_transfers=banked))
+    plan = with_week(plan, 8, chip=Chip(chip_name), transfers=_transfers(range(2, 5)))
+    plan = with_week(plan, 9, transfers=_transfers(range(5, 5 + next_week_moves), 10))
+    chip_week, following = evaluate_plan(plan, metadata()).gameweeks[:2]
+    # The chip week's own arising transfer is not banked: banked N becomes max(N-1, 0), plus one.
+    expected_available = min(5, max(banked - 1, 0) + 1)
+    assert (chip_week.unlimited_transfers, chip_week.points_hit) == (True, 0)
+    assert following.free_transfers_available == expected_available
+    assert following.points_hit == max(next_week_moves - expected_available, 0) * 4
+    assert not following.unlimited_transfers
+
+
+@pytest.mark.parametrize("chip_name", ["BENCH_BOOST", "TRIPLE_CAPTAIN"])
+def test_fr022_gameweek_one_is_hit_free_with_any_chip_and_gameweek_two_has_exactly_one(
+    chip_name: str,
+) -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    base = build_plan(1, 3)
+    plan = replace(base, boundary=replace(base.boundary, free_transfers=None))
+    plan = with_week(plan, 1, chip=Chip(chip_name), transfers=_transfers(range(2, 5)))
+    first, second, third = evaluate_plan(plan, metadata()).gameweeks
+    assert (first.unlimited_transfers, first.transfers_made, first.points_hit) == (True, 3, 0)
+    assert (second.free_transfers_available, second.points_hit) == (1, 0)
+    assert third.free_transfers_available == 2
+
+
+@pytest.mark.parametrize(
+    ("chip_name", "unlimited"),
+    [
+        ("WILDCARD", True),
+        ("FREE_HIT", True),
+        ("BENCH_BOOST", False),
+        ("TRIPLE_CAPTAIN", False),
+        (None, False),
+    ],
+)
+def test_fr023_only_wildcard_free_hit_and_gameweek_one_are_unlimited(
+    chip_name: str | None, unlimited: bool
+) -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.rules import Chip
+
+    plan = with_week(build_plan(), 9, chip=Chip(chip_name) if chip_name else None)
+    weeks = evaluate_plan(plan, metadata()).gameweeks
+    assert [week.unlimited_transfers for week in weeks[:2]] == [False, unlimited]
+
+
+def test_fr049_earliest_failure_is_derived_from_replay_before_and_after_it_moves_later() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import EditTransfer
+    from fpl_engine.planning.mutations import apply_intents
+
+    first = replace(build_transfer(), incoming_price_tenths=63)
+    second = replace(build_transfer(3, 103, 2), incoming_price_tenths=54)
+    plan = with_week(with_week(build_plan(), 9, transfers=(first,)), 10, transfers=(second,))
+    before = evaluate_plan(plan, metadata())
+    assert [week.closing_bank_tenths for week in before.gameweeks[1:3]] == [-1, -3]
+    assert before.earliest_shortfall_gameweek == 9
+    assert before.gameweeks[2].financial_issue_gameweeks == frozenset({9, 10})
+    repaired = apply_intents(
+        plan,
+        (EditTransfer(first.decision_id, replace(first, incoming_price_tenths=62)),),
+        metadata(),
+    )
+    assert [week.closing_bank_tenths for week in repaired.evaluation.gameweeks[1:3]] == [0, -2]
+    assert repaired.evaluation.earliest_shortfall_gameweek == 10
+    assert repaired.evaluation.gameweeks[2].financial_issue_gameweeks == frozenset({10})
+
+
+def test_batch_that_adds_a_transfer_then_trims_its_gameweek_is_a_rule_violation_not_a_crash() -> (
+    None
+):
+    from fpl_engine.planning.models import AddTransfer, ChangeHorizon
+    from fpl_engine.planning.mutations import apply_intents
+
+    plan = build_plan(8, 11)
+    with pytest.raises(RuleViolationError) as error:
+        apply_intents(
+            plan,
+            (AddTransfer(11, build_transfer()), ChangeHorizon(8, 10)),
+            metadata(),
+        )
+    assert error.value.code == "gameweek_not_in_plan"
+    assert plan == build_plan(8, 11)

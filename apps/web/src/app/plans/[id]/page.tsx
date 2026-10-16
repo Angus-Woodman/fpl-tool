@@ -12,7 +12,10 @@ export default async function PlanDetailPage({
   return (
     <>
       <header className="mb-6">
-        <Link href="/plans" className="text-sm text-slate-700 underline">
+        <Link
+          href="/plans"
+          className="inline-block py-1 text-sm text-slate-700 underline"
+        >
           Back to plans
         </Link>
       </header>
@@ -20,4 +23,3 @@ export default async function PlanDetailPage({
     </>
   );
 }
-
