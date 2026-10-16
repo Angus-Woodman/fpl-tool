@@ -221,6 +221,66 @@ def test_legacy_initialization_is_once_only_and_preserves_original_rows(
 
 
 @pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+@pytest.mark.parametrize(
+    ("stored_bank", "status"),
+    [
+        (0.7000000000000001, "initialized"),
+        (0.6999999999999993, "initialized"),
+        (0.75, "legacy_pending"),
+    ],
+)
+def test_legacy_initialization_repairs_bank_noise_but_still_blocks_invalid_money(
+    planner_session, planner_plan, planner_metadata, stored_bank, status
+):
+    from api.repositories.plan_repository import PlanPlayerSave, PlanRepository
+    from api.repositories.squad_player_lookup_repository import SquadPlayerLookupRepository
+    from api.services.initialize_planner_foundations import InitializePlannerFoundationsService
+    from conftest import seed_planner_players
+
+    seed_planner_players(planner_session, planner_metadata)
+    repository = PlanRepository(planner_session)
+    plan_id = repository.create(
+        name="Legacy noisy bank",
+        start_gameweek=8,
+        end_gameweek=10,
+        initial_bank=stored_bank,
+        initial_free_transfers=1,
+    )
+    for offset, week in enumerate(planner_plan.gameweeks):
+        repository.save_gameweek(
+            plan_id,
+            8 + offset,
+            chip=None,
+            bank=stored_bank,
+            free_transfers_available=1,
+            transfers_made=0,
+            points_hit=0,
+            players=[
+                PlanPlayerSave(
+                    player.player_id,
+                    role.is_starting,
+                    role.bench_order,
+                    role.is_captain,
+                    role.is_vice_captain,
+                )
+                for player, role in zip(planner_plan.boundary.players, week.lineup, strict=True)
+            ],
+        )
+    planner_session.commit()
+    service = InitializePlannerFoundationsService(
+        planner_session, SquadPlayerLookupRepository(planner_session)
+    )
+
+    report = service.execute(plan_id, apply=True)
+
+    assert report.status == status
+    if status == "initialized":
+        assert repository.load_canonical(plan_id).boundary.bank_tenths == 7
+    else:
+        assert "Legacy initial bank must be" in report.diagnostics[0]
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
 def test_initialized_legacy_can_repair_one_independent_blocker_and_reopen(
     planner_session,
     planner_plan,
@@ -1569,8 +1629,9 @@ class FakePlanRepository:
 
 
 class FakeCurrentSquadRepository:
-    def __init__(self, players: list[PlanPlayerSelection] | None = None) -> None:
+    def __init__(self, players: list[PlanPlayerSelection] | None = None, bank: float = 0.5) -> None:
         self._players = players if players is not None else build_squad()
+        self._bank = bank
 
     def get_current(self) -> CurrentSquadRecord | None:
         if not self._players:
@@ -1578,7 +1639,7 @@ class FakeCurrentSquadRepository:
         return CurrentSquadRecord(
             squad_id=1,
             name="My Team",
-            bank=0.5,
+            bank=self._bank,
             free_transfers=1,
             players=[
                 CurrentSquadPlayerRecord(
@@ -1660,6 +1721,39 @@ class TestCreatePlan:
         with pytest.raises(RuleViolationError) as error:
             service.execute(CreatePlanRequest(name="Plan", start_gameweek=1, end_gameweek=4))
         assert error.value.code == "no_squad"
+
+    @pytest.mark.parametrize("stored", [0.5000000000000062, 0.4999999999999938, 0.5])
+    def test_repairs_float_noise_in_the_saved_bank(
+        self, repository: FakePlanRepository, stored: float
+    ) -> None:
+        service = CreatePlanService(repository, FakeCurrentSquadRepository(bank=stored))
+
+        plan = service.execute(CreatePlanRequest(name="Plan", start_gameweek=1, end_gameweek=4))
+
+        assert repository._canonical[plan.plan_id].boundary.bank_tenths == 5
+        assert repr(plan.initial_bank) == "0.5"
+
+    @pytest.mark.parametrize("stored", [0.55, 0.05, float("nan"), float("inf"), 1e308])
+    def test_rejects_a_genuinely_invalid_saved_bank_with_a_readable_error(
+        self, repository: FakePlanRepository, stored: float
+    ) -> None:
+        service = CreatePlanService(repository, FakeCurrentSquadRepository(bank=stored))
+
+        with pytest.raises(RuleViolationError) as error:
+            service.execute(CreatePlanRequest(name="Plan", start_gameweek=1, end_gameweek=4))
+
+        assert error.value.code == "invalid_money"
+        assert error.value.message.startswith("Saved bank")
+        assert repository._plans == {}
+
+    def test_strict_checked_tenths_still_rejects_noise(self) -> None:
+        from api.services.plans import checked_tenths
+
+        with pytest.raises(ValueError, match="whole number of tenths"):
+            checked_tenths(0.5000000000000062, positive=False)
+        with pytest.raises(ValueError, match="positive"):
+            checked_tenths(0.0)
+        assert checked_tenths(0.5, positive=False) == 5
 
 
 class TestUpdatePlan:

@@ -403,3 +403,45 @@ class TestDeterminism:
         )
 
         assert first == second
+
+
+class TestExactBankArithmetic:
+    def test_resulting_bank_is_an_exact_tenth_and_a_drifted_bank_is_normalised(self) -> None:
+        squad = [
+            _priced(
+                p.player_id,
+                p.position,
+                team_id=p.team_id,
+                price=5.9 if p.player_id == 11 else p.price,
+            )
+            for p in _squad()
+        ]
+        candidates = [_priced(21, MID, team_id=121, price=6.6)]
+
+        for bank in (1.2, 1.2000000000000002):
+            results = rank_replacement_candidates(
+                squad=squad,
+                player_out_id=11,
+                candidates=candidates,
+                bank=bank,
+                gameweek_projections=_gameweeks(2),
+                horizons=(1, 2),
+                primary_horizon=1,
+            )
+
+            assert results[0].resulting_bank == 0.5
+            assert repr(results[0].resulting_bank) == "0.5"
+
+    def test_an_invalid_bank_is_rejected_not_rounded(self) -> None:
+        with pytest.raises(RuleViolationError) as error:
+            rank_replacement_candidates(
+                squad=_squad(),
+                player_out_id=11,
+                candidates=[_priced(21, MID, team_id=121, price=4.5)],
+                bank=0.55,
+                gameweek_projections=_gameweeks(1),
+                horizons=(1,),
+                primary_horizon=1,
+            )
+
+        assert error.value.code == "invalid_money"

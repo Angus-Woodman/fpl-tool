@@ -188,3 +188,19 @@ def test_rejects_an_invalid_primary_horizon() -> None:
         assert response.status_code == 422
     finally:
         app.dependency_overrides.clear()
+
+
+def test_returns_422_with_the_invalid_money_code_for_an_invalid_stored_amount() -> None:
+    failure = TransferExplorerFailure(
+        code="invalid_money", message="Bank must be a finite whole number of tenths"
+    )
+    app.dependency_overrides[get_transfer_explorer_service] = (
+        lambda: _FakeGetTransferExplorerService(failure)
+    )
+    try:
+        response = TestClient(app).get("/my-team/transfers/9")
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_money"
+    finally:
+        app.dependency_overrides.clear()

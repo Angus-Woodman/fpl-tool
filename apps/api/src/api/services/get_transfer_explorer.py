@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from fpl_engine.domain import PlayerPosition
+from fpl_engine.rules import RuleViolationError
 from fpl_engine.transfers import GameweekProjections, PricedPlayer, rank_replacement_candidates
 
 from api.repositories.current_squad_repository import CurrentSquadRecord
@@ -228,15 +229,20 @@ class GetTransferExplorerService:
             for candidate in candidate_pool
         ]
 
-        ranked = rank_replacement_candidates(
-            squad=squad_priced,
-            player_out_id=player_out_id,
-            candidates=candidate_priced,
-            bank=current_squad.bank,
-            gameweek_projections=gameweek_projections,
-            horizons=list(HORIZONS),
-            primary_horizon=primary_horizon,
-        )
+        try:
+            ranked = rank_replacement_candidates(
+                squad=squad_priced,
+                player_out_id=player_out_id,
+                candidates=candidate_priced,
+                bank=current_squad.bank,
+                gameweek_projections=gameweek_projections,
+                horizons=list(HORIZONS),
+                primary_horizon=primary_horizon,
+            )
+        except RuleViolationError as error:
+            if error.code != "invalid_money":
+                raise
+            return TransferExplorerFailure(code=error.code, message=error.message)
 
         nearest_gameweek = evaluated_gameweek_numbers[0] if evaluated_gameweek_numbers else None
         outgoing_points_by_gw = [

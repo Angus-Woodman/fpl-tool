@@ -11,6 +11,12 @@ from fpl_engine.rules.chips import (
     validate_chip_usage,
 )
 from fpl_engine.rules.errors import RuleViolationError
+from fpl_engine.rules.money import (
+    MAX_MONEY_TENTHS,
+    exact_tenths,
+    observed_tenths,
+    tenths_to_money,
+)
 from fpl_engine.rules.scoring import (
     CAPTAIN_MULTIPLIER,
     TRIPLE_CAPTAIN_MULTIPLIER,
@@ -54,6 +60,7 @@ __all__ = [
     "FIRST_HALF_FINAL_GAMEWEEK",
     "FREE_TRANSFERS_PER_GAMEWEEK",
     "MAX_BANKED_FREE_TRANSFERS",
+    "MAX_MONEY_TENTHS",
     "MAX_PLAYERS_PER_TEAM",
     "SQUAD_POSITION_COUNTS",
     "SQUAD_SIZE",
@@ -73,13 +80,16 @@ __all__ = [
     "available_chips",
     "captain_multiplier",
     "diff_squads",
+    "exact_tenths",
     "free_transfers_after",
     "has_unlimited_transfers",
     "legal_rearrangements",
+    "observed_tenths",
     "points_hit",
     "rearrange_lineup",
     "score_gameweek",
     "season_half",
+    "tenths_to_money",
     "validate_chip_usage",
     "validate_squad",
     "validate_squad_composition",

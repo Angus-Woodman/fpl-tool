@@ -455,3 +455,47 @@ def test_an_illegal_in_pool_preview_reports_only_legality_errors_never_status() 
     assert result.is_legal is False
     assert result.errors == ("insufficient_bank",)
     assert result.player_in_status == "i"
+
+
+def test_preview_reports_an_exact_tenth_resulting_bank() -> None:
+    service = _service(
+        squad=_squad(bank=0.5),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=5.1)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, TransferPreviewFailure)
+    assert repr(result.resulting_bank) == "0.4"
+
+
+def test_preview_works_from_an_already_drifted_stored_bank() -> None:
+    service = _service(
+        squad=_squad(bank=0.5000000000000062),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=5.0)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, TransferPreviewFailure)
+    assert repr(result.resulting_bank) == "0.5"
+
+
+@pytest.mark.parametrize("bank", [0.55, 0.05])
+def test_preview_returns_a_structured_failure_for_an_invalid_stored_bank(bank: float) -> None:
+    service = _service(
+        squad=_squad(bank=bank),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=5.0)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert isinstance(result, TransferPreviewFailure)
+    assert result.code == "invalid_money"
+    assert result.message.startswith("Bank must be a finite whole number of tenths")

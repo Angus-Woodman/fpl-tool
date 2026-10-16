@@ -302,3 +302,43 @@ def test_upsert_current_squad_service_rejects_a_bad_captain_or_bench_order() -> 
     )
     with pytest.raises(ValueError, match="bench order 1, 2, 3, and 4"):
         service.execute(bad_bench)
+
+
+@pytest.mark.parametrize("bank", [0.5000000000000062, 0.4999999999999938, 0.5000000000000009, 0.5])
+def test_upsert_current_squad_service_normalises_bank_representation_noise(
+    bank: float,
+) -> None:
+    # A rearrangement echoes the loaded bank back, so a drifted stored value must be accepted
+    # and saved as the exact tenth.
+    service, repository = _service_with_repository()
+    base = _build_valid_request()
+    request = UpsertCurrentSquadRequest(
+        bank=bank, free_transfers=base.free_transfers, players=base.players
+    )
+
+    service.execute(request)
+
+    assert repository.saved_request is not None
+    saved_bank = repository.saved_request[0]
+    assert saved_bank == 0.5
+    assert repr(saved_bank) == "0.5"
+
+
+@pytest.mark.parametrize("bank", [0.55, 0.05, 1.234, float("nan"), float("inf"), 1e308])
+def test_upsert_current_squad_service_rejects_an_invalid_bank_without_rounding(
+    bank: float,
+) -> None:
+    from fpl_engine.rules import RuleViolationError
+
+    service, repository = _service_with_repository()
+    base = _build_valid_request()
+    request = UpsertCurrentSquadRequest(
+        bank=bank, free_transfers=base.free_transfers, players=base.players
+    )
+
+    with pytest.raises(RuleViolationError) as error:
+        service.execute(request)
+
+    assert error.value.code == "invalid_money"
+    assert error.value.message.startswith("Bank ")
+    assert repository.saved_request is None

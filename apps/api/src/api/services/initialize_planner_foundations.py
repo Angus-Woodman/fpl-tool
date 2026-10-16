@@ -17,7 +17,7 @@ from fpl_engine.planning.models import (
     TransferDecision,
 )
 from fpl_engine.planning.prices import selling_price_tenths
-from fpl_engine.rules import Chip, RuleViolationError
+from fpl_engine.rules import Chip, RuleViolationError, observed_tenths
 from sqlalchemy.orm import Session
 
 from api.repositories.plan_repository import PlanRepository
@@ -87,7 +87,7 @@ class InitializePlannerFoundationsService:
             boundary = Boundary(
                 starting,
                 seed,
-                checked_tenths(legacy.initial_bank, positive=False),
+                observed_tenths(legacy.initial_bank, label="Legacy initial bank"),
                 None if legacy.start_gameweek == 1 else legacy.initial_free_transfers,
                 origin="legacy_first_gameweek_assumed",
             )

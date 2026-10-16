@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from fpl_engine.domain import PlayerPosition
+from fpl_engine.rules import RuleViolationError
 from fpl_engine.transfers import (
     SingleTransferEvaluation,
     TransferPlayer,
@@ -179,3 +180,83 @@ class TestDeterminism:
         second = _run(squad, 11, incoming, 0.0)
 
         assert first == second
+
+
+class TestExactBankArithmetic:
+    def test_the_float_formula_would_have_drifted_for_this_case(self) -> None:
+        assert 1.2 + 5.9 - 6.6 != 0.5
+
+    def test_resulting_bank_is_an_exact_tenth(self) -> None:
+        squad = [
+            _player(
+                p.player_id,
+                p.position,
+                team_id=p.team_id,
+                price=5.9 if p.player_id == 11 else p.price,
+            )
+            for p in _squad()
+        ]
+        incoming = _player(16, MID, team_id=116, price=6.6)
+
+        result = _run(squad, player_out_id=11, player_in=incoming, bank=1.2)
+
+        assert result.resulting_bank == 0.5
+        assert repr(result.resulting_bank) == "0.5"
+
+    def test_a_chain_of_transfers_never_accumulates_noise(self) -> None:
+        import random
+        from decimal import Decimal
+
+        rng = random.Random(1)
+        bank = 0.5
+        expected_tenths = 5
+        for _ in range(300):
+            incoming_tenths = rng.randint(39, 145)
+            incoming = _player(16, MID, team_id=116, price=incoming_tenths / 10)
+            bank = _run(_squad(), player_out_id=11, player_in=incoming, bank=bank).resulting_bank
+            expected_tenths += 45 - incoming_tenths
+            assert Decimal(str(bank)) * 10 == expected_tenths
+
+    def test_a_drifted_stored_bank_is_normalised_in_the_result(self) -> None:
+        incoming = _player(16, MID, team_id=116, price=4.5)
+
+        result = _run(_squad(), player_out_id=11, player_in=incoming, bank=0.5000000000000062)
+
+        assert result.resulting_bank == 0.5
+        assert repr(result.resulting_bank) == "0.5"
+        assert result.is_legal is True
+
+    @pytest.mark.parametrize("bank", [0.55, 0.05, float("nan"), float("inf"), 1e308])
+    def test_an_invalid_bank_is_rejected_not_rounded(self, bank: float) -> None:
+        incoming = _player(16, MID, team_id=116, price=4.5)
+
+        with pytest.raises(RuleViolationError) as error:
+            _run(_squad(), player_out_id=11, player_in=incoming, bank=bank)
+
+        assert error.value.code == "invalid_money"
+
+    @pytest.mark.parametrize("price", [4.55, 0.5000000000000062, float("nan")])
+    def test_an_invalid_incoming_price_is_rejected_not_rounded(self, price: float) -> None:
+        incoming = _player(16, MID, team_id=116, price=price)
+
+        with pytest.raises(RuleViolationError) as error:
+            _run(_squad(), player_out_id=11, player_in=incoming, bank=1.0)
+
+        assert error.value.code == "invalid_money"
+
+    def test_an_invalid_outgoing_price_is_rejected_not_rounded(self) -> None:
+        squad = [
+            _player(
+                p.player_id,
+                p.position,
+                team_id=p.team_id,
+                price=4.55 if p.player_id == 11 else p.price,
+            )
+            for p in _squad()
+        ]
+        incoming = _player(16, MID, team_id=116, price=4.5)
+
+        with pytest.raises(RuleViolationError) as error:
+            _run(squad, player_out_id=11, player_in=incoming, bank=1.0)
+
+        assert error.value.code == "invalid_money"

@@ -71,7 +71,7 @@ to Explorer, Preview and Apply (see "Candidate pool eligibility").
 
 The saved `bank` and `free_transfers` are preserved by rearrangement: the request
 carries the loaded values exactly, and My Team displays the saved `bank` rather
-than `100 - sum(current_price)` (research.md, decision 12).
+than `100 - sum(current_price)` (research.md, decision 12). "Exactly" means the same whole-tenth value: a stored bank carrying only float representation noise is normalised to that tenth on the next save (`PUT` or Apply), while a genuinely sub-tenth value is rejected: `PUT /my-team` returns its existing HTTP 400 with the readable message as a string `detail`, and Preview, Apply and Explorer return 422 `invalid_money`. Transfer evaluation computes `resulting_bank` in integer tenths and exposes it as a float equal to tenths / 10.
 
 ## Selection (new, client-only, not persisted)
 

@@ -511,3 +511,65 @@ def test_the_outgoing_player_is_not_subject_to_the_incoming_selectability_flags(
 
     assert not isinstance(result, ApplyTransferFailure)
     assert squad_repository.save_calls == 1
+
+
+def test_apply_saves_an_exact_tenth_bank_not_float_noise() -> None:
+    # 0.5 + 5.0 - 5.1 is 0.40000000000000036 in floats.
+    service, squad_repository, _ = _service(
+        squad=_squad(bank=0.5),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=5.1)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, ApplyTransferFailure)
+    assert squad_repository.saved_bank == 0.4
+    assert repr(squad_repository.saved_bank) == "0.4"
+
+
+def test_apply_normalises_an_already_drifted_stored_bank() -> None:
+    service, squad_repository, _ = _service(
+        squad=_squad(bank=0.5000000000000062),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=5.0)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert not isinstance(result, ApplyTransferFailure)
+    assert repr(squad_repository.saved_bank) == "0.5"
+
+
+@pytest.mark.parametrize("bank", [0.55, 0.05])
+def test_apply_rejects_an_invalid_stored_bank_without_persisting(bank: float) -> None:
+    service, squad_repository, _ = _service(
+        squad=_squad(bank=bank),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=5.0)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert isinstance(result, ApplyTransferFailure)
+    assert result.code == "invalid_money"
+    assert result.message.startswith("Bank must be a finite whole number of tenths")
+    assert squad_repository.save_calls == 0
+
+
+def test_apply_rejects_an_invalid_incoming_price_without_persisting() -> None:
+    service, squad_repository, _ = _service(
+        squad=_squad(bank=1.0),
+        run=_run(),
+        rows=_rows({202: 4.0}),
+        players_by_id={202: _candidate(202, team_id=55, price=5.05)},
+    )
+
+    result = service.execute(PLAYER_OUT_ID, 202)
+
+    assert isinstance(result, ApplyTransferFailure)
+    assert result.code == "invalid_money"
+    assert squad_repository.save_calls == 0

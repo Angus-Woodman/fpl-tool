@@ -179,3 +179,19 @@ def test_returns_an_illegal_preview_as_a_normal_200_response() -> None:
         assert payload["player_in_status"] == "i"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_returns_422_with_the_invalid_money_code_for_an_invalid_stored_amount() -> None:
+    failure = TransferPreviewFailure(
+        code="invalid_money", message="Bank must be a finite whole number of tenths"
+    )
+    app.dependency_overrides[get_transfer_preview_service] = lambda: _FakeGetTransferPreviewService(
+        failure
+    )
+    try:
+        response = TestClient(app).get("/my-team/transfers/9/preview?player_in_id=202")
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_money"
+    finally:
+        app.dependency_overrides.clear()

@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 from fpl_engine.domain import PlayerPosition
 from fpl_engine.optimisation import LineupCandidate, LineupSelection, optimise_lineup
-from fpl_engine.rules import MAX_PLAYERS_PER_TEAM, SQUAD_POSITION_COUNTS
+from fpl_engine.rules import (
+    MAX_PLAYERS_PER_TEAM,
+    SQUAD_POSITION_COUNTS,
+    exact_tenths,
+    observed_tenths,
+    tenths_to_money,
+)
 
 
 @dataclass(frozen=True)
@@ -111,8 +117,13 @@ def evaluate_single_transfer(
     if any(count > MAX_PLAYERS_PER_TEAM for count in club_counts.values()):
         errors.append("club_limit_exceeded")
 
-    resulting_bank = bank + outgoing.price - player_in.price
-    if resulting_bank < 0:
+    resulting_bank_tenths = (
+        observed_tenths(bank, label="Bank")
+        + exact_tenths(outgoing.price, label="Player price")
+        - exact_tenths(player_in.price, label="Player price")
+    )
+    resulting_bank = tenths_to_money(resulting_bank_tenths)
+    if resulting_bank_tenths < 0:
         errors.append("insufficient_bank")
 
     direct_player_xpts_difference = player_in.projected_points - outgoing.projected_points

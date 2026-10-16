@@ -889,6 +889,21 @@ async function readPlanResponse(
     );
   }
   if (!response.ok) {
+    if (response.status === 400) {
+      const body = (await response.json().catch(() => null)) as {
+        detail?: unknown;
+      } | null;
+      const detail = body?.detail;
+      if (typeof detail === "string" && detail) {
+        throw new Error(detail);
+      }
+      if (typeof detail === "object" && detail !== null) {
+        const { message } = detail as { message?: unknown };
+        if (typeof message === "string" && message) {
+          throw new Error(message);
+        }
+      }
+    }
     throw new Error(`${action} request failed with status ${response.status}`);
   }
 

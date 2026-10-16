@@ -548,3 +548,42 @@ class TestPoolEligibility:
         assert not isinstance(result, TransferExplorerFailure)
         assert result is not None
         assert result.primary_horizon == 5
+
+
+class TestExactMoney:
+    def test_resulting_bank_is_an_exact_tenth(self) -> None:
+        service, *_ = _service(
+            squad=_squad(bank=0.5),
+            candidates=[_candidate(202, team_id=55, price=5.1)],
+        )
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert not isinstance(result, TransferExplorerFailure)
+        assert result is not None
+        assert repr(result.candidates[0].resulting_bank) == "0.4"
+
+    def test_an_already_drifted_stored_bank_still_works(self) -> None:
+        service, *_ = _service(
+            squad=_squad(bank=0.5000000000000062),
+            candidates=[_candidate(202, team_id=55, price=5.0)],
+        )
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert not isinstance(result, TransferExplorerFailure)
+        assert result is not None
+        assert repr(result.candidates[0].resulting_bank) == "0.5"
+
+    @pytest.mark.parametrize("bank", [0.55, 0.05])
+    def test_an_invalid_stored_bank_is_a_structured_failure(self, bank: float) -> None:
+        service, *_ = _service(
+            squad=_squad(bank=bank),
+            candidates=[_candidate(202, team_id=55, price=5.0)],
+        )
+
+        result = service.execute(PLAYER_OUT_ID)
+
+        assert isinstance(result, TransferExplorerFailure)
+        assert result.code == "invalid_money"
+        assert result.message.startswith("Bank must be a finite whole number of tenths")

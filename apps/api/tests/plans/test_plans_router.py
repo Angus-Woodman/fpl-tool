@@ -1491,3 +1491,101 @@ def test_boundary_values_of_the_new_bounds_are_still_accepted():
         }
     )
     assert len(body.intents) == MAX_INTENTS_PER_MUTATION
+
+
+@pytest.mark.parametrize("stored_bank", [0.5000000000000062, 0.4999999999999938, 0.5])
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_http_creates_a_plan_from_a_persisted_my_team_with_float_noise_in_its_bank(
+    planner_session, planner_metadata, stored_bank
+):
+    from api.models.entities import PlanModel
+    from api.repositories.current_squad_repository import (
+        CurrentSquadPlayerSave,
+        CurrentSquadRepository,
+    )
+    from api.repositories.plan_repository import PlanRepository
+    from conftest import seed_planner_players
+    from sqlalchemy import select
+
+    seed_planner_players(planner_session, planner_metadata)
+    CurrentSquadRepository(planner_session).save_current(
+        bank=stored_bank,
+        free_transfers=1,
+        players=[
+            CurrentSquadPlayerSave(
+                number,
+                number <= 11,
+                None if number <= 11 else number - 11,
+                number == 2,
+                number == 3,
+            )
+            for number in range(1, 16)
+        ],
+    )
+    planner_session.commit()
+    app.dependency_overrides[get_db_session] = lambda: planner_session
+    app.dependency_overrides[get_create_plan_service] = lambda: CreatePlanService(
+        PlanRepository(planner_session), CurrentSquadRepository(planner_session)
+    )
+    app.dependency_overrides[get_plan_view_service] = lambda: GetPlanViewService(
+        _EmptyProjectionRepository()
+    )
+
+    response = TestClient(app).post(
+        "/plans", json={"name": "From My Team", "start_gameweek": 8, "end_gameweek": 10}
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert repr(body["initial_bank"]) == "0.5"
+    assert PlanRepository(planner_session).load_canonical(body["plan_id"]).boundary.bank_tenths == 5
+    assert repr(planner_session.scalar(select(PlanModel.initial_bank))) == "0.5"
+
+
+@pytest.mark.parametrize("stored_bank", [0.55, 0.05])
+@pytest.mark.skipif(__import__("os").getenv("RUN_DB_TESTS") != "1", reason="Requires guarded SQL")
+def test_http_rejects_a_plan_from_an_invalid_persisted_bank_with_a_readable_422_and_no_writes(
+    planner_session, planner_metadata, stored_bank
+):
+    from api.models.entities import PlanModel
+    from api.repositories.current_squad_repository import (
+        CurrentSquadPlayerSave,
+        CurrentSquadRepository,
+    )
+    from api.repositories.plan_repository import PlanRepository
+    from conftest import seed_planner_players
+    from sqlalchemy import func, select
+
+    seed_planner_players(planner_session, planner_metadata)
+    CurrentSquadRepository(planner_session).save_current(
+        bank=stored_bank,
+        free_transfers=1,
+        players=[
+            CurrentSquadPlayerSave(
+                number,
+                number <= 11,
+                None if number <= 11 else number - 11,
+                number == 2,
+                number == 3,
+            )
+            for number in range(1, 16)
+        ],
+    )
+    planner_session.commit()
+    app.dependency_overrides[get_db_session] = lambda: planner_session
+    app.dependency_overrides[get_create_plan_service] = lambda: CreatePlanService(
+        PlanRepository(planner_session), CurrentSquadRepository(planner_session)
+    )
+    app.dependency_overrides[get_plan_view_service] = lambda: GetPlanViewService(
+        _EmptyProjectionRepository()
+    )
+
+    response = TestClient(app).post(
+        "/plans", json={"name": "From My Team", "start_gameweek": 8, "end_gameweek": 10}
+    )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_money"
+    assert detail["message"].startswith("Saved bank must be a finite whole number of tenths")
+    assert planner_session.scalar(select(func.count()).select_from(PlanModel)) == 0

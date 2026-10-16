@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from fpl_engine.domain import PlayerPosition
-from fpl_engine.rules import SquadSlot, validate_squad
+from fpl_engine.rules import SquadSlot, observed_tenths, tenths_to_money, validate_squad
 
 from api.repositories.current_squad_repository import (
     CurrentSquadPlayerSave,
@@ -63,9 +63,10 @@ class UpsertCurrentSquadService:
         self._player_lookup_repository = player_lookup_repository
 
     def execute(self, request: UpsertCurrentSquadRequest) -> CurrentSquadRecord:
+        bank = tenths_to_money(observed_tenths(request.bank, label="Bank"))
         self._validate(request)
         return self._repository.save_current(
-            bank=request.bank,
+            bank=bank,
             free_transfers=request.free_transfers,
             players=[
                 CurrentSquadPlayerSave(
