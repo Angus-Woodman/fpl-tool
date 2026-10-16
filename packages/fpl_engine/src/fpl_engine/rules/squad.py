@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Literal
 
 from fpl_engine.domain import PlayerPosition
 from fpl_engine.rules.errors import RuleViolationError
@@ -103,3 +104,81 @@ def validate_starting_formation(slots: Iterable[SquadSlot]) -> None:
 def validate_squad(slots: Sequence[SquadSlot]) -> None:
     validate_squad_composition(slots)
     validate_starting_formation(slots)
+
+
+RearrangementKind = Literal["substitution", "bench_priority"]
+
+
+@dataclass(frozen=True)
+class Rearrangement:
+    """An unordered pair of players whose lineup roles may legally be exchanged."""
+
+    first_player_id: int
+    second_player_id: int
+    kind: RearrangementKind
+
+
+def rearrange_lineup(
+    slots: Sequence[SquadSlot], first_player_id: int, second_player_id: int
+) -> tuple[SquadSlot, ...]:
+    """Exchange two players' lineup roles; the outcome must still be a legal squad.
+
+    A starter and a substitute trade places: the substitute inherits the starter's
+    captaincy and the starter takes the substitute's bench order. Two substitutes
+    trade bench order, except that the bench goalkeeper never reorders against
+    outfield substitutes.
+    """
+    by_id = {slot.player_id: slot for slot in slots}
+    first = by_id.get(first_player_id)
+    second = by_id.get(second_player_id)
+    if first is None or second is None or first_player_id == second_player_id:
+        raise RuleViolationError("invalid_swap", "Select two distinct owned players")
+    if first.is_starting and second.is_starting:
+        raise RuleViolationError(
+            "invalid_swap", "Select a starter and bench player or two outfield substitutes"
+        )
+    if (
+        not first.is_starting
+        and not second.is_starting
+        and PlayerPosition.GOALKEEPER in {first.position, second.position}
+    ):
+        raise RuleViolationError("invalid_swap", "Goalkeeper cannot reorder with outfield bench")
+
+    exchanged = {
+        first_player_id: replace(
+            first,
+            is_starting=second.is_starting,
+            bench_order=second.bench_order,
+            is_captain=second.is_captain,
+            is_vice_captain=second.is_vice_captain,
+        ),
+        second_player_id: replace(
+            second,
+            is_starting=first.is_starting,
+            bench_order=first.bench_order,
+            is_captain=first.is_captain,
+            is_vice_captain=first.is_vice_captain,
+        ),
+    }
+    result = tuple(exchanged.get(slot.player_id, slot) for slot in slots)
+    validate_squad(result)
+    return result
+
+
+def legal_rearrangements(slots: Sequence[SquadSlot]) -> tuple[Rearrangement, ...]:
+    """Every pair that :func:`rearrange_lineup` accepts, in squad order, once each."""
+    choices: list[Rearrangement] = []
+    for index, first in enumerate(slots):
+        for second in slots[index + 1 :]:
+            try:
+                rearrange_lineup(slots, first.player_id, second.player_id)
+            except RuleViolationError:
+                continue
+            choices.append(
+                Rearrangement(
+                    first.player_id,
+                    second.player_id,
+                    "substitution" if first.is_starting != second.is_starting else "bench_priority",
+                )
+            )
+    return tuple(choices)

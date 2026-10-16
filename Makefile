@@ -1,8 +1,9 @@
 SHELL := /bin/bash
 
-.PHONY: setup dev backend-dev frontend-dev db-up db-down db-logs db-test-up test test-integration lint typecheck format db-migrate db-revision data-refresh results-refresh projections-refresh dual-write-refresh predeadline-snapshot clean
+.PHONY: setup dev backend-dev frontend-dev frontend-verify-build frontend-verify-preview frontend-verify-clean db-up db-down db-logs db-test-up test test-integration lint typecheck format db-migrate db-revision data-refresh results-refresh projections-refresh dual-write-refresh predeadline-snapshot clean
 
 TEST_DATABASE_URL ?= postgresql+psycopg://fpl:fpl@localhost:5432/fpl_test
+FRONTEND_VERIFY_PORT ?= 3100
 
 setup:
 	mise install
@@ -18,6 +19,15 @@ backend-dev:
 
 frontend-dev:
 	pnpm --filter web dev
+
+frontend-verify-build:
+	NEXT_DIST_DIR=.next-copilot pnpm --filter web build || { rm -rf apps/web/.next-copilot; exit 1; }
+
+frontend-verify-preview:
+	NEXT_DIST_DIR=.next-copilot pnpm --filter web start --hostname 127.0.0.1 --port $(FRONTEND_VERIFY_PORT)
+
+frontend-verify-clean:
+	rm -rf apps/web/.next-copilot
 
 db-up:
 	docker compose up -d postgres

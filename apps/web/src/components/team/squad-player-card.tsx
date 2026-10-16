@@ -1,11 +1,16 @@
-import type { Position } from "@/components/team/types";
+import { useId } from "react";
 
-export type SelectionState = "idle" | "selected" | "target" | "not-target";
+import type { Position } from "@/components/team/types";
+import type { SelectionState } from "@/lib/squad-rearrangement";
+
+export type { SelectionState };
 
 export type SquadPlayerCardProps = {
   webName: string;
   teamShortName: string;
   position: Position;
+  /** Shown after the position when given (the Planner prices each card). */
+  price?: number;
   projectedPoints: number | null;
   /** When false the "GW xPts" line is omitted; the opponent label is unaffected. */
   showProjectedPoints?: boolean;
@@ -37,6 +42,7 @@ export function SquadPlayerCard({
   webName,
   teamShortName,
   position,
+  price,
   projectedPoints,
   showProjectedPoints = true,
   opponentLabel,
@@ -50,6 +56,7 @@ export function SquadPlayerCard({
   children,
 }: SquadPlayerCardProps): JSX.Element {
   const selectable = onSelect !== undefined;
+  const targetHintId = useId();
 
   return (
     <article
@@ -61,6 +68,7 @@ export function SquadPlayerCard({
           <p className="text-sm font-semibold text-slate-900">{webName}</p>
           <p className="text-xs text-slate-600">
             {teamShortName} · {position}
+            {price !== undefined ? ` · ${price.toFixed(1)}` : ""}
             {benchOrder != null ? ` · Bench ${benchOrder}` : ""}
           </p>
         </div>
@@ -98,14 +106,17 @@ export function SquadPlayerCard({
             type="button"
             aria-label={`Select ${webName}`}
             aria-pressed={selectionState === "selected"}
-            disabled={selectionDisabled}
-            onClick={onSelect}
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+            aria-disabled={selectionDisabled || undefined}
+            aria-describedby={selectionState === "target" ? targetHintId : undefined}
+            onClick={selectionDisabled ? undefined : onSelect}
+            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 hover:bg-slate-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-white disabled:opacity-50"
           >
             {selectionState === "selected" ? "Selected" : "Select"}
           </button>
           {selectionState === "target" && (
-            <span className="text-xs font-medium text-sky-800">Valid swap target</span>
+            <span id={targetHintId} className="text-xs font-medium text-sky-800">
+              Valid swap target
+            </span>
           )}
         </div>
       )}

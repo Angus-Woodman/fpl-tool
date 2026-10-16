@@ -25,6 +25,7 @@ htmlcov/
 node_modules/
 .pnpm-store/
 .next/
+.next-copilot/
 out/
 coverage/
 playwright-report/

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from api.services.plan_accounting import (
     PlanGameweekState,
     apply_transfers_forward,
@@ -21,6 +22,91 @@ def _recalculate(states: list[PlanGameweekState], *, bank: float = 0.5, free_tra
         initial_free_transfers=free_transfers,
         prices=PRICES,
     )
+
+
+@pytest.mark.parametrize("chip", [None, *Chip])
+@pytest.mark.parametrize("free_transfers", [0, 5])
+def test_us3_canonical_read_accounting_matches_replay_not_legacy_inputs(
+    planner_plan, planner_metadata, chip, free_transfers
+):
+    from dataclasses import replace
+    from unittest.mock import Mock
+    from uuid import UUID
+
+    from api.repositories.plan_repository import PlanPlayerRecord, PlanRecord
+    from api.services.get_plan_view import GetPlanViewService
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.models import TransferDecision
+
+    decision = TransferDecision(
+        UUID(int=8000),
+        2,
+        UUID(int=1002),
+        102,
+        UUID(int=8001),
+        54,
+        50,
+        "stored_player_observation",
+        "2026-10-14T12:00:00+00:00",
+        "captured",
+    )
+    plan = replace(
+        planner_plan,
+        boundary=replace(planner_plan.boundary, free_transfers=free_transfers),
+        gameweeks=(
+            replace(planner_plan.gameweeks[0], transfers=(decision,), chip=chip),
+            *planner_plan.gameweeks[1:],
+        ),
+    )
+    players = [
+        PlanPlayerRecord(
+            identifier,
+            f"P{identifier}",
+            "First",
+            "Second",
+            player.team_id,
+            "Team",
+            "TMX",
+            player.position.value,
+            9.9,
+            "a",
+            False,
+            None,
+            False,
+            False,
+        )
+        for identifier, player in planner_metadata.items()
+    ]
+    record = PlanRecord(
+        plan_id=1,
+        name=plan.name,
+        start_gameweek=8,
+        end_gameweek=10,
+        initial_bank=99.9,
+        initial_free_transfers=5,
+        gameweeks=[],
+        canonical_plan=plan,
+        rule_players=players,
+    )
+    projections = Mock()
+    projections.list_latest_player_fixture_projections.return_value = []
+    view = GetPlanViewService(projections).execute(record)
+    replay = evaluate_plan(plan, planner_metadata)
+    for actual, expected in zip(view.gameweeks, replay.gameweeks, strict=True):
+        assert actual.accounting == {
+            field: getattr(expected, field)
+            for field in (
+                "starting_bank_tenths",
+                "closing_bank_tenths",
+                "free_transfers_available",
+                "next_free_transfers",
+                "unlimited_transfers",
+                "transfers_made",
+                "points_hit",
+            )
+        }
+    assert view.gameweeks[1].transfers_in == []
+    assert view.gameweeks[1].transfers_out == []
 
 
 class TestRecalculateAccounting:
@@ -84,7 +170,7 @@ class TestRecalculateAccounting:
         result = _recalculate([_state(1, squad), _state(2, after, Chip.WILDCARD), _state(3, after)])
 
         assert result[1].points_hit == 0
-        assert result[2].free_transfers_available == 2
+        assert result[2].free_transfers_available == 1
 
     def test_free_hit_squad_reverts_the_following_gameweek(self) -> None:
         squad = build_squad()

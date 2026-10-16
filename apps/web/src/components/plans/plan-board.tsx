@@ -1,23 +1,44 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import {
   PlanChip,
+  PlanDecision,
   PlanGameweek,
   PlanPlayer,
   PlanResponse,
-  PlanRuleError,
+  PlanIntent,
   PlayerItem,
-  SaveMyTeamPlayerSelection,
   fetchPlan,
   fetchPlayers,
-  savePlanGameweek,
-  updatePlan,
 } from "@/lib/api";
+import {
+  PlanSaveCoordinator,
+  PlanSaveSnapshot,
+  getPlanSaveCoordinator,
+} from "@/lib/plan-save-coordinator";
+import { installHistoryDepartureGuard } from "@/lib/history-departure-guard";
+import {
+  hasTargets,
+  resolveSelection,
+  selectionStateFor,
+  sortByBenchOrder,
+  swapAnnouncement,
+} from "@/lib/squad-rearrangement";
+import { Bench } from "@/components/team/bench";
+import {
+  ClearSelectionButton,
+  NoTargetsNotice,
+  SwapAnnouncement,
+} from "@/components/team/rearrangement-controls";
+import { SquadPitch } from "@/components/team/squad-pitch";
+import { SquadPlayerCard } from "@/components/team/squad-player-card";
+import { POSITION_ORDER, type Position } from "@/components/team/types";
 
-type Position = "GK" | "DEF" | "MID" | "FWD";
+const EMPTY_SUBSCRIBE = () => () => {};
+const EMPTY_SNAPSHOT = () => null;
 
 type LoadState =
   | { type: "loading" }
@@ -25,97 +46,87 @@ type LoadState =
   | { type: "missing" }
   | { type: "loaded"; plan: PlanResponse };
 
-const POSITION_ORDER: Position[] = ["GK", "DEF", "MID", "FWD"];
-const FORMATION_LIMITS: Record<Position, { min: number; max: number }> = {
-  GK: { min: 1, max: 1 },
-  DEF: { min: 3, max: 5 },
-  MID: { min: 2, max: 5 },
-  FWD: { min: 1, max: 3 },
-};
 const CHIPS: { value: PlanChip; label: string }[] = [
   { value: "WILDCARD", label: "Wildcard" },
   { value: "FREE_HIT", label: "Free Hit" },
   { value: "BENCH_BOOST", label: "Bench Boost" },
   { value: "TRIPLE_CAPTAIN", label: "Triple Captain" },
 ];
-const FIRST_HALF_FINAL_GAMEWEEK = 19;
+type HorizonField = "start_gameweek" | "end_gameweek";
 
-function seasonHalf(gameweekNumber: number): 1 | 2 {
-  return gameweekNumber <= FIRST_HALF_FINAL_GAMEWEEK ? 1 : 2;
-}
-
-function chipUsedElsewhereInHalf(
-  plan: PlanResponse,
-  chip: PlanChip,
-  gameweekNumber: number,
-): boolean {
-  return plan.gameweeks.some(
-    (gameweek) =>
-      gameweek.chip === chip &&
-      gameweek.gameweek_number !== gameweekNumber &&
-      seasonHalf(gameweek.gameweek_number) === seasonHalf(gameweekNumber),
+// Commits on blur or Enter so intermediate keystrokes never reach the server.
+function HorizonBoundInput({
+  label,
+  field,
+  value,
+  resetKey,
+  disabled,
+  onCommit,
+  onError,
+}: {
+  label: string;
+  field: HorizonField;
+  value: number;
+  resetKey: number;
+  disabled: boolean;
+  onCommit: (field: HorizonField, value: number) => void;
+  onError: (message: string | null) => void;
+}): JSX.Element {
+  return (
+    <input
+      type="number"
+      aria-label={label}
+      disabled={disabled}
+      min={1}
+      max={38}
+      key={`${field}-${value}-${resetKey}`}
+      defaultValue={value}
+      className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+      }}
+      onBlur={(event) => {
+        const entered = Number(event.currentTarget.value);
+        if (
+          !event.currentTarget.value ||
+          !Number.isInteger(entered) ||
+          entered < 1 ||
+          entered > 38
+        ) {
+          onError("Enter a whole gameweek from 1 to 38");
+          event.currentTarget.value = String(value);
+          return;
+        }
+        onError(null);
+        if (entered !== value) onCommit(field, entered);
+      }}
+    />
   );
 }
 
-function formationIsLegal(players: PlanPlayer[]): boolean {
-  const counts: Record<Position, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
-  for (const player of players.filter((player) => player.is_starting)) {
-    counts[player.position] += 1;
-  }
-  return POSITION_ORDER.every(
-    (position) =>
-      counts[position] >= FORMATION_LIMITS[position].min &&
-      counts[position] <= FORMATION_LIMITS[position].max,
+type SwapSide = { id: number; starting: boolean; order: number | null };
+type PendingSwap = {
+  gameweek: number;
+  message: string;
+  first: SwapSide;
+  second: SwapSide;
+};
+
+// Announce only once the saved plan shows the two players holding each other's former roles.
+function swapIsAcknowledged(plan: PlanResponse, swap: PendingSwap): boolean {
+  const players = plan.gameweeks.find(
+    (week) => week.gameweek_number === swap.gameweek,
+  )?.players;
+  const first = players?.find((player) => player.player_id === swap.first.id);
+  const second = players?.find((player) => player.player_id === swap.second.id);
+  return (
+    !!first &&
+    !!second &&
+    first.is_starting === swap.second.starting &&
+    first.bench_order === swap.second.order &&
+    second.is_starting === swap.first.starting &&
+    second.bench_order === swap.first.order
   );
-}
-
-function swapStarterWithBench(
-  players: PlanPlayer[],
-  starterId: number,
-  benchId: number,
-): PlanPlayer[] {
-  const starter = players.find((player) => player.player_id === starterId);
-  const bench = players.find((player) => player.player_id === benchId);
-  if (!starter || !bench) {
-    return players;
-  }
-
-  return players.map((player) => {
-    if (player.player_id === starterId) {
-      return { ...player, is_starting: false, bench_order: bench.bench_order };
-    }
-    if (player.player_id === benchId) {
-      return { ...player, is_starting: true, bench_order: null };
-    }
-    return player;
-  });
-}
-
-function toSelections(players: PlanPlayer[]): SaveMyTeamPlayerSelection[] {
-  return players.map((player) => ({
-    player_id: player.player_id,
-    is_starting: player.is_starting,
-    bench_order: player.bench_order,
-    is_captain: player.is_captain,
-    is_vice_captain: player.is_vice_captain,
-  }));
-}
-
-function toPlanPlayer(item: PlayerItem): PlanPlayer {
-  return {
-    player_id: item.id,
-    web_name: item.web_name,
-    team_short_name: item.team_short_name,
-    position: item.position,
-    current_price: item.current_price,
-    status: item.status,
-    is_starting: false,
-    bench_order: null,
-    is_captain: false,
-    is_vice_captain: false,
-    projected_points: 0,
-    fixtures: [],
-  };
 }
 
 function opponentLabel(player: PlanPlayer): string {
@@ -127,24 +138,525 @@ function opponentLabel(player: PlanPlayer): string {
       if (fixture.opponent_team_short_name === null) {
         return "TBD";
       }
-      const venue = fixture.is_home === null ? "" : fixture.is_home ? " (H)" : " (A)";
+      const venue =
+        fixture.is_home === null ? "" : fixture.is_home ? " (H)" : " (A)";
       return `${fixture.opponent_team_short_name}${venue}`;
     })
     .join(", ");
 }
 
+type RepairOrigin = "saved" | "rejected";
+
+const formatTenths = (tenths: number | null | undefined): string =>
+  tenths == null ? "Unavailable" : `£${(tenths / 10).toFixed(1)}m`;
+
+function basisLabel(decision: PlanDecision): string {
+  if (decision.basis_kind === "planned_acquisition")
+    return "Planned acquisition";
+  if (decision.basis_confirmation === "assumed") return "Estimated";
+  if (decision.basis_confirmation === "authoritative") return "Authoritative";
+  return decision.basis_confirmation ? "Confirmed" : "Unavailable";
+}
+
+function TransferPriceDetails({
+  decision,
+  week,
+}: {
+  decision: PlanDecision;
+  week: PlanGameweek;
+}): JSX.Element {
+  const nameOf = (id: number): string =>
+    [...week.transfers_out, ...week.transfers_in, ...week.players].find(
+      (player) => player.player_id === id,
+    )?.web_name ?? `Player ${id}`;
+  const outgoing = nameOf(decision.outgoing_player_id);
+  const incoming = nameOf(decision.incoming_player_id);
+  const live =
+    decision.outgoing_live_market_tenths != null ||
+    decision.incoming_live_price_tenths != null;
+  return (
+    <section
+      aria-label={`Transfer price details: ${outgoing} to ${incoming}`}
+      className="mt-3 space-y-0.5 rounded-md border border-slate-200 p-3 text-xs text-slate-700"
+    >
+      <p>{`Purchase basis ${formatTenths(decision.purchase_price_tenths)} · ${basisLabel(decision)}`}</p>
+      <p>{`Saved market assumption ${formatTenths(decision.outgoing_market_tenths)}`}</p>
+      <p>{`Selling price used ${formatTenths(decision.selling_price_tenths)}`}</p>
+      <p>{`Acquisition price paid ${formatTenths(decision.incoming_price_tenths)}`}</p>
+      {live && (
+        <p className="text-slate-500">{`Latest market (not used): ${outgoing} ${formatTenths(decision.outgoing_live_market_tenths)} · ${incoming} ${formatTenths(decision.incoming_live_price_tenths)}`}</p>
+      )}
+    </section>
+  );
+}
+
+function FinancialResolutionPanel({
+  plan,
+  onGo,
+}: {
+  plan: PlanResponse;
+  onGo: (gameweek: number) => void;
+}): JSX.Element | null {
+  const status = plan.financial_status;
+  if (!status.requires_resolution) return null;
+  const earliest = status.earliest_shortfall_gameweek ?? null;
+  const chain = (status.gameweeks ?? [])
+    .filter(
+      (week) => earliest !== null && week.affected_chain.includes(earliest),
+    )
+    .map((week) => week.gameweek_number);
+  return (
+    <section
+      aria-label="Financial resolution"
+      className="space-y-1 border-y border-red-200 py-3 text-sm text-red-800"
+    >
+      <p className="font-medium">{`Shortfall ${formatTenths(status.earliest_shortfall_tenths)} in GW${earliest ?? "?"}`}</p>
+      {status.earliest_shortfall_reason && (
+        <p>{status.earliest_shortfall_reason}</p>
+      )}
+      {chain.length > 0 && (
+        <p>{`Dependent gameweeks: ${chain.map((number) => `GW${number}`).join(", ")}`}</p>
+      )}
+      <p>
+        Saved does not mean financially valid. Repair the affected transfers or
+        purchase prices to resolve it.
+      </p>
+      {earliest !== null && (
+        <button
+          type="button"
+          className="rounded-md border border-red-300 bg-white px-2 py-1 text-xs"
+          onClick={() => onGo(earliest)}
+        >
+          {`Go to GW${earliest}`}
+        </button>
+      )}
+    </section>
+  );
+}
+
+function TransferRepairPanel({
+  plan,
+  rejection,
+  disabled,
+  onApply,
+}: {
+  plan: PlanResponse;
+  rejection: PlanSaveSnapshot["rejection"];
+  disabled: boolean;
+  onApply: (intents: PlanIntent[]) => void;
+}): JSX.Element | null {
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const acquisitions = (rejection?.intents ?? []).flatMap((intent) => {
+    if (
+      intent.kind !== "edit_transfer" ||
+      intent.incoming_player_id === undefined
+    )
+      return [];
+    const sourceWeek = plan.gameweeks.find((week) =>
+      week.decisions.some(
+        (decision) =>
+          decision.decision_id === intent.decision_id &&
+          decision.incoming_player_id !== intent.incoming_player_id,
+      ),
+    );
+    return sourceWeek
+      ? [
+          {
+            decisionId: intent.decision_id,
+            playerId: intent.incoming_player_id,
+            gameweek: sourceWeek.gameweek_number,
+          },
+        ]
+      : [];
+  });
+  const diagnosticKey = (error: PlanResponse["decision_errors"][number]) =>
+    JSON.stringify([
+      error.code,
+      error.gameweek_number,
+      error.decision_id,
+      error.conflicting_gameweek,
+      error.player_id,
+      error.message,
+    ]);
+  const savedKeys = new Set(plan.decision_errors.map(diagnosticKey));
+  const diagnosticEntries = new Map<
+    string,
+    { error: PlanResponse["decision_errors"][number]; origin: RepairOrigin }
+  >();
+  for (const error of rejection?.diagnostics ?? [])
+    diagnosticEntries.set(diagnosticKey(error), {
+      error,
+      origin: savedKeys.has(diagnosticKey(error)) ? "saved" : "rejected",
+    });
+  for (const error of plan.decision_errors)
+    diagnosticEntries.set(diagnosticKey(error), { error, origin: "saved" });
+  const diagnostics = [...diagnosticEntries.values()];
+  // A decision cited by a saved issue is repaired as saved state, never with rejected intents.
+  const decisionOrigin = new Map<string, RepairOrigin>();
+  for (const { error, origin } of diagnostics)
+    if (error.decision_id && decisionOrigin.get(error.decision_id) !== "saved")
+      decisionOrigin.set(error.decision_id, origin);
+  const affected = plan.gameweeks.flatMap((week) =>
+    week.decisions.flatMap((decision) => {
+      const origin = decisionOrigin.get(decision.decision_id);
+      return origin ? [{ decision, week, origin }] : [];
+    }),
+  );
+  const repairFor = (
+    decision: PlanDecision,
+    week: PlanGameweek,
+    origin: RepairOrigin,
+  ): PlanIntent[] => {
+    const choice = choices[decision.decision_id];
+    if (choice === "remove")
+      return [{ kind: "remove_transfer", decision_id: decision.decision_id }];
+    const acquisition = (origin === "rejected" ? acquisitions : []).find(
+      (source) =>
+        choice === `source:${source.decisionId}` &&
+        source.gameweek < week.gameweek_number,
+    );
+    if (acquisition)
+      return [
+        {
+          kind: "edit_transfer",
+          decision_id: decision.decision_id,
+          outgoing_player_id: acquisition.playerId,
+          outgoing_source_decision_id: acquisition.decisionId,
+        },
+      ];
+    const options = week.players.length
+      ? week.players
+      : (plan.starting_state?.players ?? []);
+    const player = options.find((item) => item.ownership_id === choice);
+    return player?.ownership_id
+      ? [
+          {
+            kind: "edit_transfer",
+            decision_id: decision.decision_id,
+            outgoing_player_id: player.player_id,
+            outgoing_ownership_id: player.ownership_id,
+          },
+        ]
+      : [];
+  };
+  if (!diagnostics.length) return null;
+  return (
+    <section
+      aria-label="Transfer diagnostics"
+      className="space-y-3 border-y border-red-200 py-3 text-sm text-red-800"
+    >
+      {diagnostics.map(({ error, origin }, index) => (
+        <p key={`${error.decision_id}-${error.code}-${index}`}>
+          {origin === "saved" ? "Saved plan" : "Rejected edit"}
+          {" · "}GW{error.gameweek_number}: {error.message}
+        </p>
+      ))}
+      {(
+        [
+          ["saved", "Saved plan repairs"],
+          ["rejected", "Rejected edit repairs"],
+        ] as const
+      ).map(([origin, label]) => {
+        const group = affected.filter((item) => item.origin === origin);
+        if (group.length === 0) return null;
+        const repairs = group.flatMap(({ decision, week }) =>
+          repairFor(decision, week, origin),
+        );
+        return (
+          <fieldset
+            key={origin}
+            role="group"
+            aria-label={label}
+            disabled={disabled}
+            className="min-w-0 space-y-3"
+          >
+            {group.map(({ decision, week }) => (
+              <label
+                key={decision.decision_id}
+                className="flex max-w-lg flex-col gap-1"
+              >
+                GW{week.gameweek_number}: outgoing {decision.outgoing_player_id}{" "}
+                → {decision.incoming_player_id}
+                <select
+                  aria-label={`Repair transfer GW${week.gameweek_number}: ${decision.outgoing_player_id} to ${decision.incoming_player_id}`}
+                  value={choices[decision.decision_id] ?? ""}
+                  onChange={(event) =>
+                    setChoices({
+                      ...choices,
+                      [decision.decision_id]: event.target.value,
+                    })
+                  }
+                  className="min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-slate-900"
+                >
+                  <option value="">Keep transfer</option>
+                  <option value="remove">Remove transfer</option>
+                  {(origin === "rejected" ? acquisitions : [])
+                    .filter((source) => source.gameweek < week.gameweek_number)
+                    .map((source) => (
+                      <option
+                        key={`source:${source.decisionId}`}
+                        value={`source:${source.decisionId}`}
+                      >
+                        Proposed incoming player {source.playerId} from GW
+                        {source.gameweek}
+                      </option>
+                    ))}
+                  {(week.players.length
+                    ? week.players
+                    : (plan.starting_state?.players ?? [])
+                  ).map((player) => (
+                    <option
+                      key={player.ownership_id ?? player.player_id}
+                      value={player.ownership_id ?? ""}
+                      disabled={!player.ownership_id}
+                    >
+                      Replace outgoing with {player.web_name} (
+                      {player.player_id})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+            <button
+              type="button"
+              disabled={repairs.length === 0}
+              onClick={() =>
+                onApply([
+                  ...(origin === "rejected" ? (rejection?.intents ?? []) : []),
+                  ...repairs,
+                ])
+              }
+              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-900 disabled:opacity-40"
+            >
+              Apply transfer repair
+            </button>
+          </fieldset>
+        );
+      })}
+    </section>
+  );
+}
+
+function StartingStatePanel({
+  plan,
+  coordinator,
+  disabled,
+  onError,
+}: {
+  plan: PlanResponse;
+  coordinator: PlanSaveCoordinator | null;
+  disabled: boolean;
+  onError: (message: string | null) => void;
+}): JSX.Element | null {
+  const boundary = plan.starting_state;
+  if (!boundary) return null;
+  const start = plan.start_gameweek;
+
+  return (
+    <section
+      className="space-y-4 border-y border-slate-200 py-4"
+      aria-labelledby={`starting-${plan.plan_id}`}
+    >
+      <h3 id={`starting-${plan.plan_id}`} className="text-base font-semibold">
+        Starting state at GW{start}
+      </h3>
+      <fieldset disabled={disabled} className="min-w-0 space-y-4">
+        <div className="flex flex-wrap items-end gap-6 text-sm">
+          <div>
+            <span className="block text-slate-600">Starting bank</span>
+            <span>{(boundary.bank_tenths / 10).toFixed(1)}</span>
+          </div>
+          {start === 1 ? (
+            <p>Free transfers: N/A (unlimited)</p>
+          ) : (
+            <label className="flex flex-col gap-1 text-slate-700">
+              Remaining free transfers
+              <input
+                type="number"
+                aria-label="Starting free transfers"
+                min={0}
+                max={5}
+                step={1}
+                key={`ft-${start}-${boundary.free_transfers}`}
+                defaultValue={boundary.free_transfers ?? ""}
+                className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-slate-900"
+                onBlur={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  if (
+                    !event.currentTarget.value ||
+                    !Number.isInteger(value) ||
+                    value < 0 ||
+                    value > 5
+                  ) {
+                    onError(
+                      "Remaining free transfers must be a whole number from 0 to 5",
+                    );
+                    return;
+                  }
+                  onError(null);
+                  if (value !== boundary.free_transfers)
+                    coordinator?.enqueue([
+                      { kind: "set_starting_transfers", value },
+                    ]);
+                }}
+              />
+            </label>
+          )}
+        </div>
+        {![1, 20].includes(start) && (
+          <fieldset className="min-w-0">
+            <legend className="mb-2 text-sm font-medium">
+              Chips used before GW{start} ({start < 20 ? "GW1-19" : "GW20-38"})
+            </legend>
+            <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+              {CHIPS.map((chip) => (
+                <label key={chip.value} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    aria-label={`${chip.label} used before this plan`}
+                    checked={boundary.used_chips.includes(chip.value)}
+                    onChange={(event) => {
+                      onError(null);
+                      coordinator?.enqueue([
+                        {
+                          kind: "set_starting_chip",
+                          chip: chip.value,
+                          used: event.target.checked,
+                        },
+                      ]);
+                    }}
+                  />
+                  {chip.label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+        {start === 20 && (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              aria-label="Free Hit used in GW19"
+              checked={boundary.free_hit_gameweek_19}
+              onChange={(event) => {
+                onError(null);
+                coordinator?.enqueue([
+                  { kind: "set_free_hit_19", used: event.target.checked },
+                ]);
+              }}
+            />
+            Free Hit used in GW19
+          </label>
+        )}
+        <ul
+          aria-label="Starting purchase prices"
+          className="grid gap-x-6 md:grid-cols-2 xl:grid-cols-3"
+        >
+          {boundary.players.map((player) => (
+            <li
+              key={player.ownership_id}
+              className="min-w-0 space-y-1 border-b border-slate-100 py-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0 text-sm">
+                  <span className="break-words font-medium">
+                    {player.web_name}
+                  </span>
+                  <span className="ml-2 text-xs text-slate-600">
+                    {player.provenance.basis_kind === "planned_acquisition"
+                      ? "Planned acquisition"
+                      : player.provenance.confirmation === "assumed"
+                        ? "Estimated"
+                        : player.provenance.confirmation === "authoritative"
+                          ? "Authoritative"
+                          : "Confirmed"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    aria-label={`${player.web_name} purchase price`}
+                    min={0.1}
+                    step={0.1}
+                    key={`${player.ownership_id}-${player.purchase_price_tenths}`}
+                    defaultValue={(player.purchase_price_tenths / 10).toFixed(
+                      1,
+                    )}
+                    className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm"
+                    onBlur={(event) => {
+                      const match = /^(\d+)(?:\.(\d))?$/.exec(
+                        event.currentTarget.value,
+                      );
+                      const price = match
+                        ? Number(match[1]) * 10 + Number(match[2] ?? 0)
+                        : NaN;
+                      if (!Number.isSafeInteger(price) || price <= 0) {
+                        onError(
+                          "Purchase price must be positive with at most one decimal place",
+                        );
+                        return;
+                      }
+                      onError(null);
+                      if (price !== player.purchase_price_tenths)
+                        coordinator?.enqueue([
+                          {
+                            kind: "correct_purchase_price",
+                            ownership_id: player.ownership_id,
+                            price_tenths: price,
+                          },
+                        ]);
+                    }}
+                  />
+                  {player.provenance.confirmation === "assumed" && (
+                    <button
+                      type="button"
+                      aria-label={`Confirm ${player.web_name} purchase price`}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"
+                      onClick={() => {
+                        onError(null);
+                        coordinator?.enqueue([
+                          {
+                            kind: "confirm_purchase_price",
+                            ownership_id: player.ownership_id,
+                          },
+                        ]);
+                      }}
+                    >
+                      Confirm
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p className="break-all text-xs text-slate-600">
+                Original{" "}
+                {(player.provenance.original_price_tenths / 10).toFixed(1)} ·{" "}
+                {player.provenance.basis_kind === "planned_acquisition"
+                  ? "acquired by a planned transfer"
+                  : player.provenance.source.replaceAll("_", " ")}
+              </p>
+            </li>
+          ))}
+        </ul>
+      </fieldset>
+    </section>
+  );
+}
+
 export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   const [state, setState] = useState<LoadState>({ type: "loading" });
   const [selectedGameweek, setSelectedGameweek] = useState<number | null>(null);
-  const [draft, setDraft] = useState<PlanPlayer[] | null>(null);
-  const [draftChip, setDraftChip] = useState<PlanChip | null>(null);
+  const [coordinator, setCoordinator] = useState<PlanSaveCoordinator | null>(
+    null,
+  );
   const [actionError, setActionError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [swapStarterId, setSwapStarterId] = useState<number | null>(null);
+  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
+  const [rejectionCount, setRejectionCount] = useState(0);
+  const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null);
   const [transferOutId, setTransferOutId] = useState<number | null>(null);
   const [transferPool, setTransferPool] = useState<PlayerItem[]>([]);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [renameSubmitted, setRenameSubmitted] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -160,12 +672,16 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           return;
         }
         setState({ type: "loaded", plan });
-        setSelectedGameweek((current) => current ?? plan.gameweeks[0]?.gameweek_number ?? null);
+        setCoordinator(getPlanSaveCoordinator(plan));
+        setSelectedGameweek(
+          (current) => current ?? plan.gameweeks[0]?.gameweek_number ?? null,
+        );
       } catch (error) {
         if (!cancelled) {
           setState({
             type: "error",
-            message: error instanceof Error ? error.message : "Failed to load plan",
+            message:
+              error instanceof Error ? error.message : "Failed to load plan",
           });
         }
       }
@@ -177,73 +693,110 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     };
   }, [planId]);
 
-  const plan = state.type === "loaded" ? state.plan : null;
+  const snapshot = useSyncExternalStore(
+    coordinator?.subscribe ?? EMPTY_SUBSCRIBE,
+    coordinator?.getSnapshot ?? EMPTY_SNAPSHOT,
+    EMPTY_SNAPSHOT,
+  );
+  const plan =
+    snapshot?.displayPlan ?? (state.type === "loaded" ? state.plan : null);
   const gameweek: PlanGameweek | null = useMemo(() => {
     if (plan === null || selectedGameweek === null) {
       return null;
     }
-    return plan.gameweeks.find((item) => item.gameweek_number === selectedGameweek) ?? null;
+    return (
+      plan.gameweeks.find(
+        (item) => item.gameweek_number === selectedGameweek,
+      ) ?? null
+    );
   }, [plan, selectedGameweek]);
 
   useEffect(() => {
-    if (gameweek === null) {
-      setDraft(null);
-      setDraftChip(null);
-      return;
-    }
-    setDraft(gameweek.players);
-    setDraftChip(gameweek.chip);
-    setSwapStarterId(null);
+    setSelectedPlayerId(null);
+    setPendingSwap(null);
     setTransferOutId(null);
-  }, [gameweek]);
+  }, [gameweek?.gameweek_number]);
 
-  async function reload(next: PlanResponse): Promise<void> {
-    setState({ type: "loaded", plan: next });
-  }
-
-  async function handleSave(): Promise<void> {
-    if (plan === null || selectedGameweek === null || draft === null) {
-      return;
-    }
-
-    setSaving(true);
-    setActionError(null);
-    try {
-      const next = await savePlanGameweek(plan.plan_id, selectedGameweek, {
-        chip: draftChip,
-        players: toSelections(draft),
-      });
-      await reload(next);
-    } catch (error) {
-      setActionError(
-        error instanceof PlanRuleError || error instanceof Error
-          ? error.message
-          : "Failed to save gameweek",
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleHorizonChange(field: "start_gameweek" | "end_gameweek", value: number) {
-    if (plan === null) {
-      return;
-    }
-    setActionError(null);
-    try {
-      const next = await updatePlan(plan.plan_id, { [field]: value });
-      await reload(next);
-      if (selectedGameweek !== null) {
-        const stillPresent = next.gameweeks.some(
-          (item) => item.gameweek_number === selectedGameweek,
-        );
-        if (!stillPresent) {
-          setSelectedGameweek(next.gameweeks[0]?.gameweek_number ?? null);
-        }
+  useEffect(() => {
+    if (!coordinator) return;
+    const warning =
+      "Your latest Planner edit is not saved yet. Leave this page anyway?";
+    const historyGuard = installHistoryDepartureGuard(coordinator, warning);
+    const onUnload = (event: BeforeUnloadEvent): void => {
+      if (historyGuard.leaving() || !coordinator.hasUnsavedWork()) return;
+      event.preventDefault();
+      event.returnValue = warning;
+    };
+    const onClick = (event: MouseEvent): void => {
+      if (!coordinator.hasUnsavedWork() || event.defaultPrevented) return;
+      if (
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey
+      )
+        return;
+      const link = (event.target as Element | null)?.closest?.("a[href]");
+      if (!(link instanceof HTMLAnchorElement)) return;
+      if (link.target === "_blank" || link.hasAttribute("download")) return;
+      const destination = new URL(link.href, window.location.href);
+      if (!/^https?:$/.test(destination.protocol)) return;
+      const here = new URL(window.location.href);
+      if (
+        destination.origin === here.origin &&
+        destination.pathname === here.pathname &&
+        destination.search === here.search
+      )
+        return;
+      if (!window.confirm(warning)) {
+        event.preventDefault();
+        event.stopPropagation();
       }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Failed to adjust the horizon");
+    };
+    window.addEventListener("beforeunload", onUnload);
+    document.addEventListener("click", onClick, true);
+    return () => {
+      window.removeEventListener("beforeunload", onUnload);
+      document.removeEventListener("click", onClick, true);
+      historyGuard.dispose();
+    };
+  }, [coordinator]);
+
+  useEffect(() => {
+    if (
+      plan &&
+      !plan.gameweeks.some((week) => week.gameweek_number === selectedGameweek)
+    ) {
+      setSelectedGameweek(plan.gameweeks[0]?.gameweek_number ?? null);
     }
+    if (
+      renaming &&
+      renameSubmitted !== null &&
+      snapshot?.status === "saved" &&
+      snapshot.acknowledged.name === renameSubmitted
+    ) {
+      setRenaming(false);
+      setRenameSubmitted(null);
+    }
+  }, [plan, selectedGameweek, renaming, renameSubmitted, snapshot]);
+
+  const rejection = snapshot?.rejection ?? null;
+  useEffect(() => {
+    if (rejection) setRejectionCount((count) => count + 1);
+  }, [rejection]);
+
+  function send(intents: PlanIntent[]): void {
+    setActionError(null);
+    setPendingSwap(null);
+    coordinator?.enqueue(intents);
+  }
+
+  function handleHorizonChange(
+    field: "start_gameweek" | "end_gameweek",
+    value: number,
+  ): void {
+    setActionError(null);
+    coordinator?.enqueue([{ kind: "set_horizon_bound", field, value }]);
   }
 
   async function handleOpenTransfer(player: PlanPlayer): Promise<void> {
@@ -263,59 +816,94 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
       });
       setTransferPool(response.items);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Failed to load transfer options");
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : "Failed to load transfer options",
+      );
     }
   }
 
   function handleTransfer(outgoing: PlanPlayer, incoming: PlayerItem): void {
-    if (draft === null) {
-      return;
-    }
-
-    setDraft(
-      draft.map((player) =>
-        player.player_id === outgoing.player_id
-          ? {
-              ...toPlanPlayer(incoming),
-              is_starting: player.is_starting,
-              bench_order: player.bench_order,
-              is_captain: player.is_captain,
-              is_vice_captain: player.is_vice_captain,
-            }
-          : player,
-      ),
+    if (!gameweek || !outgoing.ownership_id) return;
+    const acquisition = gameweek.decisions.find(
+      (decision) => decision.decision_id === outgoing.source_decision_id,
     );
+    send([
+      acquisition
+        ? {
+            kind: "edit_transfer",
+            decision_id: acquisition.decision_id,
+            incoming_player_id: incoming.id,
+          }
+        : {
+            kind: "add_transfer",
+            gameweek_number: gameweek.gameweek_number,
+            outgoing_player_id: outgoing.player_id,
+            outgoing_ownership_id: outgoing.ownership_id,
+            incoming_player_id: incoming.id,
+          },
+    ]);
     setTransferOutId(null);
   }
 
-  function handleSwap(starterId: number, benchId: number): void {
-    if (draft === null) {
+  function handleSelect(playerId: number): void {
+    if (!gameweek) return;
+    const outcome = resolveSelection(
+      gameweek.legal_rearrangements,
+      gameweek.players?.some((player) => player.player_id === selectedPlayerId)
+        ? selectedPlayerId
+        : null,
+      playerId,
+    );
+    if (outcome.type !== "swap") {
+      setSelectedPlayerId(outcome.type === "clear" ? null : outcome.playerId);
       return;
     }
-
-    const next = swapStarterWithBench(draft, starterId, benchId);
-    if (!formationIsLegal(next)) {
-      setActionError("That swap would leave an illegal formation.");
-      return;
+    const shown = (id: number): PlanPlayer | undefined =>
+      gameweek.players?.find((player) => player.player_id === id);
+    const first = shown(outcome.firstPlayerId);
+    const second = shown(outcome.secondPlayerId);
+    send([
+      {
+        kind: "swap_lineup_players",
+        gameweek_number: gameweek.gameweek_number,
+        first_player_id: outcome.firstPlayerId,
+        second_player_id: outcome.secondPlayerId,
+      },
+    ]);
+    if (first && second) {
+      setPendingSwap({
+        gameweek: gameweek.gameweek_number,
+        message: swapAnnouncement(
+          outcome.kind,
+          first.web_name,
+          second.web_name,
+        ),
+        first: {
+          id: first.player_id,
+          starting: first.is_starting,
+          order: first.bench_order,
+        },
+        second: {
+          id: second.player_id,
+          starting: second.is_starting,
+          order: second.bench_order,
+        },
+      });
     }
-
-    setActionError(null);
-    setDraft(next);
-    setSwapStarterId(null);
+    setSelectedPlayerId(null);
   }
 
   function handleCaptain(playerId: number, role: "captain" | "vice"): void {
-    if (draft === null) {
-      return;
-    }
-
-    setDraft(
-      draft.map((player) => ({
-        ...player,
-        is_captain: role === "captain" ? player.player_id === playerId : player.is_captain,
-        is_vice_captain: role === "vice" ? player.player_id === playerId : player.is_vice_captain,
-      })),
-    );
+    if (!gameweek) return;
+    send([
+      {
+        kind: role === "captain" ? "change_captain" : "change_vice_captain",
+        gameweek_number: gameweek.gameweek_number,
+        player_id: playerId,
+      },
+    ]);
   }
 
   if (state.type === "loading") {
@@ -335,11 +923,79 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     );
   }
 
-  const currentPlan = state.plan;
+  const currentPlan = plan ?? state.plan;
+  const draft = gameweek?.players ?? null;
+  const draftChip = gameweek?.chip ?? null;
+  const shortfallTenths =
+    currentPlan.financial_status.gameweeks?.find(
+      (week) => week.gameweek_number === gameweek?.gameweek_number,
+    )?.shortfall_tenths ?? 0;
+  const editingUnavailable =
+    currentPlan.foundation_state !== "ready" ||
+    snapshot?.status === "not_saved" ||
+    snapshot?.status === "conflict" ||
+    snapshot?.status === "missing";
   const starters = (draft ?? []).filter((player) => player.is_starting);
-  const bench = (draft ?? [])
-    .filter((player) => !player.is_starting)
-    .sort((a, b) => (a.bench_order ?? 0) - (b.bench_order ?? 0));
+  const bench = sortByBenchOrder(
+    (draft ?? []).filter((player) => !player.is_starting),
+  );
+  const startersByPosition = new Map<Position, PlanPlayer[]>(
+    POSITION_ORDER.map((position) => [
+      position,
+      starters.filter((player) => player.position === position),
+    ]),
+  );
+  const saveStatus = snapshot?.status;
+  const swapAnnouncementText =
+    pendingSwap &&
+    snapshot &&
+    swapIsAcknowledged(snapshot.acknowledged, pendingSwap)
+      ? pendingSwap.message
+      : "";
+  const selectedPlayer =
+    selectedPlayerId !== null
+      ? draft?.find((player) => player.player_id === selectedPlayerId)
+      : undefined;
+
+  function selectionProps(playerId: number) {
+    return {
+      selectionState: selectionStateFor(
+        gameweek?.legal_rearrangements ?? [],
+        selectedPlayer?.player_id ?? null,
+        playerId,
+      ),
+      onSelect: () => handleSelect(playerId),
+      selectionDisabled: saveStatus === "saving",
+    };
+  }
+
+  function transferOptions(player: PlanPlayer): JSX.Element | null {
+    if (transferOutId !== player.player_id) return null;
+    return (
+      <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-xs">
+        {transferPool
+          .filter(
+            (option) =>
+              !(draft ?? []).some(
+                (selected) => selected.player_id === option.id,
+              ),
+          )
+          .map((option) => (
+            <li key={option.id}>
+              <button
+                type="button"
+                aria-label={`Transfer in ${option.web_name}`}
+                className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
+                onClick={() => handleTransfer(player, option)}
+              >
+                {option.web_name} · {option.team_short_name} ·{" "}
+                {option.current_price.toFixed(1)}
+              </button>
+            </li>
+          ))}
+      </ul>
+    );
+  }
 
   return (
     <section className="space-y-5">
@@ -359,22 +1015,20 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   type="button"
                   className="rounded-md border border-emerald-300 bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                   disabled={renameValue.trim().length === 0}
-                  onClick={() =>
-                    void (async () => {
-                      const next = await updatePlan(currentPlan.plan_id, {
-                        name: renameValue.trim(),
-                      });
-                      await reload(next);
-                      setRenaming(false);
-                    })()
-                  }
+                  onClick={() => {
+                    setRenameSubmitted(renameValue.trim());
+                    send([{ kind: "rename_plan", name: renameValue.trim() }]);
+                  }}
                 >
                   Save
                 </button>
                 <button
                   type="button"
                   className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
-                  onClick={() => setRenaming(false)}
+                  onClick={() => {
+                    setRenaming(false);
+                    setRenameSubmitted(null);
+                  }}
                 >
                   Cancel
                 </button>
@@ -385,6 +1039,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                 <button
                   type="button"
                   aria-label="Rename plan"
+                  disabled={editingUnavailable}
                   className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
                   onClick={() => {
                     setRenameValue(currentPlan.name);
@@ -396,38 +1051,34 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               </div>
             )}
             <p className="mt-1 text-sm text-slate-600">
-              Plan xPts: {currentPlan.total_points.toFixed(1)} · Hits taken:{" "}
-              {currentPlan.total_points_hit}
+              Plan xPts: {currentPlan.total_points?.toFixed(1) ?? "Unavailable"}{" "}
+              · Hits taken: {currentPlan.total_points_hit ?? "Unavailable"}
             </p>
           </div>
 
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1 text-sm text-slate-700">
               From GW
-              <input
-                type="number"
-                aria-label="Plan start gameweek"
-                min={1}
-                max={38}
-                className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+              <HorizonBoundInput
+                label="Plan start gameweek"
+                field="start_gameweek"
                 value={currentPlan.start_gameweek}
-                onChange={(event) =>
-                  void handleHorizonChange("start_gameweek", Number(event.target.value))
-                }
+                resetKey={rejectionCount}
+                disabled={editingUnavailable}
+                onCommit={handleHorizonChange}
+                onError={setActionError}
               />
             </label>
             <label className="flex flex-col gap-1 text-sm text-slate-700">
               To GW
-              <input
-                type="number"
-                aria-label="Plan end gameweek"
-                min={1}
-                max={38}
-                className="w-24 rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-900"
+              <HorizonBoundInput
+                label="Plan end gameweek"
+                field="end_gameweek"
                 value={currentPlan.end_gameweek}
-                onChange={(event) =>
-                  void handleHorizonChange("end_gameweek", Number(event.target.value))
-                }
+                resetKey={rejectionCount}
+                disabled={editingUnavailable}
+                onCommit={handleHorizonChange}
+                onError={setActionError}
               />
             </label>
           </div>
@@ -448,274 +1099,356 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
             }`}
             onClick={() => setSelectedGameweek(item.gameweek_number)}
           >
-            <span className="block font-semibold">GW {item.gameweek_number}</span>
-            <span className="block">{item.total_points.toFixed(1)} xPts</span>
-            <span className="block">
-              {item.unlimited_transfers ? "Unlimited" : `${item.free_transfers_available} FT`}
-              {item.points_hit > 0 ? ` · -${item.points_hit}` : ""}
+            <span className="block font-semibold">
+              GW {item.gameweek_number}
             </span>
-            {item.chip && <span className="block font-semibold">{item.chip}</span>}
+            <span className="block">
+              {item.total_points?.toFixed(1) ?? "Unavailable"} xPts
+            </span>
+            <span className="block">
+              {item.unlimited_transfers
+                ? "Unlimited"
+                : `${item.free_transfers_available ?? "Unavailable"} FT`}
+              {item.points_hit !== null && item.points_hit > 0
+                ? ` · -${item.points_hit}`
+                : ""}
+            </span>
+            {item.chip && (
+              <span className="block font-semibold">{item.chip}</span>
+            )}
           </button>
         ))}
       </nav>
 
-      {actionError && <p className="text-sm text-red-700">{actionError}</p>}
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <p role="status">
+          {currentPlan.foundation_state !== "ready"
+            ? "Initialization required"
+            : snapshot?.status === "saving"
+              ? "Saving..."
+              : snapshot?.status === "not_saved"
+                ? "Not saved"
+                : snapshot?.status === "conflict"
+                  ? "Needs reconciliation"
+                  : snapshot?.status === "missing"
+                    ? "Plan missing"
+                    : "Saved"}
+        </p>
+        {currentPlan.financial_status.provisional && (
+          <span className="text-slate-600">Estimated bases</span>
+        )}
+        {currentPlan.financial_status.requires_resolution && (
+          <span className="text-red-700">Requires resolution</span>
+        )}
+        {snapshot?.status === "not_saved" && (
+          <>
+            <button
+              type="button"
+              className="rounded-md border px-2 py-1"
+              onClick={() => coordinator?.retry()}
+            >
+              Retry Same Edit
+            </button>
+            <button
+              type="button"
+              className="rounded-md border px-2 py-1"
+              onClick={() => void coordinator?.reconcile()}
+            >
+              Check Save Status
+            </button>
+          </>
+        )}
+        {snapshot?.status === "conflict" && (
+          <button
+            type="button"
+            className="rounded-md border px-2 py-1"
+            onClick={() => void coordinator?.revalidate()}
+          >
+            Revalidate With Current Data
+          </button>
+        )}
+      </div>
+      {(snapshot?.message || actionError) && (
+        <p role="alert" className="text-sm text-red-700">
+          {snapshot?.message || actionError}
+        </p>
+      )}
+      {snapshot?.skipped?.map((item, index) => (
+        <p key={index} className="text-sm text-amber-800">
+          {`Edit not applied: ${item.reason}`}
+        </p>
+      ))}
+      <FinancialResolutionPanel plan={currentPlan} onGo={setSelectedGameweek} />
+      <TransferRepairPanel
+        key={`${currentPlan.revision}-${JSON.stringify(snapshot?.rejection?.intents ?? [])}`}
+        plan={currentPlan}
+        rejection={snapshot?.rejection ?? null}
+        disabled={editingUnavailable || snapshot?.status === "saving"}
+        onApply={send}
+      />
+      {currentPlan.foundation_state !== "ready" && (
+        <p className="text-sm text-amber-800">
+          {currentPlan.initialization.reason}
+        </p>
+      )}
+
+      <StartingStatePanel
+        plan={currentPlan}
+        coordinator={coordinator}
+        disabled={editingUnavailable}
+        onError={setActionError}
+      />
 
       {gameweek !== null && draft !== null && (
-        <div className="space-y-5">
+        <fieldset disabled={editingUnavailable} className="min-w-0 space-y-5">
           <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm text-slate-700">
-                <p className="font-semibold text-slate-900">Gameweek {gameweek.gameweek_number}</p>
+                <p className="font-semibold text-slate-900">
+                  Gameweek {gameweek.gameweek_number}
+                </p>
                 <p>
-                  Bank {gameweek.bank.toFixed(1)} · Free transfers{" "}
+                  Bank{" "}
+                  {shortfallTenths > 0
+                    ? `Shortfall ${formatTenths(shortfallTenths)}`
+                    : (gameweek.bank?.toFixed(1) ?? "Unavailable")}{" "}
+                  · Free transfers{" "}
                   {gameweek.unlimited_transfers
                     ? "unlimited"
-                    : gameweek.free_transfers_available}{" "}
-                  · Transfers made {gameweek.transfers_made}
-                  {gameweek.points_hit > 0 ? ` · Hit -${gameweek.points_hit}` : ""}
+                    : (gameweek.accounting?.free_transfers_available ??
+                      "Unavailable")}{" "}
+                  · Transfers made{" "}
+                  {gameweek.accounting?.transfers_made ?? "Unavailable"}
+                  {" · Next FT "}
+                  {gameweek.accounting?.next_free_transfers ?? "Unavailable"}
+                  {" · Hit "}
+                  {gameweek.accounting?.points_hit == null
+                    ? "Unavailable"
+                    : gameweek.accounting.points_hit > 0
+                      ? `-${gameweek.accounting.points_hit}`
+                      : 0}
                 </p>
               </div>
-              <button
-                type="button"
-                className="rounded-md border border-emerald-300 bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                disabled={saving}
-                onClick={() => void handleSave()}
-              >
-                {saving ? "Saving..." : "Save Gameweek"}
-              </button>
             </div>
 
             <div className="mt-4 flex flex-wrap gap-2">
               {CHIPS.map((chip) => {
-                const unavailable = chipUsedElsewhereInHalf(
-                  currentPlan,
-                  chip.value,
-                  gameweek.gameweek_number,
-                );
+                const availability = gameweek.chip_availability[chip.value];
+                const unavailable =
+                  !availability ||
+                  !["available", "planned_here"].includes(availability.state);
                 const active = draftChip === chip.value;
                 return (
-                  <button
-                    key={chip.value}
-                    type="button"
-                    aria-label={chip.label}
-                    aria-pressed={active}
-                    title={
-                      unavailable
-                        ? `${chip.label} is already used in this half of the season`
-                        : undefined
-                    }
-                    disabled={unavailable}
-                    className={`rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40 ${
-                      active
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
-                    }`}
-                    onClick={() => setDraftChip(active ? null : chip.value)}
-                  >
-                    {chip.label}
-                  </button>
+                  <div key={chip.value} className="max-w-64">
+                    <button
+                      type="button"
+                      aria-label={chip.label}
+                      aria-pressed={active}
+                      title={availability?.reason ?? undefined}
+                      disabled={unavailable}
+                      className={`rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40 ${
+                        active
+                          ? "border-slate-900 bg-slate-900 text-white"
+                          : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
+                      }`}
+                      onClick={() =>
+                        send([
+                          {
+                            kind: active ? "remove_chip" : "activate_chip",
+                            gameweek_number: gameweek.gameweek_number,
+                            chip: chip.value,
+                          },
+                        ])
+                      }
+                    >
+                      {chip.label}
+                    </button>
+                    {availability?.reason && (
+                      <p className="mt-1 text-xs text-slate-600">
+                        {availability.reason}
+                      </p>
+                    )}
+                    {availability?.state === "planned_elsewhere" &&
+                      availability.conflicting_gameweek !== null &&
+                      !gameweek.chip && (
+                        <button
+                          type="button"
+                          className="mt-1 text-xs underline"
+                          aria-label={`Move ${chip.label} from GW${availability.conflicting_gameweek} to GW${gameweek.gameweek_number}`}
+                          onClick={() =>
+                            send([
+                              {
+                                kind: "move_chip",
+                                chip: chip.value,
+                                source_gameweek:
+                                  availability.conflicting_gameweek!,
+                                target_gameweek: gameweek.gameweek_number,
+                              },
+                            ])
+                          }
+                        >
+                          Move Here
+                        </button>
+                      )}
+                  </div>
                 );
               })}
             </div>
 
-            {(gameweek.transfers_in.length > 0 || gameweek.transfers_out.length > 0) && (
+            {(gameweek.transfers_in.length > 0 ||
+              gameweek.transfers_out.length > 0) && (
               <p className="mt-3 text-xs text-slate-600">
-                Transfers: {gameweek.transfers_out.map((item) => item.web_name).join(", ") || "-"}{" "}
-                → {gameweek.transfers_in.map((item) => item.web_name).join(", ") || "-"}
+                Transfers:{" "}
+                {gameweek.transfers_out
+                  .map((item) => item.web_name)
+                  .join(", ") || "-"}{" "}
+                →{" "}
+                {gameweek.transfers_in
+                  .map((item) => item.web_name)
+                  .join(", ") || "-"}
+              </p>
+            )}
+            {gameweek.decisions.map((decision) => (
+              <button
+                key={decision.decision_id}
+                type="button"
+                className="mt-2 mr-3 text-xs underline"
+                aria-label={`Remove transfer ${decision.outgoing_player_id} to ${decision.incoming_player_id}`}
+                onClick={() =>
+                  send([
+                    {
+                      kind: "remove_transfer",
+                      decision_id: decision.decision_id,
+                    },
+                  ])
+                }
+              >
+                Remove Transfer
+              </button>
+            ))}
+            {gameweek.decisions.map((decision) => (
+              <TransferPriceDetails
+                key={`price-${decision.decision_id}`}
+                decision={decision}
+                week={gameweek}
+              />
+            ))}
+            {gameweek.decisions.length > 0 && (
+              <p className="mt-2 text-xs text-slate-600">
+                Price policy: a new or explicitly edited transfer saves the
+                latest market prices at that moment. Market refreshes do not
+                reprice saved transfers. A purchase-price correction
+                recalculates sales from each transfer&apos;s saved market
+                assumption and leaves acquisition prices unchanged.
               </p>
             )}
           </section>
 
-          <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
-            <section>
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
-                Starting XI
-              </h3>
-              <div className="space-y-5">
-                {POSITION_ORDER.map((position) => {
-                  const rows = starters.filter((player) => player.position === position);
-                  if (rows.length === 0) {
-                    return null;
-                  }
-
-                  return (
-                    <section key={position}>
-                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        {position}
-                      </h4>
-                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        {rows.map((player) => (
-                          <article
-                            key={player.player_id}
-                            className="rounded-lg border border-slate-200 p-3"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-semibold text-slate-900">
-                                  {player.web_name}
-                                </p>
-                                <p className="text-xs text-slate-600">
-                                  {player.team_short_name} · {player.position} ·{" "}
-                                  {player.current_price.toFixed(1)}
-                                </p>
-                              </div>
-                              {(player.is_captain || player.is_vice_captain) && (
-                                <span className="rounded-full bg-slate-900 px-2 py-1 text-[10px] font-semibold text-white">
-                                  {player.is_captain ? "C" : "VC"}
-                                </span>
-                              )}
-                            </div>
-                            <p className="mt-2 text-xs text-slate-600">
-                              Opponent: {opponentLabel(player)}
-                            </p>
-                            <p className="mt-1 text-xs text-slate-600">
-                              GW xPts: {player.projected_points.toFixed(1)}
-                            </p>
-                            <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                              <button
-                                type="button"
-                                aria-label={`Swap ${player.web_name} with bench`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() =>
-                                  setSwapStarterId(
-                                    swapStarterId === player.player_id ? null : player.player_id,
-                                  )
-                                }
-                              >
-                                Swap With Bench
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Transfer ${player.web_name}`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() => void handleOpenTransfer(player)}
-                              >
-                                Transfer
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Make ${player.web_name} captain`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() => handleCaptain(player.player_id, "captain")}
-                              >
-                                C
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Make ${player.web_name} vice-captain`}
-                                className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
-                                onClick={() => handleCaptain(player.player_id, "vice")}
-                              >
-                                VC
-                              </button>
-                            </div>
-
-                            {swapStarterId === player.player_id && (
-                              <ul className="mt-3 space-y-1 text-xs">
-                                {bench.map((benchPlayer) => (
-                                  <li key={benchPlayer.player_id}>
-                                    <button
-                                      type="button"
-                                      aria-label={`Swap ${player.web_name} for ${benchPlayer.web_name}`}
-                                      className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                      onClick={() =>
-                                        handleSwap(player.player_id, benchPlayer.player_id)
-                                      }
-                                    >
-                                      {benchPlayer.web_name} ({benchPlayer.position})
-                                    </button>
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-
-                            {transferOutId === player.player_id && (
-                              <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-xs">
-                                {transferPool
-                                  .filter(
-                                    (option) =>
-                                      !draft.some(
-                                        (selected) => selected.player_id === option.id,
-                                      ),
-                                  )
-                                  .map((option) => (
-                                    <li key={option.id}>
-                                      <button
-                                        type="button"
-                                        aria-label={`Transfer in ${option.web_name}`}
-                                        className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                        onClick={() => handleTransfer(player, option)}
-                                      >
-                                        {option.web_name} · {option.team_short_name} ·{" "}
-                                        {option.current_price.toFixed(1)}
-                                      </button>
-                                    </li>
-                                  ))}
-                              </ul>
-                            )}
-                          </article>
-                        ))}
-                      </div>
-                    </section>
-                  );
-                })}
+          <div className="space-y-3">
+            {selectedPlayer && (
+              <div className="flex flex-wrap items-center gap-3">
+                <ClearSelectionButton
+                  onClick={() => setSelectedPlayerId(null)}
+                />
               </div>
-            </section>
+            )}
+            <NoTargetsNotice
+              name={
+                selectedPlayer &&
+                !hasTargets(
+                  gameweek.legal_rearrangements,
+                  selectedPlayer.player_id,
+                )
+                  ? selectedPlayer.web_name
+                  : null
+              }
+            />
+            <SwapAnnouncement message={swapAnnouncementText} />
+          </div>
 
-            <section>
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
-                Bench
-              </h3>
-              <div className="space-y-3">
-                {bench.map((player) => (
-                  <article key={player.player_id} className="rounded-lg border border-slate-200 p-3">
-                    <p className="text-sm font-semibold text-slate-900">
-                      {player.bench_order}. {player.web_name}
-                    </p>
-                    <p className="text-xs text-slate-600">
-                      {player.team_short_name} · {player.position} ·{" "}
-                      {player.current_price.toFixed(1)}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-600">
-                      GW xPts: {player.projected_points.toFixed(1)}
-                    </p>
+          <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+            <SquadPitch
+              title="Starting XI"
+              itemsByPosition={startersByPosition}
+              keyFor={(player) => player.player_id}
+              renderCard={(player) => (
+                <SquadPlayerCard
+                  webName={player.web_name}
+                  teamShortName={player.team_short_name}
+                  position={player.position}
+                  price={player.current_price}
+                  badge={
+                    player.is_captain
+                      ? "C"
+                      : player.is_vice_captain
+                        ? "VC"
+                        : null
+                  }
+                  projectedPoints={player.projected_points}
+                  opponentLabel={opponentLabel(player)}
+                  {...selectionProps(player.player_id)}
+                >
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
                     <button
                       type="button"
                       aria-label={`Transfer ${player.web_name}`}
-                      className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                      aria-expanded={transferOutId === player.player_id}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
                       onClick={() => void handleOpenTransfer(player)}
                     >
                       Transfer
                     </button>
-                    {transferOutId === player.player_id && (
-                      <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto text-xs">
-                        {transferPool
-                          .filter(
-                            (option) =>
-                              !draft.some((selected) => selected.player_id === option.id),
-                          )
-                          .map((option) => (
-                            <li key={option.id}>
-                              <button
-                                type="button"
-                                aria-label={`Transfer in ${option.web_name}`}
-                                className="w-full rounded-md border border-slate-200 px-2 py-1 text-left hover:bg-slate-50"
-                                onClick={() => handleTransfer(player, option)}
-                              >
-                                {option.web_name} · {option.team_short_name} ·{" "}
-                                {option.current_price.toFixed(1)}
-                              </button>
-                            </li>
-                          ))}
-                      </ul>
-                    )}
-                  </article>
-                ))}
-              </div>
-            </section>
+                    <button
+                      type="button"
+                      aria-label={`Make ${player.web_name} captain`}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
+                      onClick={() => handleCaptain(player.player_id, "captain")}
+                    >
+                      C
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Make ${player.web_name} vice-captain`}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50"
+                      onClick={() => handleCaptain(player.player_id, "vice")}
+                    >
+                      VC
+                    </button>
+                  </div>
+                  {transferOptions(player)}
+                </SquadPlayerCard>
+              )}
+            />
+
+            <Bench
+              items={bench}
+              keyFor={(player) => player.player_id}
+              renderCard={(player) => (
+                <SquadPlayerCard
+                  webName={player.web_name}
+                  teamShortName={player.team_short_name}
+                  position={player.position}
+                  price={player.current_price}
+                  benchOrder={player.bench_order}
+                  projectedPoints={player.projected_points}
+                  opponentLabel={opponentLabel(player)}
+                  {...selectionProps(player.player_id)}
+                >
+                  <button
+                    type="button"
+                    aria-label={`Transfer ${player.web_name}`}
+                    aria-expanded={transferOutId === player.player_id}
+                    className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                    onClick={() => void handleOpenTransfer(player)}
+                  >
+                    Transfer
+                  </button>
+                  {transferOptions(player)}
+                </SquadPlayerCard>
+              )}
+            />
           </div>
-        </div>
+        </fieldset>
       )}
     </section>
   );

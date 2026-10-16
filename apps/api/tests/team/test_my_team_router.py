@@ -223,6 +223,126 @@ def test_put_my_team_returns_saved_squad() -> None:
         app.dependency_overrides.clear()
 
 
+def _full_squad_record(bank: float = 1.5, free_transfers: int = 2) -> CurrentSquadRecord:
+    positions = ["GK"] + ["DEF"] * 4 + ["MID"] * 4 + ["FWD"] * 2 + ["GK", "DEF", "MID", "FWD"]
+    return CurrentSquadRecord(
+        squad_id=1,
+        name="My Team",
+        bank=bank,
+        free_transfers=free_transfers,
+        players=[
+            CurrentSquadPlayerRecord(
+                player_id=index + 1,
+                web_name=f"P{index + 1}",
+                first_name="First",
+                second_name=f"P{index + 1}",
+                team_name=f"Team {index % 5 + 1}",
+                team_short_name=f"T{index % 5 + 1}",
+                position=position,
+                current_price=5.0,
+                status="a",
+                is_starting=index < 11,
+                bench_order=None if index < 11 else index - 10,
+                is_captain=index == 1,
+                is_vice_captain=index == 2,
+                team_id=index % 5 + 1,
+            )
+            for index, position in enumerate(positions)
+        ],
+    )
+
+
+class _FakeFullUpsertService:
+    def __init__(self) -> None:
+        self.last_request: UpsertCurrentSquadRequest | None = None
+
+    def execute(self, request: UpsertCurrentSquadRequest) -> CurrentSquadRecord:
+        self.last_request = request
+        return _full_squad_record(request.bank, request.free_transfers)
+
+
+def test_us6_put_my_team_keeps_saving_the_whole_lineup_and_returns_authoritative_targets() -> None:
+    service = _FakeFullUpsertService()
+    session = _FakeSession()
+    app.dependency_overrides[get_upsert_current_squad_service] = lambda: service
+    app.dependency_overrides[get_db_session] = lambda: session
+    try:
+        payload = _build_payload()
+        response = TestClient(app).put("/my-team", json=payload)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert (body["bank"], body["free_transfers"]) == (1.5, 2)
+        assert session.committed is True
+        assert service.last_request is not None
+        assert service.last_request.bank == 1.5
+        assert service.last_request.free_transfers == 2
+        assert len(service.last_request.players) == 15
+        offered = {
+            (frozenset({c["first_player_id"], c["second_player_id"]}), c["kind"])
+            for c in body["legal_rearrangements"]
+        }
+        assert (frozenset({2, 14}), "substitution") in offered
+        assert (frozenset({13, 14}), "bench_priority") in offered
+        assert not any(players & {12} and kind == "bench_priority" for players, kind in offered)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_us6_get_my_team_serialises_the_rearrangement_targets() -> None:
+    from fpl_engine.rules import Rearrangement
+
+    record = MyTeamViewRecord(
+        squad_id=1,
+        name="My Team",
+        bank=1.5,
+        free_transfers=2,
+        players=[],
+        projection_totals=None,
+        bench_projection_totals=None,
+        captain_adjusted_projection_totals=None,
+        gameweek_numbers=[],
+        legal_rearrangements=(
+            Rearrangement(2, 14, "substitution"),
+            Rearrangement(13, 14, "bench_priority"),
+        ),
+    )
+    app.dependency_overrides[get_current_squad_service] = lambda: _FakeGetCurrentSquadService(
+        record
+    )
+    try:
+        response = TestClient(app).get("/my-team")
+
+        assert response.status_code == 200
+        assert response.json()["legal_rearrangements"] == [
+            {"first_player_id": 2, "second_player_id": 14, "kind": "substitution"},
+            {"first_player_id": 13, "second_player_id": 14, "kind": "bench_priority"},
+        ]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_my_team_without_targets_still_returns_an_empty_list() -> None:
+    record = MyTeamViewRecord(
+        squad_id=1,
+        name="My Team",
+        bank=1.5,
+        free_transfers=2,
+        players=[],
+        projection_totals=None,
+        bench_projection_totals=None,
+        captain_adjusted_projection_totals=None,
+        gameweek_numbers=[],
+    )
+    app.dependency_overrides[get_current_squad_service] = lambda: _FakeGetCurrentSquadService(
+        record
+    )
+    try:
+        assert TestClient(app).get("/my-team").json()["legal_rearrangements"] == []
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_put_my_team_rejects_an_illegal_starting_formation_with_400() -> None:
     # Real service + fakes: the router must surface the domain rule as a 400 without committing.
     repository = _FakeFormationRepository()

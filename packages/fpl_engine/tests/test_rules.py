@@ -6,6 +6,7 @@ from typing import ClassVar
 import pytest
 from fpl_engine.domain import PlayerPosition
 from fpl_engine.rules import (
+    STARTING_POSITION_LIMITS,
     Chip,
     RuleViolationError,
     SeasonHalf,
@@ -63,6 +64,136 @@ def build_squad(
             )
         )
     return slots
+
+
+class TestPlannerChipPeriods:
+    def test_exactly_four_chips_and_unused_first_period_lapses(self) -> None:
+        from fpl_engine.rules.chips import chip_states
+
+        assert {chip.value for chip in Chip} == {
+            "WILDCARD",
+            "FREE_HIT",
+            "BENCH_BOOST",
+            "TRIPLE_CAPTAIN",
+        }
+        for chip in Chip:
+            assert chip_states(20, {}, start_gameweek=17)[chip].state == "available"
+            assert chip_states(38, {20: chip}, start_gameweek=17)[chip].state == "planned_elsewhere"
+
+    @pytest.mark.parametrize("chip", list(Chip))
+    @pytest.mark.parametrize(("first", "second"), [(17, 19), (20, 38)])
+    def test_once_per_period_names_the_existing_gameweek(self, chip, first, second) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        plan = apply_intents(build_plan(17, 38), (SetChip(first, chip, None),), metadata()).plan
+        with pytest.raises(RuleViolationError, match=f"Planned for gameweek {first}"):
+            apply_intents(plan, (SetChip(second, chip, None),), metadata())
+        assert next(week for week in plan.gameweeks if week.gameweek_number == second).chip is None
+
+    @pytest.mark.parametrize("chip", list(Chip))
+    def test_used_before_is_not_planned_elsewhere_and_resets_at_20(self, chip) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from fpl_engine.rules.chips import chip_states
+        from test_planning import build_plan, metadata
+
+        plan = build_plan(17, 22)
+        plan = replace(plan, boundary=replace(plan.boundary, used_chips=frozenset({chip})))
+        state = chip_states(18, {}, start_gameweek=17, used_chips=plan.boundary.used_chips)[chip]
+        assert (state.state, state.reason, state.conflicting_gameweek) == (
+            "used_before",
+            "Used before this plan",
+            None,
+        )
+        with pytest.raises(RuleViolationError, match="Used before this plan"):
+            apply_intents(plan, (SetChip(18, chip, None),), metadata())
+        changed = apply_intents(plan, (SetChip(20, chip, None),), metadata()).plan
+        assert changed.gameweeks[3].chip == chip
+
+    @pytest.mark.parametrize("chip", list(Chip))
+    def test_gameweek_one_restrictions(self, chip) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        plan = build_plan(1, 2)
+        if chip in {Chip.WILDCARD, Chip.FREE_HIT}:
+            with pytest.raises(RuleViolationError, match="unavailable in gameweek 1"):
+                apply_intents(plan, (SetChip(1, chip, None),), metadata())
+        else:
+            assert (
+                apply_intents(plan, (SetChip(1, chip, None),), metadata()).plan.gameweeks[0].chip
+                == chip
+            )
+
+    @pytest.mark.parametrize(("first", "second"), [(19, 20), (20, 19)])
+    @pytest.mark.parametrize("chip", list(Chip))
+    def test_cross_boundary_use_in_either_order(self, chip, first, second) -> None:
+        from fpl_engine.planning.models import SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        plan = apply_intents(build_plan(19, 20), (SetChip(first, chip, None),), metadata()).plan
+        if chip == Chip.FREE_HIT:
+            with pytest.raises(
+                RuleViolationError, match=f"Free Hit conflicts with gameweek {first}"
+            ):
+                apply_intents(plan, (SetChip(second, chip, None),), metadata())
+        else:
+            assert all(
+                week.chip == chip
+                for week in apply_intents(
+                    plan, (SetChip(second, chip, None),), metadata()
+                ).plan.gameweeks
+            )
+
+    @pytest.mark.parametrize("declaration_first", [False, True])
+    def test_free_hit_19_declaration_conflicts_in_either_direction(self, declaration_first) -> None:
+        from fpl_engine.planning.models import SetChip, SetStartingChips
+        from fpl_engine.planning.mutations import apply_intents
+        from test_planning import build_plan, metadata
+
+        declaration = SetStartingChips(frozenset(), True)
+        activation = SetChip(20, Chip.FREE_HIT, None)
+        first, second = (
+            (declaration, activation) if declaration_first else (activation, declaration)
+        )
+        plan = apply_intents(build_plan(20, 21), (first,), metadata()).plan
+        with pytest.raises(RuleViolationError, match="Free Hit conflicts with gameweek 19"):
+            apply_intents(plan, (second,), metadata())
+
+    def test_atomic_chip_moves_removals_and_occupied_targets_preserve_quotes(self) -> None:
+        from fpl_engine.planning.models import MoveChip, SetChip
+        from fpl_engine.planning.mutations import apply_intents
+        from fpl_engine.rules.chips import chip_states
+        from test_planning import build_plan, build_transfer, metadata, with_week
+
+        decision = build_transfer()
+        plan = with_week(build_plan(17, 22), 18, chip=Chip.WILDCARD, transfers=(decision,))
+        plan = with_week(plan, 19, chip=Chip.BENCH_BOOST)
+        with pytest.raises(RuleViolationError, match="source/target has changed"):
+            apply_intents(plan, (MoveChip(18, 19, Chip.WILDCARD),), metadata())
+        with pytest.raises(RuleViolationError, match="Remove the existing chip"):
+            apply_intents(plan, (SetChip(18, Chip.TRIPLE_CAPTAIN, Chip.WILDCARD),), metadata())
+        moved = apply_intents(
+            plan, (SetChip(19, None, Chip.BENCH_BOOST), MoveChip(18, 19, Chip.WILDCARD)), metadata()
+        ).plan
+        assert [week.chip for week in moved.gameweeks] == [
+            None,
+            None,
+            Chip.WILDCARD,
+            None,
+            None,
+            None,
+        ]
+        assert moved.gameweeks[1].transfers == (decision,)
+        cleared = apply_intents(moved, (SetChip(19, None, Chip.WILDCARD),), metadata()).plan
+        chips = {week.gameweek_number: week.chip for week in cleared.gameweeks}
+        assert chip_states(17, chips, start_gameweek=17)[Chip.WILDCARD].state == "available"
+        assert cleared.gameweeks[1].transfers == (decision,)
+        assert all(not week.transfers for week in cleared.gameweeks if week.gameweek_number != 18)
 
 
 class TestSquadValidation:
@@ -158,6 +289,173 @@ class TestSquadValidation:
         with pytest.raises(RuleViolationError) as error:
             validate_squad(squad)
         assert error.value.code == "formation"
+
+
+class TestRearrangement:
+    """Shared starter/bench rearrangement used by My Team and the Planner (FR-043 to FR-045)."""
+
+    @staticmethod
+    def pairs(slots: list[SquadSlot]) -> set[tuple[frozenset[int], str]]:
+        from fpl_engine.rules import legal_rearrangements
+
+        return {
+            (frozenset({choice.first_player_id, choice.second_player_id}), choice.kind)
+            for choice in legal_rearrangements(slots)
+        }
+
+    @staticmethod
+    def by_id(slots: object) -> dict[int, SquadSlot]:
+        return {slot.player_id: slot for slot in slots}  # type: ignore[attr-defined]
+
+    def test_offers_each_legal_pair_once_with_its_kind(self) -> None:
+        from fpl_engine.rules import legal_rearrangements
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        choices = legal_rearrangements(slots)
+        assert len(choices) == len(
+            {frozenset({c.first_player_id, c.second_player_id}) for c in choices}
+        )
+        found = self.pairs(slots)
+        # 4-4-2 XI, bench GK/DEF/MID/FWD: GK swaps with GK only; outfield starters swap with
+        # outfield subs when the formation survives; only the three outfield subs reorder.
+        assert (frozenset({1, 12}), "substitution") in found
+        assert (frozenset({2, 13}), "substitution") in found
+        assert (frozenset({2, 14}), "substitution") in found
+        assert (frozenset({13, 14}), "bench_priority") in found
+        assert (frozenset({13, 15}), "bench_priority") in found
+        assert (frozenset({14, 15}), "bench_priority") in found
+
+    def test_goalkeeper_is_never_a_target_for_outfield_players_or_bench_priority(self) -> None:
+        found = self.pairs(build_squad(captain_id=2, vice_captain_id=3))
+        keepers = {1, 12}
+        for players, kind in found:
+            if players & keepers:
+                assert players == keepers
+                assert kind == "substitution"
+        assert not any(kind == "bench_priority" and players & keepers for players, kind in found)
+
+    def test_formation_limits_filter_targets(self) -> None:
+        # Three defenders in the XI: only a defender may replace one of them.
+        squad = build_squad(captain_id=2, vice_captain_id=3)
+        squad[4] = replace(squad[4], is_starting=False, bench_order=3)
+        squad[13] = replace(squad[13], is_starting=True, bench_order=None)
+        validate_squad(squad)
+        found = self.pairs(squad)
+        assert (frozenset({2, 13}), "substitution") in found
+        assert (frozenset({2, 5}), "substitution") in found
+        assert (frozenset({2, 15}), "substitution") not in found
+        assert (frozenset({10, 15}), "substitution") in found
+
+    def test_starter_with_bench_swap_moves_roles_and_captaincy_follows_the_slot(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        result = self.by_id(rearrange_lineup(slots, 2, 14))
+        assert (result[14].is_starting, result[14].bench_order) == (True, None)
+        assert (result[14].is_captain, result[14].is_vice_captain) == (True, False)
+        assert (result[2].is_starting, result[2].bench_order) == (False, 3)
+        assert (result[2].is_captain, result[2].is_vice_captain) == (False, False)
+        untouched = {
+            player_id: slot
+            for player_id, slot in self.by_id(slots).items()
+            if player_id not in {2, 14}
+        }
+        assert all(result[player_id] == slot for player_id, slot in untouched.items())
+
+    def test_vice_captain_is_inherited_in_the_same_way(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        result = self.by_id(rearrange_lineup(slots, 15, 3))
+        assert (result[15].is_starting, result[15].is_vice_captain, result[15].is_captain) == (
+            True,
+            True,
+            False,
+        )
+        assert (result[3].is_starting, result[3].bench_order, result[3].is_vice_captain) == (
+            False,
+            4,
+            False,
+        )
+
+    def test_argument_order_does_not_change_the_result(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        assert rearrange_lineup(slots, 2, 14) == rearrange_lineup(slots, 14, 2)
+        assert rearrange_lineup(slots, 13, 15) == rearrange_lineup(slots, 15, 13)
+
+    def test_outfield_bench_priority_swaps_only_the_bench_order(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        result = self.by_id(rearrange_lineup(slots, 13, 15))
+        assert (result[13].bench_order, result[15].bench_order) == (4, 2)
+        assert (result[14].bench_order, result[12].bench_order) == (3, 1)
+        assert all(
+            result[player_id] == slot
+            for player_id, slot in self.by_id(slots).items()
+            if player_id not in {13, 15}
+        )
+
+    @pytest.mark.parametrize("pair", [(12, 13), (14, 12), (12, 15)])
+    def test_bench_goalkeeper_cannot_reorder_with_outfield_substitutes(self, pair) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        with pytest.raises(RuleViolationError) as error:
+            rearrange_lineup(build_squad(), *pair)
+        assert error.value.code == "invalid_swap"
+        assert "Goalkeeper" in str(error.value)
+
+    def test_two_starters_the_same_player_and_unknown_players_are_rejected(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad()
+        for pair in [(2, 3), (2, 2), (2, 99), (99, 98)]:
+            with pytest.raises(RuleViolationError) as error:
+                rearrange_lineup(slots, *pair)
+            assert error.value.code == "invalid_swap"
+
+    def test_illegal_formation_swap_is_rejected_by_the_squad_rules(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        with pytest.raises(RuleViolationError) as error:
+            rearrange_lineup(build_squad(captain_id=2, vice_captain_id=3), 5, 12)
+        assert error.value.code == "formation"
+
+    def test_enumeration_and_execution_always_agree(self) -> None:
+        from fpl_engine.rules import rearrange_lineup
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        offered = {pair for pair, _ in self.pairs(slots)}
+        for first in slots:
+            for second in slots:
+                if first.player_id >= second.player_id:
+                    continue
+                pair = frozenset({first.player_id, second.player_id})
+                try:
+                    result = rearrange_lineup(slots, first.player_id, second.player_id)
+                except RuleViolationError:
+                    assert pair not in offered
+                else:
+                    assert pair in offered
+                    validate_squad(result)
+
+    def test_inputs_are_not_mutated_and_invalid_squads_offer_nothing(self) -> None:
+        from fpl_engine.rules import legal_rearrangements
+
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        before = list(slots)
+        legal_rearrangements(slots)
+        assert slots == before
+        assert legal_rearrangements([replace(slot, team_id=1) for slot in slots]) == ()
+
+    def test_formation_limits_are_the_single_authority(self, monkeypatch) -> None:
+        # Tightening the shared limit must change the offered targets; no copy exists elsewhere.
+        slots = build_squad(captain_id=2, vice_captain_id=3)
+        assert (frozenset({2, 14}), "substitution") in self.pairs(slots)
+        monkeypatch.setitem(STARTING_POSITION_LIMITS, PlayerPosition.DEFENDER, (4, 4))
+        assert (frozenset({2, 14}), "substitution") not in self.pairs(slots)
 
 
 class TestChips:
@@ -261,9 +559,33 @@ class TestTransfers:
         )
 
     @pytest.mark.parametrize("chip", [Chip.WILDCARD, Chip.FREE_HIT])
-    def test_unlimited_chips_preserve_banked_transfers(self, chip: Chip) -> None:
+    @pytest.mark.parametrize(
+        ("available", "expected"), [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)]
+    )
+    def test_unlimited_chips_consume_the_arising_transfer(
+        self, chip: Chip, available: int, expected: int
+    ) -> None:
         assert (
-            free_transfers_after(available=3, transfers_made=8, chip=chip, gameweek_number=9) == 4
+            free_transfers_after(
+                available=available, transfers_made=8, chip=chip, gameweek_number=9
+            )
+            == expected
+        )
+
+    @pytest.mark.parametrize("chip", [Chip.BENCH_BOOST, Chip.TRIPLE_CAPTAIN])
+    @pytest.mark.parametrize(("moves", "next_ft", "hit"), [(0, 4, 0), (1, 3, 0), (4, 1, 4)])
+    def test_scoring_chips_keep_ordinary_transfer_accounting(
+        self, chip: Chip, moves: int, next_ft: int, hit: int
+    ) -> None:
+        assert (
+            free_transfers_after(available=3, transfers_made=moves, chip=chip, gameweek_number=9)
+            == next_ft
+        )
+        assert (
+            points_hit(
+                transfers_made=moves, free_transfers_available=3, chip=chip, gameweek_number=9
+            )
+            == hit
         )
 
 
