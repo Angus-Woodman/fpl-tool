@@ -17,7 +17,7 @@ Invalid Planner-mode parameters (non-numeric `plan`, `gw` or `out`) show an expl
 2. **Explorer to Planner after a saved confirmation.** Navigate (push) to `/plans/{planId}?gw={n}&highlight={incomingPlayerId}` after the coordinator reports `saved` with an acknowledged revision above the one previewed. A one-shot `sessionStorage` entry (`plannerTransferNotice:{planId}`) carries the message "Transferred X for Y in GW n"; the Planner reads and clears it.
 3. **Explorer without confirming.** "Back to plan" and browser Back return to the same plan and gameweek with no change.
 4. **Reload and new tab** inside the Explorer restore mode, plan, gameweek, outgoing player, horizon and pinned run from the address.
-5. **Departure protection.** While a confirmation is saving or not saved, leaving the Explorer shows the same warning as the Planner (link click, `beforeunload`, Back/Forward guard).
+5. **Departure protection.** While a confirmation is sending, unknown, accepted-but-not-saved or in known conflict, leaving the Explorer shows the same warning as the Planner (link click, `beforeunload`, Back/Forward guard). The unresolved pinned submission survives navigation (module-level coordinator) and is shown again on return to the Explorer; the Planner shows its existing save-status message and buttons for it, and no Planner control replays it.
 
 ## Planner page changes
 
@@ -45,7 +45,7 @@ Accessibility and viewports: keyboard operable controls with labels, visible foc
 |---|---|---|
 | `TransferExplorerEntry` | choose mode from `plan` parameter | search params |
 | `PlannerTransferExplorer` | state machine, fetching, navigation; confirms through a `commit` function prop | `planId`, `gameweek`, `out`, `horizon`, `run`, `commit` |
-| `commit` prop (default adapter over `PlanSaveCoordinator.enqueue`) | submits the preview's `commit` descriptor to the Planner's writer; reports saving, saved, rejected, not saved, conflict | descriptor, `expected_revision` |
+| `commit` prop (default adapter over `PlanSaveCoordinator.submitPinned`) | submits the preview's `commit` descriptor pinned to the preview's `expected_revision`; reports sending, committed, rejected, conflict, unknown, accepted-not-saved per [pinned-submission.md](pinned-submission.md) | descriptor, `expected_revision` |
 | `PlannerContextBanner` | mode and context | plan summary |
 | `PlannerCandidateTable` | rendering, client-side search, filter, sort of server results (no domain logic) | candidates, horizon, controls state |
 | `PlannerTransferPreview` | preview and commit region | preview state, coordinator snapshot |

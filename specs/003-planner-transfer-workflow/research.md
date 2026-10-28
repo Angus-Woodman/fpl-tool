@@ -104,13 +104,26 @@ A first profile showed the optimiser dominating ranking (two `optimise_lineup` c
 
 **Alternatives.** Embedded panel in the Planner (larger rewrite of a 1,455-line component and closer to Phase 004). Query-free context in module state (lost on reload).
 
-## 12. Coordinator and conflicts
+## 12. Coordinator: pinned submissions and abandon
 
-**Decision.** Commit through `getPlanSaveCoordinator(plan).enqueue([...])`. Add `abandon()` to drop the active conflicted envelope and resynchronise; the Explorer never calls `revalidate()`. Extract the Planner's departure-guard effect into a shared hook.
+**Evidence.** `PlanSaveCoordinator.drain()` builds every envelope with `expected_revision` equal to the coordinator's latest acknowledged revision at dispatch, and `enqueue()` accepts no caller revision (by design: Planner edits are field-level intents that are rebased at dispatch). A transfer previewed at revision N and enqueued after another edit was acknowledged would therefore be sent against N+1, silently applying a decision whose finances, impact and conflicts were computed for N. Separately, an Explorer that infers success from "acknowledged revision increased" could credit an unrelated edit.
 
-**Rationale.** `revalidate()` re-resolves and resends the original edit against the fresh plan, which would commit a transfer the user has not re-previewed, contradicting FR-034. The module-level coordinator map is shared across client-side navigation, so queue and revision tracking stay single-writer.
+**Decision.** Add one narrowly scoped path to the coordinator, leaving `enqueue`, the queue and every existing behaviour untouched:
 
-**Alternatives.** An Explorer-private save path (second writer). Duplicating the guard code (drift).
+- `submitPinned({ intents, expectedRevision })` sends the preview's descriptor against exactly `expectedRevision`. It never enqueues: it is refused, without sending anything, if the coordinator is not idle, if another pinned submission exists, if the acknowledged revision differs from `expectedRevision`, or if the intents no longer resolve against the acknowledged plan. It is never rebased, re-resolved or replayed.
+- The coordinator tracks it as `snapshot.pinned` with its own mutation identity and outcome (`sending`, `committed`, `rejected`, `conflict`, `unknown`, `pending_unsaved`, `plan_missing`). The Explorer reports success only when `pinned` carries its own submission identity with status `committed`.
+- `abandon()` discards only the pinned submission, only for the statuses listed in [contracts/pinned-submission.md](contracts/pinned-submission.md), refreshes the plan first when needed, and never touches the queue or any non-pinned in-flight work. Unknown outcomes are refused until reconciled or retried with the same identity.
+- `revalidate()` on a pinned submission never replays it: it behaves as `abandon()` for a known conflict and is refused otherwise.
+- Extract the Planner's departure-guard effect into a shared hook so the Explorer has identical protection.
+
+**Rationale.** It is the smallest change that makes the previewed revision binding: the check and the envelope use the same pinned value, the server's expected-revision check remains the final authority, and the pinned path shares the coordinator's single in-flight slot, retry, reconcile and departure-guard machinery rather than creating a second writer. The module-level coordinator map keeps pinned state across client-side navigation, so unresolved submissions are not lost when the user moves between pages.
+
+**Alternatives.**
+- `enqueue(intents, { expectedRevision })`: mixes a pinned transfer into the FIFO queue whose design is to rebase at dispatch; a pinned item queued behind other work would almost always become stale and the two semantics would interact in subtle ways.
+- An Explorer-private `mutatePlan` call: a second writer outside the single in-flight slot, queue ordering and departure guard.
+- Check after sending: too late; the request is already applied.
+- Reusing `revalidate()` after a conflict: replays the old transfer against a newer plan, which the product owner explicitly ruled out.
+- Abandoning unknown outcomes by discarding locally: risks a later commit the user did not know about; instead the user reconciles first or retries with the same identity.
 
 ## 13. Test data and safety
 
@@ -122,7 +135,7 @@ A first profile showed the optimiser dominating ranking (two `optimise_lineup` c
 
 **Decision.** No Alembic revision, no new dependency, no new service or container.
 
-**Rationale.** Everything needed is derivable from the canonical tables; advisory locks are built into PostgreSQL 16.
+**Rationale.** Everything needed is derivable from the canonical tables, and the Explorer read paths take no locks beyond the existing plan row lock, which is released after the planning context is resolved.
 
 ## 15. Phase 004 adaptability (Branching Scenario Planner)
 

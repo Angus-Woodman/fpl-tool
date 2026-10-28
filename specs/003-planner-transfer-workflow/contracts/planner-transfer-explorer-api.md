@@ -94,7 +94,7 @@ commit: {
   intent: { kind: "add_transfer", gameweek_number, outgoing_player_id, outgoing_ownership_id, incoming_player_id }
         | { kind: "edit_transfer", decision_id, incoming_player_id },
   guard: { expected_outgoing_market_tenths, expected_incoming_price_tenths },
-  expected_revision: int                                   # equals planning_context.revision
+  expected_revision: int                                   # equals planning_context.revision; the client MUST send exactly this revision and MUST NOT substitute a newer one
 }
 gameweeks: [ {
   gameweek, basis: "saved_plan" | "assumed_continuation", valid: bool, chip,

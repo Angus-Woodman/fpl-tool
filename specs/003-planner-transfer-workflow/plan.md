@@ -49,7 +49,7 @@ Three seams keep the design adaptable to Phase 004 without building it: (1) reso
 | V. Independent verification | Pass | Verification gates in [quickstart.md](quickstart.md); `code-review` skill before completion; equivalence test between the read-only verdict and the real mutation. |
 | VI. Browser verification | Pass | Durable Playwright journeys at 1440 and 390 widths; isolated preview per the skill. |
 | VII. Safe database testing | Pass | Integration tests use `TEST_DATABASE_URL`, `ensure_test_database_url` and isolated schemas; read endpoints never write; no development-data mutation. |
-| VIII. No silent scope expansion | Pass with noted touches | Two small, justified edits to Phase 002 code are called out explicitly (coordinator `abandon`, shared departure-guard hook). Three light seams prepare for Phase 004; none implements it, and no speculative framework is added. |
+| VIII. No silent scope expansion | Pass with noted touches | Two small, justified edits to Phase 002 code are called out explicitly (coordinator pinned submission and `abandon`, shared departure-guard hook). Three light seams prepare for Phase 004; none implements it, and no speculative framework is added. |
 | IX. Acceptance criteria first | Pass | Governed by spec FR/SC; approach, assumptions and risks stated here. |
 | X. Final review and gates | Planned | `make lint typecheck test test-integration`, web build, browser journeys, final diff review. |
 
@@ -63,11 +63,11 @@ Three seams keep the design adaptable to Phase 004 without building it: (1) reso
 |---|---|---|
 | Authoritative plan replay | `fpl_engine.planning.evaluate.evaluate_plan` | none |
 | Candidate acceptance rules | the new-diagnostic and new-or-worsened-shortfall logic inside `validate_candidate` | extract into a pure non-raising function; `validate_candidate` calls it and raises exactly as today (behaviour-identical) |
-| Candidate pool | `candidate_pool_exclusion`, `incoming_pool_exclusion` | extract the selectability branch into `incoming_selectability_exclusion` (same precedence) |
+| Candidate pool | engine `candidate_pool_exclusion` over `PricedPlayer` values built from the planning context's gameweek squad, with `pool_exclusion_message` and `selectability_unknown_pool_message` for wording (the API adapter `incoming_pool_exclusion` takes My Team records, so it is not used) | extract the selectability branch into `incoming_selectability_exclusion` (same precedence) |
 | Best-XI ranking | `rank_replacement_candidates` | none: called with the plan's gameweek-N squad and projections sliced from gameweek N; its budget and club-limit legality output is discarded because the plan assessment decides legality |
 | Selling price | `fpl_engine.planning.prices.selling_price_tenths`, `DecisionSale` | none |
 | Scoring | `fpl_engine.rules.score_gameweek`, `chip_states` | none |
-| Persisting a transfer | `POST /plans/{id}/mutations`, `add_transfer`, `edit_transfer`, receipts, `PlanSaveCoordinator` | optional price-guard fields on the two intents; selectability check in `_capture`; coordinator `abandon()` |
+| Persisting a transfer | `POST /plans/{id}/mutations`, `add_transfer`, `edit_transfer`, receipts, `PlanSaveCoordinator` | optional price-guard fields on the two intents; selectability check in `_capture`; coordinator `submitPinned` and `abandon()` ([contracts/pinned-submission.md](contracts/pinned-submission.md)) |
 | Projection access | `ProjectionRunRepository`, `MyTeamProjectionRepository.list_player_fixture_projections_for_run` | optional `min_gameweek` and `max_gameweek` filter |
 | Explorer UI parts | `HorizonSelector`, `ProjectionRunBadge`, `OutgoingPlayerSelector`, `describeLegalityReasons`, `playingStatusWarning`, `SquadPlayerCard` (already has `transferHref`) | Planner-mode components under `components/transfers/planner/` |
 
@@ -93,7 +93,7 @@ sequenceDiagram
   A-->>X: planning_context ref, candidates, plan impact, conflicts, run
   X->>A: GET .../preview?player_in_id&projection_run_id
   A-->>X: planning_context ref, per-gameweek preview, commit descriptor, price guard
-  X->>X: coordinator.enqueue(add or edit transfer + guard)
+  X->>X: coordinator.submitPinned(descriptor, previewed revision)
   X->>A: POST /plans/{id}/mutations (existing)
   A->>E: apply_intents (authoritative), receipts, save_canonical
   A-->>X: committed revision
@@ -116,7 +116,7 @@ Phase 004 turns the linear plan into a scenario tree: several options per gamewe
 
 1. **Context resolution is separate from analysis.** A small function `resolve_planning_context(plan_id, gameweek)` (in `services/plan_context.py`) is the only Explorer code that reads plan storage. It returns a plain frozen `PlanningContext`: a `ContextRef` (`plan_id`, `gameweek`, `revision`), the engine's linear `Plan` value for that context, player rule metadata for the plan's players, and the baseline `PlanEvaluation`. The analysis service takes a `PlanningContext`, never a plan id or repository. Phase 004's resolver would flatten the selected root-to-option path into the same linear `Plan` value; the analysis, ranking and impact code would not change. No interface, registry or plugin mechanism is introduced: it is one function and one dataclass.
 2. **Analysis cannot write.** `PlanTransferAnalysisService` is constructed only with read-only ports (player read, projection runs and rows, team difficulty). It has no plan repository, no session and no mutation service. Hypothetical evaluation uses `fpl_engine.planning.hypothetical` and `impact`, which take `Plan` and metadata values and return values. A service test builds a `PlanningContext` in memory and runs the whole analysis with no database (SC-013).
-3. **Confirmation is a descriptor, not a write.** The preview returns `commit.intent`, the compare-only `guard`, and the `planning_context` ref. The Explorer UI receives a single `commit` function prop (default implementation wraps `getPlanSaveCoordinator(plan).enqueue`). Phase 004 swaps that adapter for one that targets a draft option; the Explorer's state machine is unchanged.
+3. **Confirmation is a descriptor, not a write.** The preview returns `commit.intent`, the compare-only `guard`, and the `planning_context` ref. The Explorer UI receives a single `commit` function prop (default implementation wraps `getPlanSaveCoordinator(plan).submitPinned`, which pins the submission to the previewed revision). Phase 004 swaps that adapter for one that targets a draft option; the Explorer's state machine is unchanged.
 
 What is deliberately **not** done: no `Scenario`, `Option` or `Branch` types, no option identifiers in contracts, no abstraction over "plan" versus "option", no generalised repository interface, no feature flags. Engine functions already depend only on the canonical `Plan` value and `PlayerRuleData`, never on tables, so nothing needs to be moved.
 
@@ -127,11 +127,11 @@ What is deliberately **not** done: no `Scenario`, `Option` or `Branch` types, no
 | `services/plan_context.py` resolver | resolves an option and its path instead of a plan gameweek; flattens the path into a linear `Plan` | replace |
 | `ContextRef` in responses (`plan_id`, `gameweek`, `revision`) | gains option identity and a version token for the option or draft | additive field change |
 | Explorer routes `/plans/{id}/gameweeks/{gw}/transfers/...` and UI parameters `plan`, `gw` | address an option, not a gameweek of a linear plan | route and URL change |
-| Commit adapter (default: `PlanSaveCoordinator.enqueue`) and `PlanSaveCoordinator` | apply to a draft option or create a draft alternative; saved options are immutable | new adapter; coordinator semantics for drafts |
+| Commit adapter (default: `PlanSaveCoordinator.submitPinned`) and `PlanSaveCoordinator` | apply to a draft option or create a draft alternative; saved options are immutable | new adapter; coordinator semantics for drafts |
 | `commit.intent` kinds (`add_transfer`, `edit_transfer`) and add-versus-edit rule | the target is a draft option's decision set; "replace a transfer decided in this gameweek" becomes "within this option" | rule re-expressed |
 | Meaning of "later planned decisions", "plan end" and "assumed continuation" in `impact.py` and the preview | later decisions are those on the selected path's descendants; the end is the end of the selected path | definition change, code localized to the resolver and the impact horizon |
 | Planner return navigation (`?gw`, `highlight`) and gameweek selection | replaced by Previous GW and Next GW navigation along a selected option path, with exact option restore | UI change |
-| Departure guard hook, `abandon()` | reused; draft autosave state replaces plan-level save state | reuse |
+| Departure guard hook, pinned submission, `abandon()` | reused; draft autosave state replaces plan-level save state, and the pin would become an option or draft version | reuse, re-keyed |
 | Reference plans in tests | become path fixtures | fixture change |
 
 Reused as is: candidate pool and selectability rules, price guard, `rank_replacement_candidates`, `evaluate_plan` and the acceptance verdict, `hypothetical.py`, scoring and projection access, My Team mode.
@@ -168,13 +168,13 @@ Correctness guards for any optimisation: the verdict-equals-`apply_intents` test
 
 - **Routing.** `/transfers` renders either the existing `TransferExplorer` (no `plan` parameter, untouched) or a new `PlannerTransferExplorer` (when `plan` is present), chosen in a small wrapper used by `app/transfers/page.tsx`. Parameters: `plan`, `gw`, optional `out`, `h` (1, 3 or 5), `run`. See [contracts/ui-navigation.md](contracts/ui-navigation.md).
 - **Planner to Explorer.** Squad cards pass `transferHref` (the existing "Explore transfers" affordance); the gameweek header gets "Explore transfers for this gameweek". Immediately before navigating, the Planner records its gameweek in its own history entry (`?gw=`, `replaceState`) so browser Back restores it.
-- **Commit.** `PlannerTransferExplorer` takes a `commit` function prop. The default implementation obtains the plan's coordinator with `getPlanSaveCoordinator(plan)` and `enqueue`s the descriptor from the preview. States come from the coordinator snapshot: saving; saved (then navigate to `/plans/{id}?gw&highlight` with a one-shot notice); rejected (`prices_changed` triggers an automatic fresh preview, never an automatic resubmit); not saved (existing retry and check-status); conflict (new `abandon()`, then reload and re-preview; `revalidate()` is deliberately not offered because it would replay the old preview).
+- **Commit.** `PlannerTransferExplorer` takes a `commit` function prop. The default implementation calls the plan's coordinator with `submitPinned`, passing the preview's descriptor and the exact revision it was computed for ([contracts/pinned-submission.md](contracts/pinned-submission.md)). Confirm is enabled only when no pinned submission exists, the coordinator is idle and the acknowledged revision equals the preview's revision; otherwise the Explorer says the plan changed and requires a fresh preview. Success is reported only when the coordinator's `pinned` record carries this submission's identity with status `committed`, never from a revision change. States: sending; committed (then navigate to `/plans/{id}?gw&highlight` with a one-shot notice); rejected (`prices_changed` triggers an automatic fresh preview, never an automatic resubmit); unknown or accepted-but-not-saved (existing check-status and same-identity retry); conflict (`abandon()`, then reload and re-preview). `abandon()` and `revalidate()` never replay a pinned submission and never discard unrelated queued edits or unknown outcomes.
 - **Departure protection.** The existing effect in `PlanBoard` is extracted unchanged into a shared hook and used by both screens (FR-041).
 - **Highlight and scroll.** `SquadPlayerCard` gains an optional highlighted state; `PlanBoard` honours `gw` and `highlight` on arrival only.
 
 ### Contracts
 
-See [contracts/planner-transfer-explorer-api.md](contracts/planner-transfer-explorer-api.md), [contracts/mutation-guard-and-selectability.md](contracts/mutation-guard-and-selectability.md) and [contracts/ui-navigation.md](contracts/ui-navigation.md).
+See [contracts/planner-transfer-explorer-api.md](contracts/planner-transfer-explorer-api.md), [contracts/mutation-guard-and-selectability.md](contracts/mutation-guard-and-selectability.md), [contracts/pinned-submission.md](contracts/pinned-submission.md) and [contracts/ui-navigation.md](contracts/ui-navigation.md).
 
 ## Testing Strategy (owning layer)
 
@@ -189,7 +189,8 @@ See [contracts/planner-transfer-explorer-api.md](contracts/planner-transfer-expl
 | Guard and selectability in mutations: `prices_changed`, not selectable, unknown, saved decisions not re-checked, digest includes guard | `apps/api/tests/plans/test_plan_services.py`, router tests | service and router |
 | Explorer read paths write nothing (row counts, revision, `updated_at`, receipts, My Team rows unchanged); explorer-originated confirm followed by GET | `apps/api/tests/repositories/test_plan_transfer_explorer_integration.py` | guarded PostgreSQL (`TEST_DATABASE_URL`, isolated schema) |
 | Performance gate | guarded PostgreSQL, synthetic full-season data, opt-in | timing report |
-| Explorer wrapper, Planner-mode states, filters and sorting, preview rendering (saved versus assumed), commit state machine driven through the `commit` prop with a fake adapter and with the real coordinator (deferred promises), highlight, coordinator `abandon`, shared guard hook | `apps/web/tests/transfers/`, `apps/web/tests/plans/` | component and unit |
+| Explorer wrapper, Planner-mode states, filters and sorting, preview rendering (saved versus assumed), commit state machine driven through the `commit` prop with a fake adapter and with the real coordinator (deferred promises), stale-preview refusal, highlight, shared guard hook |
+| Coordinator pinned submission: envelope pinned to the previewed revision; refusal when busy, stale or duplicate; success only from own acknowledgement; rejected, known conflict, unknown and accepted-but-not-saved outcomes; `abandon()` status table; overlapping and queued Planner edits never discarded; `revalidate()` never replays; navigation persistence; existing coordinator tests unchanged | `apps/web/tests/plans/plan-save-coordinator-pinned.test.ts` | unit with deferred promises | `apps/web/tests/transfers/`, `apps/web/tests/plans/` | component and unit |
 | Journeys: explore, preview, confirm, return; reload inside Explorer; blocked candidate; prices changed; save failure and conflict | `apps/web/tests/e2e/planner-transfer-workflow.spec.ts` | Playwright (mocked and guarded real-API), 1440 and 390 widths |
 | Independent review | `.github/skills/code-review` | before completion |
 
@@ -208,6 +209,7 @@ specs/003-planner-transfer-workflow/
 ├── contracts/
 │   ├── planner-transfer-explorer-api.md
 │   ├── mutation-guard-and-selectability.md
+│   ├── pinned-submission.md
 │   └── ui-navigation.md
 ├── checklists/requirements.md
 └── tasks.md                 # NOT created here (/speckit-tasks)
@@ -225,7 +227,7 @@ packages/fpl_engine/src/fpl_engine/
 │   ├── hypothetical.py      # + candidate assessment on in-memory plan copies
 │   └── impact.py            # + plan impact, continuation, hit deltas
 └── transfers/candidate_pool.py   # extract incoming_selectability_exclusion
-packages/fpl_engine/tests/   # + test_planning_hypothetical.py, test_planning_impact.py
+packages/fpl_engine/tests/   # + test_planning_hypothetical.py, test_planning_impact.py; additions to test_planning.py and test_candidate_pool.py
 
 apps/api/src/api/
 ├── routers/plan_transfers.py      # + GET list and preview; composes resolver then analysis; registered in main.py
@@ -236,16 +238,20 @@ apps/api/src/api/
 ├── services/plans.py              # selectability and price guard in _capture
 ├── repositories/my_team_projection_repository.py  # optional gameweek bounds
 └── repositories/squad_player_lookup_repository.py # selectability flags (defaulted)
-apps/api/tests/              # + plans/ and repositories/ cases listed above
+apps/api/tests/              # + plans/ (explorer_builders.py, perf_dataset.py, test_plan_context.py, test_plan_transfer_analysis_service.py, test_plan_transfers_router.py, test_plan_transfer_explorer_performance.py) and repositories/ (test_plan_transfer_explorer_integration.py, projection and lookup repository integration tests)
 
 apps/web/src/
-├── app/transfers/page.tsx                    # chooses mode wrapper
-├── components/transfers/planner/             # + explorer (commit prop), banner, table, preview
+├── app/transfers/page.tsx                    # renders the mode wrapper
+├── components/transfers/transfer-explorer-entry.tsx  # + chooses My Team or Planner mode
+├── components/transfers/outgoing-player-selector.tsx # prop type generalised, no behaviour change
+├── components/transfers/planner/             # + planner-transfer-explorer (commit prop), planner-context-banner, planner-candidate-table, planner-transfer-preview
 ├── components/plans/plan-board.tsx           # explore links, gw and highlight on arrival
 ├── components/team/squad-player-card.tsx     # optional highlight
-├── lib/api.ts, plan-save-coordinator.ts      # client functions, guard fields, abandon()
+├── lib/api.ts, plan-save-coordinator.ts      # client functions, guard fields, submitPinned, pinned snapshot, abandon()
+├── lib/planner-explorer-url.ts               # + parse and build Explorer addresses
+├── lib/planner-commit.ts                     # + default commit adapter over submitPinned
 └── lib/use-departure-guard.ts                # + extracted hook
-apps/web/tests/              # + transfers/, plans/ and e2e/ cases listed above
+apps/web/tests/              # + fixtures/planner-explorer.ts; transfers/ (planner-explorer-api, planner-explorer-url, planner-transfer-explorer, transfer-explorer-entry, planner-transfer-preview, planner-candidate-table); plans/ (plan-save-coordinator-pinned, use-departure-guard, plan-board additions); e2e/planner-transfer-workflow.spec.ts
 ```
 
 **Structure Decision**: extend the three existing packages in place; no new package, service, process or database object. Domain logic in `fpl_engine`; orchestration and persistence in `apps/api`; presentation in `apps/web`.
@@ -260,7 +266,8 @@ apps/web/tests/              # + transfers/, plans/ and e2e/ cases listed above
 | Verdict drifts from `apply_intents` over time | Medium / High | Single shared extraction plus equivalence test over all pool candidates |
 | Extractions from `validate_candidate` and pool rules alter existing behaviour | Low / High | Behaviour-identical extraction; existing suites run unchanged; reviewed |
 | Browser Back loses the Planner gameweek | Medium / Low | targeted `replaceState` before navigating, explicit `gw` on return, browser verification |
-| Coordinator `revalidate` would replay a stale preview | Medium / High | Explorer never calls it; add `abandon()` with tests |
+| A previewed transfer is submitted against a newer revision, or success is inferred from an unrelated change | Medium / High | `submitPinned` pins the envelope to the previewed revision and refuses otherwise; success only from the submission's own acknowledgement; `revalidate()` and `abandon()` never replay it; dedicated coordinator tests |
+| `abandon()` discards unrelated queued work or an unknown outcome | Low / High | contract with an explicit status table, discards only the pinned envelope, refuses unknown outcomes until reconciled; overlapping-edit, queue and unknown-outcome tests |
 | Selectability check makes the inline picker stricter | Medium / Low | Approved (Q-3); existing rejection panel shows the reason; saved decisions never re-checked |
 | Free-Hit-final continuation roles illegal for the restored squad | Low / Low | reported unavailable, never repaired |
 | Phase 004 needs more rework than expected | Medium / Medium | three small seams (resolver, read-only analysis, commit descriptor); adaptation list above feeds Phase 004's specification; no speculative abstractions |
@@ -271,7 +278,7 @@ apps/web/tests/              # + transfers/, plans/ and e2e/ cases listed above
 ## Decisions Requiring Approval
 
 1. **Extend the existing mutation contract** (additive, optional): compare-only price guard on `add_transfer` and `edit_transfer`, and a `prices_changed` rejection (HTTP 422 with a diagnostic code). Alternative: a new Explorer-only commit endpoint, rejected as a second writer.
-2. **Touch two Phase 002 areas**: add `PlanSaveCoordinator.abandon()` and extract the departure-guard effect into a shared hook.
+2. **Touch two Phase 002 areas**: extend `PlanSaveCoordinator` with a separately tracked pinned submission (`submitPinned`, the `pinned` snapshot field, `abandon()`, and a guard so `revalidate()` never replays it), leaving `enqueue`, the queue and all Planner behaviour unchanged; and extract the departure-guard effect into a shared hook. Alternative: `enqueue` with a caller revision (rejected, see research section 12).
 3. **Selectability scope detail**: enforce when a transfer is added or its incoming player changes; an `edit_transfer` that leaves the incoming player unchanged is not re-checked.
 4. **Conflict display rule**: a structural conflict shows values through the previous gameweek; a financial conflict shows through the conflicting gameweek and nothing later; a Free-Hit-final continuation with illegal roles is reported unavailable.
 5. **Performance evidence**: gate on a synthetic full-season dataset in the guarded test database; optionally also a read-only timing run against development data (your call).
@@ -290,9 +297,11 @@ No constitution violations. No new abstractions beyond three pure engine modules
 
 ## Delivery slices (input for `/speckit-tasks`)
 
+`tasks.md` is organised by user story as the Spec Kit workflow requires (Setup, Foundational, US1 to US4, Polish). The slices below map onto it: slice 1 is Foundational (engine part) and US1; slice 2 and the coordinator work are US2; slice 3 is Foundational (resolver) plus US1 and US2 API work; slice 4 is US1 to US3 UI; slice 5 is US4; slice 6 is Polish.
+
 1. **Engine analysis**: non-raising verdict extraction, `hypothetical.py`, `impact.py`, selectability rule extraction; domain tests including verdict-equals-`apply_intents`.
 2. **Mutation guard and selectability**: optional guard fields, `prices_changed`, `player_not_selectable` / `selectability_unknown`; service and router tests.
 3. **Context resolver, analysis service and API**: `plan_context.py`, `plan_transfer_analysis.py`, router, schemas; no-database analysis tests; guarded no-write integration test; performance gate.
-4. **Explorer UI (Planner mode)**: wrapper, explorer with `commit` prop, banner, preview, table; coordinator `abandon()`, shared departure-guard hook; Planner explore links, `gw` and highlight on arrival; component tests and Playwright journeys.
+4. **Explorer UI (Planner mode)**: wrapper, explorer with `commit` prop, banner, preview, table; coordinator `submitPinned`, `pinned` snapshot and `abandon()` ([contracts/pinned-submission.md](contracts/pinned-submission.md)), shared departure-guard hook; Planner explore links, `gw` and highlight on arrival; component tests and Playwright journeys.
 5. **Search, filter, sort and fixtures** for candidates.
 6. **Hardening**: lint, typecheck, full tests, guarded integration, browser verification at 1440 and 390, independent review, final diff review.

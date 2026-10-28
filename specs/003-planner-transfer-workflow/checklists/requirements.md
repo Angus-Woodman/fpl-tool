@@ -32,6 +32,7 @@
 ## Notes
 
 - Revised 2026-10-28 after the Phase 003 / Phase 004 split. Duplicate Plan was removed (its Q-4 and Q-5 are withdrawn; design survives only in Git history, commit `a3c5144`). Requirements FR-001 to FR-046 are unchanged; FR-047 and FR-048 (forward compatibility) and SC-013 are new; success criteria SC-010 to SC-012 are the former SC-013 to SC-015. All items below were re-evaluated against the revised spec and still pass.
+- Review findings applied 2026-10-28: FR-049 to FR-052 and SC-014 (revision pinning, own-acknowledgement success, `abandon()` limits, preserved coordinator guarantees); US2-18 to US2-21. Items re-evaluated and still pass.
 - No `[NEEDS CLARIFICATION]` markers are used, following the Phase 002 precedent. All active clarifications (Q-1 to Q-3, Q-6 to Q-8) are resolved; no open clarification remains.
 - "No implementation details" is satisfied with deliberate, request-mandated references only: the single Planner mutation operation and its revision and autosave guarantees (FR-032 to FR-035, FR-048), the existing `component_v3` model (FR-024), exact money handling (FR-013), the page address carrying context (FR-001), and the separation of analysis from persistence (FR-047), which is a stated architectural constraint for Phase 004 adaptability. Mechanisms live in [../plan.md](../plan.md), not in the spec.
 - "Written for non-technical stakeholders" is satisfied to the same degree as specs 001 and 002: the audience is the single product owner, who is familiar with the Planner's R/PC/Q registers, which this spec reuses by reference.

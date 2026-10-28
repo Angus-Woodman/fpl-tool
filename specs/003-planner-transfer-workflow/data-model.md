@@ -22,6 +22,9 @@ The Explorer read paths write nothing. Confirmation uses the existing mutation e
 
 `PlanningContext` (frozen, in memory, produced by `resolve_planning_context` and consumed by analysis): `ref` (`ContextRef`), `plan` (the engine's linear `Plan` for this context), `metadata` (player rule data for the plan's players), `baseline` (`PlanEvaluation`), and the selected gameweek's evaluated squad and accounting taken from the baseline. It holds no repository, session or connection. Phase 004 is expected to produce the same value by flattening a selected option path; no option, branch or scenario types exist in Phase 003.
 
+### `PinnedSubmission` (client-side, held by the plan's save coordinator)
+`submissionId`, `mutationId`, `expectedRevision` (the preview's revision), `status` (`sending` | `committed` | `rejected` | `conflict` | `unknown` | `pending_unsaved` | `plan_missing`), `committedRevision` (committed only), `diagnostics` (rejected only), `message`. At most one exists per plan. It is not persisted and not part of any server contract; its mutation is an ordinary Planner mutation with `expected_revision` equal to `expectedRevision`.
+
 ### `CandidateQuote`
 `player_id`, `outgoing_market_tenths`, `incoming_price_tenths`. Built from latest stored prices (`exact_tenths`), identical to what `PlanMutationService._capture` will capture at commit.
 
@@ -67,7 +70,9 @@ States: `loading plan` → `choose outgoing` (no `out`) or `loading candidates` 
 
 Transitions of note:
 - `rejected` with code `prices_changed` → automatic fresh preview, back to `previewing`; never an automatic resubmit.
-- `conflict` → `abandon()` on the coordinator, reload plan, back to `ready` with a visible notice; user must preview again.
+- Confirm is only reachable when the coordinator holds no pinned submission, is idle, and the preview's revision equals the acknowledged revision; any acknowledged revision change while the Explorer is open marks the preview stale (Confirm disabled, "Plan changed, preview again").
+- `confirming` is entered only through `submitPinned`; success is entered only when the coordinator's `pinned` record carries this submission's identity with status `committed`.
+- `conflict` (known no-write outcome) → `abandon()` refreshes the plan, clears only the pinned submission, back to `ready` with a visible notice; user must preview again. `unknown` and `pending_unsaved` follow the abandon table in [contracts/pinned-submission.md](contracts/pinned-submission.md): unknown is reconciled or retried with the same identity before it can be abandoned.
 - Any change of outgoing player or horizon cancels in-flight requests and ignores late responses.
 - Leaving while `confirming` or `not saved` triggers the departure guard.
 

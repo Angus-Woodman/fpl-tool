@@ -2,6 +2,10 @@
 
 Additive changes to the existing `POST /plans/{plan_id}/mutations` contract from Planner Foundations ([planner-api.md](../../002-planner-foundations/contracts/planner-api.md)). Envelope, revision, retry identity, receipts, outcomes and the single-writer rule are unchanged.
 
+## Revision pinning for Explorer confirmations
+
+The Explorer submits the preview's `commit.intent` and `guard` in an envelope whose `expected_revision` is exactly the preview's revision, via the coordinator's pinned submission path ([pinned-submission.md](pinned-submission.md)). The server contract is unchanged: a mismatching revision is the existing 409 `revision_conflict` (nothing accepted, nothing written), which the client treats as a known conflict requiring a fresh preview, never as something to rebase or replay.
+
 ## Intent additions
 
 `add_transfer` and `edit_transfer` accept two optional fields. Both or neither; each a positive integer tenths (<= existing `MAX_PRICE_TENTHS`); unknown combinations are schema 422.

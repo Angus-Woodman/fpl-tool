@@ -79,9 +79,32 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | W2 | Planner-mode states | loading, no outgoing player, empty pool, each unavailable code, invalid link, plan missing, plan not ready |
 | W3 | Candidate table | search, filters, sorts, stable tie-break, active-filter chips, empty state; ranking order equals server order by default; no domain recalculation |
 | W4 | Preview | saved-plan and assumed-continuation blocks separate and labelled; totals never summed; blocked candidate shows values only through the valid range and the conflicting gameweek and decision; Confirm disabled with the reason |
-| W5 | Commit state machine (deferred promises), driven once through the `commit` prop with a fake adapter and once with the real coordinator | saving then saved navigates only after acknowledged revision; double click sends once; `prices_changed` refreshes preview without resubmitting; not saved offers retry and check status; conflict calls `abandon()` and requires re-preview |
-| W6 | Coordinator | `abandon()` semantics; existing coordinator tests unchanged |
+| W5 | Commit state machine (deferred promises), driven once through the `commit` prop with a fake adapter and once with the real coordinator; preview marked stale when the acknowledged revision changes; success only from the submission's own acknowledgement | saving then saved navigates only after acknowledged revision; double click sends once; `prices_changed` refreshes preview without resubmitting; not saved offers retry and check status; conflict calls `abandon()` and requires re-preview |
+| W6 | Coordinator pinned submission ([contract](contracts/pinned-submission.md)) | see the dedicated matrix below; existing coordinator tests unchanged |
 | W7 | Shared departure guard | behaviour identical to before for the Planner; same warning in the Explorer |
+
+### Coordinator pinned submission matrix (Vitest, deferred promises; `apps/web/tests/plans/plan-save-coordinator-pinned.test.ts`)
+
+| ID | Scenario | Pass when | Spec |
+|---|---|---|---|
+| C1 | `submitPinned` at the acknowledged revision | the envelope's `expected_revision` equals the pinned value; one POST; status `sending` | FR-049 |
+| C2 | Acknowledged revision advanced after the preview (own earlier edit, `synchronize`, or a committed Planner edit) | refused `stale_preview`; no POST; nothing queued | FR-049, US2-18 |
+| C3 | Coordinator busy (active envelope or queued edits) | refused `busy`; no POST; the queue and active envelope are unchanged | FR-049, FR-052 |
+| C4 | Second pinned submission while one exists | refused `pinned_exists` | FR-049 |
+| C5 | Intents no longer resolve against the acknowledged plan | refused `stale_preview`; no POST; no retargeting | FR-049 |
+| C6 | Unrelated revision change or other mutation acknowledgement while pinned is `sending` | pinned does not become `committed`; only a response with the pinned mutation identity does | FR-050, US2-19 |
+| C7 | `committed` and `already_committed` for the pinned identity | `committed` with the committed revision; acknowledged plan advances | FR-050 |
+| C8 | 422 (including `prices_changed`) | `rejected` with diagnostics; no replay; queued Planner edits resume against the unchanged plan | FR-033, FR-052 |
+| C9 | 409 `revision_conflict` / `stale_reprepare_required`, 410 | `conflict`; no second POST; `retry()` refused; `revalidate()` abandons (never replays) | FR-049, FR-051, FR-052 |
+| C10 | Network failure, timeout, 503 `outcome_unknown` / `not_accepted`, 409 `mutation_id_reused`, malformed response | `unknown`; `abandon()` refused `reconcile_first`; `retry()` resends the same identity; `reconcile()` resolves to `committed`, `pending_unsaved` or stays `unknown` on 404 | FR-051 |
+| C11 | 503 `accepted_not_saved` | `pending_unsaved`; same-identity `retry()` or `abandon()` allowed; no second identity | FR-051 |
+| C12 | `abandon()` while `sending` | refused `outcome_pending`; nothing discarded | FR-051 |
+| C13 | `abandon()` on `conflict` or `pending_unsaved` with the plan refresh succeeding | plan refreshed, only the pinned submission cleared, status recomputed | FR-051, US2-20 |
+| C14 | `abandon()` when the plan refresh fails or the plan is missing | nothing discarded and message shown; missing plan becomes `plan_missing` | FR-051 |
+| C15 | Planner edits queued behind or before a pinned conflict, then `abandon()` | no queued edit discarded; they resume against the refreshed plan with the existing rebasing; none replayed with stale values | FR-051, FR-052 |
+| C16 | Planner edit enqueued while pinned is `sending` | queued behind it; dispatched after the pinned outcome against the then-acknowledged revision | FR-052 |
+| C17 | Re-obtaining the coordinator after navigation (`getPlanSaveCoordinator`) | pinned state retained; `hasUnsavedWork()` true for `sending`, `unknown`, `pending_unsaved`, `conflict`, false for `committed`, `rejected` and after `abandon()` | FR-041, FR-051, US2-21 |
+| C18 | Existing coordinator suites (`plan-save-coordinator.test.ts`) | all pass unmodified | FR-052, SC-014 |
 
 ### Browser (Playwright; isolated preview; 1440x900 and 390x844)
 
@@ -91,7 +114,7 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | B2 | Reload inside the Explorer; open the address in a new tab; browser Back and Forward | same mode, plan, gameweek and player; no fall-through to My Team |
 | B3 | Blocked candidate (later planned sale of the outgoing player) | visible, previewable, conflicting gameweek named, Confirm disabled, no repair offered, no later decision changed |
 | B4 | Prices change between preview and confirm (guarded harness updates a stored price) | confirmation rejected, fresh preview shown, nothing saved |
-| B5 | Save failure and conflict injected through the existing guarded fault harness | not saved with retry; conflict requires a fresh preview |
+| B5 | Save failure and conflict injected through the existing guarded fault harness; a competing Planner edit committed between preview and confirm | not saved with same-identity retry; conflict or stale preview requires a fresh preview; the transfer is never submitted against the newer revision; navigating away and back shows the unresolved submission |
 | B6 | Existing My Team Explorer journey | unchanged |
 
 Report exactly what was observed, which states were not exercised, the preview port and cleanup result.
@@ -110,6 +133,7 @@ Files changed; important decisions and trade-offs; tests and checks run (with co
 | FR-020 to FR-027 projections and ranking | US1-6 to 9, 14 to 16 | explorer API `projection`, `plan_impact_by_horizon` | D4, D5, A2, W4 | SC-005, SC-006, SC-012 |
 | FR-028 to FR-031 preview | US2-1 to 6, 14, 15 | explorer API preview | D3, D6, A3, W4, B3 | SC-004, SC-012 |
 | FR-032 to FR-038 commit | US2-7 to 13, 16 | mutation guard; preview `commit` | A4, A5, A6, W5, B1, B4, B5 | SC-003, SC-004, SC-008 |
+| FR-049 to FR-052 commit integrity (revision pinning, own acknowledgement, abandon, preserved guarantees) | US2-18 to 21 | [pinned-submission](contracts/pinned-submission.md); mutation guard (revision pinning) | C1 to C18, W5, W6, B5 | SC-014 |
 | FR-039 to FR-042 navigation and states | US3-1 to 7 | ui-navigation | W5, W6, W7, B1, B2, B5 | SC-007, SC-008 |
 | FR-043 to FR-046 comparison | US4-1 to 6 | explorer API candidate fields; ui-navigation screen contract | W3 | SC-009 |
 | FR-047, FR-048 forward compatibility | US2-17 | `planning_context` in explorer API; `commit` prop in ui-navigation | A7, A8 | SC-013 |
