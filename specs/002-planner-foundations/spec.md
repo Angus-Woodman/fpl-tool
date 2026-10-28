@@ -377,7 +377,7 @@ Q-1 to Q-7 are resolved product decisions, retained under this original heading 
 
 ## Assumptions
 
-- Plans continue to be created from the saved My Team squad and bank; the starting squad and bank are not otherwise edited in the Planner by this feature, but the starting squad's purchase prices are part of the starting state (FR-004, Q-6).
+- Plans continue to be created from the saved My Team squad and bank; the starting squad and bank are not otherwise edited in the Planner by this feature, but the starting squad's purchase prices are part of the starting state (FR-004, Q-6). Capturing the My Team bank (and a legacy plan's initial bank) is the only boundary that tolerates float representation noise; it normalises to exact whole tenths and rejects every other non-tenth value with a readable `invalid_money` error, while all Planner replay and mutation money stays strictly integer tenths.
 - Chip rules, free-transfer rules, hit size, chip effects, Free Hit reversion and selling-price rules are confirmed as R-01 to R-12. U-01 to U-04 no longer represent unresolved assumptions.
 - The single-user, single-manager context remains: one manager's team owns the plans. Concurrent editing from two places is not specially protected; the latest accepted save wins, including provenance corrections with an explicit financial-resolution state.
 - The Planner keeps whole-squad-per-gameweek planning, with transfers derived by comparing relevant squad states. Each saved planned transfer also retains its transaction-price assumptions and acquisition cost basis under Q-4; no full transaction ledger or same-gameweek round trips are required.

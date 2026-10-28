@@ -6,6 +6,7 @@ from typing import Protocol
 
 from fpl_engine.domain import PlayerPosition
 from fpl_engine.optimisation import LineupSelection
+from fpl_engine.rules import RuleViolationError
 from fpl_engine.transfers import TransferPlayer, evaluate_single_transfer
 
 from api.repositories.current_squad_repository import CurrentSquadRecord
@@ -198,12 +199,17 @@ class GetTransferPreviewService:
             projected_points=points_by_player[incoming_profile.player_id],
         )
 
-        evaluation = evaluate_single_transfer(
-            squad=squad_transfer_players,
-            player_out_id=player_out_id,
-            player_in=incoming_transfer_player,
-            bank=current_squad.bank,
-        )
+        try:
+            evaluation = evaluate_single_transfer(
+                squad=squad_transfer_players,
+                player_out_id=player_out_id,
+                player_in=incoming_transfer_player,
+                bank=current_squad.bank,
+            )
+        except RuleViolationError as error:
+            if error.code != "invalid_money":
+                raise
+            return TransferPreviewFailure(code=error.code, message=error.message)
 
         lineup_before = _summarize(evaluation.optimal_xi_before)
         lineup_after = _summarize(evaluation.optimal_xi_after)

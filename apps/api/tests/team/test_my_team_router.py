@@ -365,6 +365,27 @@ def test_put_my_team_rejects_an_illegal_starting_formation_with_400() -> None:
         app.dependency_overrides.clear()
 
 
+def test_put_my_team_rejects_a_non_tenth_bank_with_a_readable_400() -> None:
+    repository = _FakeFormationRepository()
+    service = UpsertCurrentSquadService(repository, _FakeFormationLookup())
+    session = _FakeSession()
+    app.dependency_overrides[get_upsert_current_squad_service] = lambda: service
+    app.dependency_overrides[get_db_session] = lambda: session
+    try:
+        payload = _build_payload()
+        payload["bank"] = 0.55
+
+        response = TestClient(app).put("/my-team", json=payload)
+
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith("Bank must be a finite whole number of tenths")
+        assert repository.saved is False
+        assert session.committed is False
+        assert session.rolled_back is True
+    finally:
+        app.dependency_overrides.clear()
+
+
 class _FakeFormationRepository:
     def __init__(self) -> None:
         self.saved = False

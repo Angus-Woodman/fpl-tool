@@ -4,7 +4,7 @@ Revised 2026-10-14. [spec.md](../spec.md) is fixed product intent; [data-model.m
 
 ## Read, Create And Retired Writers
 
-Retain list/detail GET, POST creation and DELETE. Creation captures saved My Team membership/bank into an independent boundary, defaults starting FT to 1 after GW1 (N/A at GW1), and initializes unknown purchase prices as nonblocking assumptions. It does not copy My Team's FT default. Creation/deletion retain their ordinary resource semantics; the mutation retry contract below covers existing-plan autosave.
+Retain list/detail GET, POST creation and DELETE. Creation captures saved My Team membership/bank into an independent boundary (the bank as exact integer tenths: float representation noise from My Team is repaired, any other non-tenth, non-finite or extreme value is rejected with 422 `invalid_money` and a readable message; player prices stay strictly whole-tenth), defaults starting FT to 1 after GW1 (N/A at GW1), and initializes unknown purchase prices as nonblocking assumptions. It does not copy My Team's FT default. Creation/deletion retain their ordinary resource semantics; the mutation retry contract below covers existing-plan autosave.
 
 Retire `PATCH /plans/{plan_id}` and `PUT /plans/{plan_id}/gameweeks/{gw}` from mutation: return **410 Gone**, structured `planner_writer_retired`, with the new mutation route. No adapter, implicit identity, snapshot-diff fallback or weaker writer remains. Update all Planner name/horizon/GW callers and tests in the same rollout. An old browser must reload/update; old writes cannot partially mutate canonical or quarantined legacy data. Public per-mutation commit endpoints are not introduced.
 

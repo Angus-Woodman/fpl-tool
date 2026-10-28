@@ -129,3 +129,23 @@ def test_applies_and_returns_the_updated_my_team_state() -> None:
         assert service.requested == [(9, 202)]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_returns_422_with_the_invalid_money_code_and_rolls_back() -> None:
+    failure = ApplyTransferFailure(
+        code="invalid_money", message="Bank must be a finite whole number of tenths"
+    )
+    session = _FakeDbSession()
+    app.dependency_overrides[get_apply_transfer_service] = lambda: _FakeApplyTransferService(
+        failure
+    )
+    app.dependency_overrides[get_db_session] = lambda: session
+    try:
+        response = TestClient(app).post("/my-team/transfers/9/apply", json={"player_in_id": 202})
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_money"
+        assert session.commits == 0
+        assert session.rollbacks == 1
+    finally:
+        app.dependency_overrides.clear()

@@ -5,7 +5,6 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -19,6 +18,9 @@ from fpl_engine.rules import (
     Chip,
     RuleViolationError,
     SquadSlot,
+    exact_tenths,
+    observed_tenths,
+    tenths_to_money,
     validate_chip_usage,
     validate_squad,
 )
@@ -188,6 +190,7 @@ class CreatePlanService:
         if current_squad is None or not current_squad.players:
             raise RuleViolationError("no_squad", "Save your team before creating a plan from it")
 
+        bank_tenths = observed_tenths(current_squad.bank, label="Saved bank")
         ownership = tuple(
             planning.Ownership(
                 uuid4(),
@@ -213,7 +216,7 @@ class CreatePlanService:
         boundary = planning.Boundary(
             ownership,
             lineup,
-            checked_tenths(current_squad.bank, positive=False),
+            bank_tenths,
             None if request.start_gameweek == 1 else 1,
             origin="my_team_capture",
         )
@@ -240,7 +243,7 @@ class CreatePlanService:
             name=request.name,
             start_gameweek=request.start_gameweek,
             end_gameweek=request.end_gameweek,
-            initial_bank=current_squad.bank,
+            initial_bank=tenths_to_money(bank_tenths),
             initial_free_transfers=boundary.free_transfers or 0,
         )
         self._repository.save_canonical(plan_id, canonical, evaluation)
@@ -506,13 +509,7 @@ def _require_plan(repository: PlanRepositoryPort, plan_id: int) -> PlanRecord:
 
 
 def checked_tenths(value: float, *, positive: bool = True) -> int:
-    try:
-        decimal = Decimal(str(value)) * 10
-        if not decimal.is_finite() or decimal != decimal.to_integral_value():
-            raise ValueError("Money must be a finite whole number of tenths")
-        result = int(decimal)
-    except (InvalidOperation, OverflowError) as error:
-        raise ValueError("Invalid stored monetary observation") from error
+    result = exact_tenths(value)
     if positive and result <= 0:
         raise ValueError("Stored player price must be positive")
     return result

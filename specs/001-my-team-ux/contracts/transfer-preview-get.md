@@ -66,6 +66,25 @@ Display `player_in_status` with the same advisory mapping as candidate
 `status`, separately from legality messages. Unknown status codes never
 disable Apply. Eligible status-only warnings do not enter `errors`.
 
+## Invalid Stored Money
+
+If the saved bank or a priced player is not a valid whole-tenth amount (beyond
+float representation noise, which is tolerated for the bank only), Preview and
+Apply return the existing HTTP 422 failure shape with no write:
+
+```json
+{
+  "detail": {
+    "code": "invalid_money",
+    "message": "Money must be a finite whole number of tenths",
+    "missing_player_ids": []
+  }
+}
+```
+
+Apply's shape also carries `errors: []`. Explorer returns the same code and
+shape. No other `ValueError` is converted.
+
 ## Apply Eligibility Recheck
 
 `POST /my-team/transfers/{player_out_id}/apply` retains its request and
