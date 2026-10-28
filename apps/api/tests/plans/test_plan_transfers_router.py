@@ -16,6 +16,7 @@ from explorer_builders import (
     FakePlayers,
     FakeProjections,
     FakeRuns,
+    FakeSchedule,
     FakeTeams,
     candidate_records,
     context_for,
@@ -38,6 +39,7 @@ def service(
         lookup=FakeLookup(records),
         runs=runs if runs is not None else FakeRuns(run_record()),
         projections=FakeProjections(flat_points(range(8, 14), {6: 2.0, 106: 5.0})),
+        schedule=FakeSchedule(),
         teams=FakeTeams(),
     )
 
@@ -152,6 +154,7 @@ def test_missing_squad_projections_list_the_players(client) -> None:  # type: ig
         lookup=FakeLookup(),
         runs=FakeRuns(run_record()),
         projections=FakeProjections(points),
+        schedule=FakeSchedule(),
         teams=FakeTeams(),
     )
 

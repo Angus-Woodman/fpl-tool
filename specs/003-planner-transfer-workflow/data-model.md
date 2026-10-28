@@ -81,5 +81,6 @@ Transitions of note:
 
 - Money is integer tenths end to end in Planner mode; the browser formats £m only.
 - Horizon gameweeks are `N..N+h-1` limited to covered projections; never zero-filled for gameweeks the run does not cover.
-- A missing player in the run for a whole in-horizon squad yields the existing `missing_projections` unavailable state.
+- Missing data is decided from the fixture schedule: a player lacking a row for an unfinished scheduled fixture of their club, or whose club's schedule is unknown (gameweek without imported fixtures, or a postponed fixture without a gameweek), yields the `missing_projections` unavailable state when they are a squad player (selected squad, later planned acquisition, continuation squad); a pool candidate is withheld (`unprojected_candidate_ids`), never ranked on zeros. A confirmed blank (no unfinished fixture, known complete schedule) is the only case where absence means zero points.
+- A financial-conflict gameweek keeps its negative-bank figures but is `valid: false` with `reason: financial_shortfall`.
 - Guard fields are both-or-neither, positive tenths, and never persisted.

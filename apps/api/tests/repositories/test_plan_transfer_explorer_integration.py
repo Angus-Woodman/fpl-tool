@@ -216,3 +216,83 @@ def test_previewing_writes_nothing_and_confirming_goes_through_the_planner_write
     assert stale.json()["detail"]["code"] == "revision_conflict"
     planner_session.expire_all()
     assert table_counts(planner_session)["plan_mutations"] == receipts_before
+
+
+def submit_descriptor(client: TestClient, plan_id: int, preview: dict, number: int) -> dict:
+    """Post the preview's commit descriptor exactly as returned (the guard rides on the intent)."""
+    commit = preview["commit"]
+    response = client.post(
+        f"/plans/{plan_id}/mutations",
+        json={
+            "mutation_id": f"00000000-0000-0000-0000-{number:012d}",
+            "expected_revision": commit["expected_revision"],
+            "intents": [{**commit["intent"], **commit["guard"]}],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "committed"
+    return response.json()
+
+
+def assert_plan_matches_preview(plan: dict, preview: dict) -> None:
+    weeks = {week["gameweek_number"]: week for week in plan["gameweeks"]}
+    saved_rows = [row for row in preview["gameweeks"] if row["basis"] == "saved_plan"]
+    assert saved_rows and all(row["valid"] for row in saved_rows)
+    incoming = preview["candidate"]["player_id"]
+    for row in saved_rows:
+        week = weeks[row["gameweek"]]
+        after = row["accounting"]["after"]
+        assert week["accounting"]["closing_bank_tenths"] == after["closing_bank_tenths"]
+        assert week["accounting"]["free_transfers_available"] == after["free_transfers_available"]
+        assert week["accounting"]["transfers_made"] == after["transfers_made"]
+        assert week["accounting"]["points_hit"] == after["points_hit"]
+        assert row["squad_changed"] is True
+        assert incoming in {player["player_id"] for player in week["players"]}
+
+
+def test_preview_descriptors_apply_unchanged_for_add_and_same_gameweek_edit(
+    client: TestClient,
+    planner_session: Session,
+    planner_plan: Plan,
+    planner_metadata: dict[int, PlayerRuleData],
+) -> None:
+    plan_id = seed_plan_and_projections(planner_session, planner_plan, planner_metadata)
+    set_prices = {102: 5.2, 103: 4.8}
+    for player_id, price in set_prices.items():
+        planner_session.execute(
+            update(PlayerModel).where(PlayerModel.id == player_id).values(current_price=price)
+        )
+    planner_session.commit()
+
+    added = client.get(f"/plans/{plan_id}/gameweeks/8/transfers/2/preview?player_in_id=102").json()
+    assert added["commit"]["intent"]["kind"] == "add_transfer"
+    first = submit_descriptor(client, plan_id, added, 1)
+    plan = client.get(f"/plans/{plan_id}").json()
+    assert (
+        plan["revision"] == added["commit"]["expected_revision"] + 1 == first["committed_revision"]
+    )
+    assert_plan_matches_preview(plan, added)
+    week = plan["gameweeks"][0]
+    assert week["accounting"]["closing_bank_tenths"] == 10 + 50 - 52
+    (decision,) = week["decisions"]
+    assert (decision["outgoing_player_id"], decision["incoming_player_id"]) == (2, 102)
+    assert (decision["outgoing_market_tenths"], decision["incoming_price_tenths"]) == (50, 52)
+    assert 2 not in {player["player_id"] for player in week["players"]}
+
+    edited = client.get(
+        f"/plans/{plan_id}/gameweeks/8/transfers/102/preview?player_in_id=103"
+    ).json()
+    assert edited["commit"]["intent"]["kind"] == "edit_transfer"
+    assert edited["commit"]["expected_revision"] == plan["revision"]
+    second = submit_descriptor(client, plan_id, edited, 2)
+    final = client.get(f"/plans/{plan_id}").json()
+    assert final["revision"] == second["committed_revision"] == plan["revision"] + 1
+    assert_plan_matches_preview(final, edited)
+    week = final["gameweeks"][0]
+    assert week["accounting"]["closing_bank_tenths"] == 10 + 50 - 48
+    (replaced,) = week["decisions"]  # replaced in place, not stacked
+    assert replaced["decision_id"] == decision["decision_id"]
+    assert (replaced["outgoing_player_id"], replaced["incoming_player_id"]) == (2, 103)
+    for gameweek in final["gameweeks"]:
+        players = {player["player_id"] for player in gameweek["players"]}
+        assert 103 in players and not {2, 102} & players

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import inspect
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 import pytest
 from api.services.plan_context import PlanningContext
@@ -18,6 +18,7 @@ from explorer_builders import (
     FakePlayers,
     FakeProjections,
     FakeRuns,
+    FakeSchedule,
     FakeTeams,
     candidate_records,
     context_for,
@@ -38,9 +39,11 @@ def make_service(
     *,
     records: list | None = None,
     runs: FakeRuns | None = None,
+    schedule: FakeSchedule | None = None,
+    omit: Collection[tuple[int, int]] = (),
 ) -> tuple[PlanTransferAnalysisService, FakeProjections]:
     projections = FakeProjections(
-        points if points is not None else flat_points(range(8, 14), SPECIAL)
+        points if points is not None else flat_points(range(8, 14), SPECIAL), schedule, omit
     )
     return (
         PlanTransferAnalysisService(
@@ -48,6 +51,7 @@ def make_service(
             lookup=FakeLookup(records),
             runs=runs if runs is not None else FakeRuns(run_record()),
             projections=projections,
+            schedule=projections.schedule,
             teams=FakeTeams(),
         ),
         projections,
@@ -78,7 +82,7 @@ def failure(result: object) -> PlanTransferFailure:
 
 def test_the_service_is_built_only_from_read_only_ports() -> None:
     parameters = set(inspect.signature(PlanTransferAnalysisService).parameters)
-    assert parameters == {"players", "lookup", "runs", "projections", "teams"}
+    assert parameters == {"players", "lookup", "runs", "projections", "schedule", "teams"}
     service, _ = make_service()
     names = {name for name in dir(service) if not name.startswith("_")}
     assert {"list_candidates"} <= names <= {"list_candidates", "preview"}
@@ -461,3 +465,197 @@ def test_the_preview_never_changes_the_planning_context() -> None:
     before_plan, before_baseline = copy.deepcopy(context.plan), copy.deepcopy(context.baseline)
     previewed(context, 6, 106)
     assert context.plan == before_plan and context.baseline == before_baseline
+
+
+def without(
+    points: dict[int, dict[int, float]], players: set[int], gameweeks: range | set[int]
+) -> dict[int, dict[int, float]]:
+    return {
+        gameweek: {
+            player_id: value
+            for player_id, value in week.items()
+            if not (gameweek in gameweeks and player_id in players)
+        }
+        for gameweek, week in points.items()
+    }
+
+
+def missing(result: PlanTransferFailure | PlanTransferList, *ids: int) -> PlanTransferFailure:
+    failed = failure(result)
+    assert failed.code == "missing_projections"
+    assert failed.missing_player_ids == ids
+    return failed
+
+
+MIDFIELDERS = {6, 7, 8, 9, 14, 106, 107, 108, 109, 114, CLUB_LIMIT_CANDIDATE}
+
+
+def test_a_squad_player_missing_from_a_scheduled_later_gameweek_is_not_zero_filled() -> None:
+    points = without(flat_points(range(8, 13), SPECIAL), {5}, range(10, 13))
+
+    failed = missing(make_service(points)[0].list_candidates(scenario_context("ordinary"), 6), 5)
+
+    assert "fixture not projected" in failed.message and "10" in failed.message
+
+
+def test_a_later_planned_acquisition_without_projections_blocks_the_analysis() -> None:
+    points = without(flat_points(range(8, 13), SPECIAL), {107}, {11})
+
+    result = make_service(points)[0].list_candidates(
+        scenario_context("later_purchase_of_a_candidate"), 6
+    )
+
+    missing(result, 107)
+
+
+def test_the_assumed_continuation_squad_needs_projections_too() -> None:
+    points = without(flat_points(range(8, 13), SPECIAL), {107}, {12})
+
+    result = make_service(points)[0].list_candidates(
+        scenario_context("later_purchase_of_a_candidate"), 6
+    )
+
+    missing(result, 107)
+
+
+def test_an_incoming_candidate_without_full_projections_is_withheld_not_ranked_on_zeros() -> None:
+    full = flat_points(range(8, 13), SPECIAL)
+    points = without(full, {106}, {9})
+    context = scenario_context("ordinary")
+
+    result = listed(context, 6, service=make_service(points)[0])
+    reference = listed(context, 6, service=make_service(full)[0])
+
+    assert 106 not in {item.player_id for item in result.candidates}
+    assert result.projection.unprojected_candidate_ids == [106]
+    by_id = {item.player_id: item for item in result.candidates}
+    expected = {item.player_id: item for item in reference.candidates}
+    assert by_id[107].best_xi_gain_by_horizon == expected[107].best_xi_gain_by_horizon
+    previewed_failure = failure(make_service(points)[0].preview(context, 6, 106))
+    assert (previewed_failure.code, previewed_failure.missing_player_ids) == (
+        "missing_projections",
+        (106,),
+    )
+
+
+def test_a_club_with_no_scheduled_fixture_is_a_legitimate_blank() -> None:
+    # Club 1 (players 1, 6, 11 and candidate 201) has no fixture in gameweek 9.
+    schedule = FakeSchedule(blank={(1, 9)})
+    points = without(flat_points(range(8, 13), SPECIAL), {1, 6, 11, 201}, {9})
+
+    result = listed(
+        scenario_context("ordinary"), 6, service=make_service(points, schedule=schedule)[0]
+    )
+
+    assert result.projection.unprojected_candidate_ids == []
+    assert {item.player_id for item in result.candidates} >= {106, 107, CLUB_LIMIT_CANDIDATE}
+
+
+def test_a_scheduled_fixture_with_no_projections_for_a_position_is_not_a_blank() -> None:
+    # Every club plays in gameweek 9 but the run has no midfielder rows at all.
+    points = without(flat_points(range(8, 13), SPECIAL), MIDFIELDERS, {9})
+
+    failed = missing(
+        make_service(points)[0].list_candidates(scenario_context("ordinary"), 6), 6, 7, 8, 9, 14
+    )
+
+    assert "fixture not projected" in failed.message
+
+
+def test_candidates_of_a_position_the_run_skipped_are_withheld_not_blank() -> None:
+    # The squad is projected; only the pool's midfielders lack a row for a scheduled fixture.
+    pool = MIDFIELDERS - {6, 7, 8, 9, 14}
+    points = without(flat_points(range(8, 13), SPECIAL), pool, {9})
+
+    result = listed(scenario_context("ordinary"), 6, service=make_service(points)[0])
+
+    assert result.candidates == []
+    assert set(result.projection.unprojected_candidate_ids) == pool
+
+
+def test_an_individual_player_missing_a_scheduled_fixture_blocks_the_analysis() -> None:
+    points = without(flat_points(range(8, 13), SPECIAL), {4}, {9})
+
+    failed = missing(make_service(points)[0].list_candidates(scenario_context("ordinary"), 6), 4)
+
+    assert "9 (fixture not projected)" in failed.message
+
+
+def test_a_double_gameweek_needs_a_row_for_every_remaining_fixture() -> None:
+    schedule = FakeSchedule(double={(5, 9), (26, 9)})
+    full = flat_points(range(8, 13), SPECIAL)
+    context = scenario_context("ordinary")
+
+    complete = listed(context, 6, service=make_service(full, schedule=schedule)[0])
+    candidate = next(item for item in complete.candidates if item.player_id == 106)
+    assert [item.gameweek for item in candidate.fixtures].count(9) == 2
+
+    partial = make_service(full, schedule=schedule, omit={(5, 9500 + 5)})[0]
+    missing(partial.list_candidates(context, 6), 5)
+    withheld = listed(
+        context, 6, service=make_service(full, schedule=schedule, omit={(106, 9526)})[0]
+    )
+    assert withheld.projection.unprojected_candidate_ids == [106]
+
+
+def test_an_unscheduled_fixture_means_a_missing_row_does_not_prove_a_blank() -> None:
+    # Club 1 has a postponed fixture without a gameweek; its players have no gameweek-9 rows.
+    schedule = FakeSchedule(blank={(1, 9)}, unscheduled={1})
+    points = without(flat_points(range(8, 13), SPECIAL), {1, 6, 11, 201}, {9})
+
+    failed = failure(
+        make_service(points, schedule=schedule)[0].list_candidates(scenario_context("ordinary"), 7)
+    )
+
+    assert failed.code == "missing_projections"
+    assert failed.missing_player_ids == (1, 6, 11)
+    assert "schedule unknown" in failed.message
+
+
+def test_a_gameweek_with_no_imported_fixtures_does_not_prove_a_blank() -> None:
+    schedule = FakeSchedule(unknown_gameweeks={9})
+    points = without(flat_points(range(8, 13), SPECIAL), {5}, {9})
+
+    failed = missing(
+        make_service(points, schedule=schedule)[0].list_candidates(scenario_context("ordinary"), 6),
+        5,
+    )
+
+    assert "9 (schedule unknown)" in failed.message
+
+
+def test_gameweeks_outside_the_runs_coverage_shorten_the_horizon_instead() -> None:
+    context = scenario_context("ordinary")
+    # The schedule has fixtures in gameweeks 10 to 12 but the run only covers 8 and 9.
+    partial = listed(context, 6, service=make_service(flat_points(range(8, 10), SPECIAL))[0])
+    assert partial.projection.horizons[2].evaluated_gameweeks == [8, 9]
+    assert partial.projection.horizons[2].partial is True
+    uncovered = make_service(flat_points(range(9, 13), SPECIAL))[0].list_candidates(context, 6)
+    assert failure(uncovered).code == "gameweek_not_projected"
+
+
+def test_a_financial_conflict_gameweek_keeps_its_figures_but_is_not_a_valid_scenario() -> None:
+    preview = previewed(scenario_context("later_financial_chain"), 6, 107)
+
+    assert preview.state == "blocked_by_later_decision"
+    assert preview.conflict is not None and preview.conflict.kind == "financial"
+    assert preview.valid_through_gameweek == 10
+    table = rows(preview)
+    assert table[8].valid and table[9].valid
+    conflicted = table[10]
+    assert conflicted.valid is False and conflicted.reason == "financial_shortfall"
+    assert conflicted.accounting is not None
+    assert conflicted.accounting.after.closing_bank_tenths == -5
+    assert conflicted.shortfall_tenths == 5
+    for number in (11, 12):
+        assert table[number].valid is False and table[number].reason == "beyond_valid_range"
+        assert table[number].accounting is None and table[number].points is None
+    assert table[8].shortfall_tenths is None
+
+
+def test_a_structural_conflict_still_withholds_the_conflicting_gameweek() -> None:
+    table = rows(previewed(scenario_context("later_sale_of_a_player"), 6, 106))
+
+    assert table[9].valid and table[9].shortfall_tenths is None
+    assert table[10].valid is False and table[10].reason == "beyond_valid_range"
+    assert table[10].accounting is None and table[10].shortfall_tenths is None

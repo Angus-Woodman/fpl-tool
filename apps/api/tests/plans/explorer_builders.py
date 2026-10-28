@@ -7,10 +7,11 @@ test fixtures live in `packages/fpl_engine/tests`; neither layer imports the oth
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from uuid import UUID
 
+from api.repositories.fixture_read_repository import ScheduledFixtureRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.player_read_repository import CandidatePlayerRecord
 from api.repositories.projection_run_repository import ProjectionRunRecord
@@ -197,6 +198,11 @@ def reference_scenarios() -> tuple[Scenario, ...]:
             8,
         ),
         Scenario(
+            "later_financial_chain",
+            plan(transfers={10: (transfer(3, 103, 7, incoming_price=60),)}),
+            8,
+        ),
+        Scenario(
             "later_purchase_of_a_candidate",
             plan(transfers={10: (transfer(7, 107, 4, incoming_price=60),)}),
             8,
@@ -299,11 +305,60 @@ def flat_points(
     }
 
 
-class FakeProjections:
-    """Rows from `points[gameweek][player_id]`; one fixture per player and gameweek."""
+SCHEDULE_OPPONENT = 9999
 
-    def __init__(self, points: Mapping[int, Mapping[int, float]]) -> None:
+
+class FakeSchedule:
+    """One fixture per club and gameweek unless a club is blank, double or unscheduled."""
+
+    def __init__(
+        self,
+        *,
+        blank: Collection[tuple[int, int]] = (),
+        double: Collection[tuple[int, int]] = (),
+        unscheduled: Collection[int] = (),
+        unknown_gameweeks: Collection[int] = (),
+    ) -> None:
+        self.blank, self.double = set(blank), set(double)
+        self.unscheduled, self.unknown = set(unscheduled), set(unknown_gameweeks)
+
+    def fixture_ids(self, team: int, gameweek: int) -> list[int]:
+        if gameweek in self.unknown or (team, gameweek) in self.blank:
+            return []
+        ids = [gameweek * 1000 + team]
+        if (team, gameweek) in self.double:
+            ids.append(gameweek * 1000 + 500 + team)
+        return ids
+
+    def list_schedule(
+        self, *, min_gameweek: int, max_gameweek: int
+    ) -> list[ScheduledFixtureRecord]:
+        teams = sorted({rule.team_id for rule in metadata().values()})
+        records = [
+            ScheduledFixtureRecord(fixture_id, gameweek, team, SCHEDULE_OPPONENT, False)
+            for gameweek in range(min_gameweek, max_gameweek + 1)
+            for team in teams
+            for fixture_id in self.fixture_ids(team, gameweek)
+        ]
+        records += [
+            ScheduledFixtureRecord(90_000 + team, None, team, SCHEDULE_OPPONENT, False)
+            for team in sorted(self.unscheduled)
+        ]
+        return records
+
+
+class FakeProjections:
+    """Rows from `points[gameweek][player_id]`, one per fixture of the player's club."""
+
+    def __init__(
+        self,
+        points: Mapping[int, Mapping[int, float]],
+        schedule: FakeSchedule | None = None,
+        omit: Collection[tuple[int, int]] = (),
+    ) -> None:
         self.points = points
+        self.schedule = schedule if schedule is not None else FakeSchedule()
+        self.omit = set(omit)
         self.calls: list[tuple[int, int | None, int | None]] = []
 
     def list_player_fixture_projections_for_run(
@@ -315,6 +370,7 @@ class FakeProjections:
         max_gameweek: int | None = None,
     ) -> list[PlayerProjectionFixtureRecord]:
         self.calls.append((run_id, min_gameweek, max_gameweek))
+        teams = {player_id: rule.team_id for player_id, rule in metadata().items()}
         rows: list[PlayerProjectionFixtureRecord] = []
         for gameweek in sorted(self.points):
             if (min_gameweek is not None and gameweek < min_gameweek) or (
@@ -322,17 +378,22 @@ class FakeProjections:
             ):
                 continue
             for player_id in sorted(set(player_ids) & set(self.points[gameweek])):
-                rows.append(
-                    PlayerProjectionFixtureRecord(
-                        player_id=player_id,
-                        fixture_id=gameweek * 1000 + player_id,
-                        gameweek_number=gameweek,
-                        projected_points=self.points[gameweek][player_id],
-                        kickoff_time=f"2026-10-{gameweek:02d}T15:00:00+00:00",
-                        opponent_team_short_name=f"O{(gameweek % 5) + 1}",
-                        is_home=gameweek % 2 == 0,
+                team = teams[player_id]
+                fixture_ids = self.schedule.fixture_ids(team, gameweek) or [gameweek * 1000 + team]
+                for fixture_id in fixture_ids:
+                    if (player_id, fixture_id) in self.omit:
+                        continue
+                    rows.append(
+                        PlayerProjectionFixtureRecord(
+                            player_id=player_id,
+                            fixture_id=fixture_id,
+                            gameweek_number=gameweek,
+                            projected_points=self.points[gameweek][player_id],
+                            kickoff_time=f"2026-10-{gameweek:02d}T15:00:00+00:00",
+                            opponent_team_short_name=f"O{(gameweek % 5) + 1}",
+                            is_home=gameweek % 2 == 0,
+                        )
                     )
-                )
         return rows
 
 

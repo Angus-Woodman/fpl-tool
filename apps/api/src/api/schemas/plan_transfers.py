@@ -48,6 +48,7 @@ class ProjectionInfoResponse(_Response):
     horizons: list[HorizonInfoResponse]
     limited_to_selected_gameweek: bool
     limited_reason: str | None
+    unprojected_candidate_ids: list[int]
 
 
 class AccountingBeforeResponse(_Response):
@@ -171,7 +172,16 @@ class PreviewGameweekResponse(_Response):
     squad_changed: bool
     incoming_role: Literal["starting", "bench", "captain", "vice_captain"] | None
     points: PointsDeltaResponse | None
-    reason: Literal["no_projection", "beyond_valid_range", "continuation_lineup_illegal"] | None
+    reason: (
+        Literal[
+            "no_projection",
+            "beyond_valid_range",
+            "continuation_lineup_illegal",
+            "financial_shortfall",
+        ]
+        | None
+    )
+    shortfall_tenths: int | None = None
 
 
 class PreviewTotalsResponse(_Response):

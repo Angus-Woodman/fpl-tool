@@ -23,7 +23,8 @@ projection: {
   primary_horizon,
   horizons: [ { horizon: 1|3|5, requested_gameweeks: [..], evaluated_gameweeks: [..],
                 saved_plan_gameweeks: [..], assumed_gameweeks: [..], partial: bool } ],
-  limited_to_selected_gameweek: bool, limited_reason: "free_hit_gameweek" | null
+  limited_to_selected_gameweek: bool, limited_reason: "free_hit_gameweek" | null,
+  unprojected_candidate_ids: [int]      # pool players withheld: no projection in an evaluated gameweek
 }
 accounting_before: { starting_bank_tenths, closing_bank_tenths, free_transfers_available,
                      transfers_made, points_hit, unlimited_transfers, provisional: bool }
@@ -59,7 +60,12 @@ Semantics:
 - `best_xi_gain_*` is a static-squad measure (squad at `gameweek` held constant); `plan_impact_*` replays the plan (saved roles, chips, later decisions) and is the plan's real effect. They are separate fields and never combined.
 - `plan_impact_*.assumed_continuation` covers horizon gameweeks after `plan.end_gameweek` using the plan's final permanent squad and final-gameweek roles; `null` when none or `continuation_lineup_illegal`.
 - Values for gameweeks beyond `valid_through_gameweek` are `null`, never estimated.
-- Projections are never zero-filled for gameweeks outside the run's coverage; `partial: true` marks shortened horizons.
+- Projections are never zero-filled. Four situations are distinguished, using the stored fixture schedule (`fixtures`, the same table the projection run is generated from, one row per player and unfinished fixture):
+  - *Run does not cover the gameweek*: no projection rows at all for it. The horizon is shortened (`partial: true`), or 422 `gameweek_not_projected` for the selected gameweek.
+  - *Confirmed blank*: the club has no unfinished scheduled fixture in a gameweek whose schedule is known and has no unscheduled (postponed) fixture. Zero points is correct and nothing is flagged. Finished fixtures need no projection.
+  - *Scheduled fixture without projection*: the club has an unfinished fixture the player has no row for. A double gameweek needs a row for every unfinished fixture. This is missing data.
+  - *Schedule unknown*: no fixtures are imported for the gameweek, or the club has a postponed fixture without a gameweek. The absence of rows does not prove a blank, so it is treated as missing data.
+- Squad players whose points feed the analysis (the selected gameweek's squad across the horizon, every saved gameweek's squad including later planned acquisitions, and the final permanent squad for the assumed continuation) must have no missing data in any evaluated gameweek, otherwise 422 `missing_projections` with `missing_player_ids`; the message names each gameweek and whether the fixture was not projected or the schedule is unknown. Nothing is ranked. A pool candidate with missing data is not ranked on zeros: it is withheld and listed in `projection.unprojected_candidate_ids`; previewing it is 422 `missing_projections`.
 
 ### Error responses
 
@@ -74,7 +80,7 @@ All errors use `detail: { code, message, missing_player_ids? }` as in the My Tea
 | 422 | `player_not_in_squad` | outgoing player not in that gameweek's squad |
 | 422 | `no_projection_run` / `run_not_found` / `run_model_mismatch` | run unavailable |
 | 422 | `gameweek_not_projected` | the selected gameweek is not covered by the run (for example completed) |
-| 422 | `missing_projections` | squad players have no projection in the run (`missing_player_ids`) |
+| 422 | `missing_projections` | a required squad player (or, for a preview, the incoming player) lacks a projection in an evaluated gameweek (`missing_player_ids`) |
 | 422 | `selectability_unknown` | refresh required (same message as My Team) |
 | 422 | `invalid_money` | stored price not a whole tenth |
 | 422 | `invalid_horizon` | bad `primary_horizon` |
@@ -103,7 +109,8 @@ gameweeks: [ {
   squad_changed: bool,
   incoming_role: "starting" | "bench" | "captain" | "vice_captain" | null,
   points: { before, after, delta } | null,                  # excludes hit
-  reason: "no_projection" | "beyond_valid_range" | "continuation_lineup_illegal" | null
+  reason: "no_projection" | "beyond_valid_range" | "continuation_lineup_illegal" | "financial_shortfall" | null,
+  shortfall_tenths: int | null                               # set only on a financial-conflict gameweek
 } ]
 totals: { horizon: 1|3|5 -> { saved_plan, assumed_continuation, hit_change, net_saved_plan } }
 lineup_effect: { captain_changed: bool, vice_captain_changed: bool }
@@ -112,6 +119,7 @@ best_xi: { gain_by_horizon: { "1","3","5": float }, direct_xpts_difference: floa
 
 Semantics:
 
+- A gameweek that breaks the budget (a financial conflict) is returned with `valid: false`, `reason: "financial_shortfall"`, its negative-bank accounting kept for explanation and `shortfall_tenths` set; it is never an ordinary valid scenario. Later dependent gameweeks are withheld (`beyond_valid_range`). A structural conflict withholds the conflicting gameweek itself.
 - Preview of an `unavailable` or `blocked_by_later_decision` candidate returns 200 with `confirmable: false`, the reasons or conflict, and `gameweeks` only through `valid_through_gameweek`; later entries are `valid: false` with `reason: "beyond_valid_range"` and no values. (Same pattern as My Team, where an illegal preview is a normal 200.)
 - `commit` is `null` unless `confirmable` is true: no descriptor is offered for a transfer the Planner would reject. Optional intent fields that do not apply (`decision_id` for an add, the outgoing fields for an edit) are omitted, not null.
 - `commit.intent` is exactly what the browser submits, through the Planner's own writer, to `POST /plans/{plan_id}/mutations`; `commit.guard` is submitted with it (see [mutation-guard-and-selectability.md](mutation-guard-and-selectability.md)). The browser does not decide add versus edit.

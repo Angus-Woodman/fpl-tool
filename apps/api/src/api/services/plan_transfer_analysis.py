@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -36,6 +36,7 @@ from fpl_engine.transfers import (
     rank_replacement_candidates,
 )
 
+from api.repositories.fixture_read_repository import ScheduledFixtureRecord
 from api.repositories.my_team_projection_repository import PlayerProjectionFixtureRecord
 from api.repositories.player_read_repository import CandidatePlayerRecord
 from api.repositories.projection_run_repository import ProjectionRunRecord
@@ -80,6 +81,8 @@ class ProjectionInfo:
     horizons: list[HorizonInfo]
     limited_to_selected_gameweek: bool
     limited_reason: str | None
+    # Pool players withheld: the run lacks their projection in an evaluated gameweek.
+    unprojected_candidate_ids: list[int]
 
 
 @dataclass(frozen=True)
@@ -215,6 +218,9 @@ class PreviewGameweek:
     incoming_role: str | None
     points: PointsDelta | None
     reason: str | None
+    # Set on a gameweek that breaks the budget: its negative-bank figures are kept for
+    # explanation but the gameweek is not a valid scenario.
+    shortfall_tenths: int | None = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +322,12 @@ class ProjectionsPort(Protocol):
     ) -> list[PlayerProjectionFixtureRecord]: ...
 
 
+class SchedulePort(Protocol):
+    def list_schedule(
+        self, *, min_gameweek: int, max_gameweek: int
+    ) -> list[ScheduledFixtureRecord]: ...
+
+
 class TeamsPort(Protocol):
     def list_teams(self) -> list[TeamReadItem]: ...
 
@@ -335,6 +347,7 @@ class _Prepared:
     rows_by_player: dict[int, list[PlayerProjectionFixtureRecord]]
     points: dict[int, dict[int, float]]
     evaluated: list[int]
+    unprojected: list[int]
 
 
 def _tenths(value: float, label: str) -> int:
@@ -349,12 +362,14 @@ class PlanTransferAnalysisService:
         lookup: LookupPort,
         runs: RunsPort,
         projections: ProjectionsPort,
+        schedule: SchedulePort,
         teams: TeamsPort,
     ) -> None:
         self._players = players
         self._lookup = lookup
         self._runs = runs
         self._projections = projections
+        self._schedule = schedule
         self._teams = teams
 
     def list_candidates(
@@ -391,6 +406,13 @@ class PlanTransferAnalysisService:
             if record is None:
                 return PlanTransferFailure(
                     "player_not_found", f"No player exists with id {player_in_id}"
+                )
+            if player_in_id in prepared.unprojected:
+                return PlanTransferFailure(
+                    "missing_projections",
+                    f"{record.web_name} has no complete {DEFAULT_MODEL_VERSION} projection "
+                    f"in run {prepared.run.id}",
+                    (player_in_id,),
                 )
             if not any(item.player_id == player_in_id for item in prepared.pool):
                 return PlanTransferFailure(
@@ -585,20 +607,35 @@ class PlanTransferAnalysisService:
         evaluated = list(
             horizon_window(context.plan, gameweek, PROJECTION_WINDOW, set(points)).evaluated
         )
-        missing = tuple(
-            sorted(
-                player_id
-                for player_id in squad_ids
-                if not any(player_id in points[number] for number in evaluated)
-            )
+        lacks = self._projection_gaps(
+            metadata,
+            rows_by_player,
+            points,
+            self._schedule.list_schedule(min_gameweek=gameweek, max_gameweek=last),
         )
+        required = self._required_squad_players(context, squad_ids, evaluated)
+        missing: dict[int, list[str]] = {}
+        for number in evaluated:
+            for player_id in sorted(required[number]):
+                gap = lacks(player_id, number)
+                if gap is not None:
+                    missing.setdefault(player_id, []).append(f"{number} ({gap})")
         if missing:
+            detail = "; ".join(
+                f"player {player_id} in gameweek {', '.join(weeks)}"
+                for player_id, weeks in sorted(missing.items())
+            )
             return PlanTransferFailure(
                 "missing_projections",
-                f"{len(missing)} squad player(s) have no {DEFAULT_MODEL_VERSION} "
-                f"projection in run {run.id}",
-                missing,
+                f"{DEFAULT_MODEL_VERSION} run {run.id} lacks projections: {detail}",
+                tuple(sorted(missing)),
             )
+        unprojected = {
+            item.player_id
+            for item in pool
+            if any(lacks(item.player_id, number) is not None for number in evaluated)
+        }
+        pool = [item for item in pool if item.player_id not in unprojected]
         return _Prepared(
             context,
             operation,
@@ -613,6 +650,7 @@ class PlanTransferAnalysisService:
             dict(rows_by_player),
             dict(points),
             evaluated,
+            sorted(unprojected),
         )
 
     def _resolve_run(
@@ -637,6 +675,70 @@ class PlanTransferAnalysisService:
                 f"Run {projection_run_id} is {run.model_version}, not {DEFAULT_MODEL_VERSION}",
             )
         return run, latest is not None and latest.id != run.id
+
+    @staticmethod
+    def _projection_gaps(
+        metadata: dict[int, PlayerRuleData],
+        rows_by_player: dict[int, list[PlayerProjectionFixtureRecord]],
+        points: dict[int, dict[int, float]],
+        schedule: list[ScheduledFixtureRecord],
+    ) -> Callable[[int, int], str | None]:
+        """Classify why a player has no points in a gameweek, from the fixture schedule.
+
+        Returns None when the absence is legitimate (the club's remaining fixtures are all
+        projected, or it has no remaining fixture in a gameweek whose schedule is known),
+        otherwise "fixture not projected" or "schedule unknown". A gameweek the run does
+        not cover at all never reaches here: it shortens the horizon instead.
+        """
+        known = {item.gameweek_number for item in schedule if item.gameweek_number is not None}
+        unscheduled = {
+            team
+            for item in schedule
+            if item.gameweek_number is None
+            for team in (item.home_team_id, item.away_team_id)
+        }
+        expected: dict[tuple[int, int], set[int]] = defaultdict(set)
+        for item in schedule:
+            if item.gameweek_number is not None and not item.finished:
+                for team in (item.home_team_id, item.away_team_id):
+                    expected[(team, item.gameweek_number)].add(item.fixture_id)
+
+        def gap(player_id: int, number: int) -> str | None:
+            have = {
+                row.fixture_id
+                for row in rows_by_player.get(player_id, ())
+                if row.gameweek_number == number
+            }
+            team = metadata[player_id].team_id
+            wanted = expected.get((team, number))
+            if wanted:
+                return None if wanted <= have else "fixture not projected"
+            if player_id in points[number]:
+                return None
+            # No remaining fixture: a blank only if the schedule is complete for this club.
+            if number in known and team not in unscheduled:
+                return None
+            return "schedule unknown"
+
+        return gap
+
+    @staticmethod
+    def _required_squad_players(
+        context: PlanningContext, squad_ids: list[int], evaluated: list[int]
+    ) -> dict[int, set[int]]:
+        """Players whose points feed the analysis in each evaluated gameweek.
+
+        Ranking holds the selected gameweek's squad constant; plan impact scores each saved
+        gameweek's squad (later planned acquisitions included) and, after the plan's end,
+        the final permanent squad.
+        """
+        weeks = {week.gameweek_number: week for week in context.baseline.gameweeks}
+        last = context.baseline.gameweeks[-1]
+        required: dict[int, set[int]] = {}
+        for number in evaluated:
+            owned = weeks[number].players if number in weeks else last.permanent_players
+            required[number] = set(squad_ids) | {player.player_id for player in owned or ()}
+        return required
 
     @staticmethod
     def _window_player_ids(context: PlanningContext) -> set[int]:
@@ -746,6 +848,7 @@ class PlanTransferAnalysisService:
             horizons,
             limited is not None,
             limited,
+            list(prepared.unprojected),
         )
 
 
@@ -1004,11 +1107,14 @@ def _preview_gameweeks(
             )
         )
         decided = next(week for week in plan.gameweeks if week.gameweek_number == number)
+        financial = in_range and any(
+            item.kind == "financial" and item.gameweek == number for item in assessment.conflicts
+        )
         rows.append(
             PreviewGameweek(
                 number,
                 "saved_plan",
-                bool(in_range),
+                bool(in_range) and not financial,
                 decided.chip.value if decided.chip is not None else None,
                 PreviewAccounting(_snapshot(before), _snapshot(after))
                 if in_range and after is not None
@@ -1018,7 +1124,8 @@ def _preview_gameweeks(
                 and _ids(before.players) != _ids(after.players),
                 _role(after, player_id) if in_range and after is not None else None,
                 points,
-                reason,
+                "financial_shortfall" if financial else reason,
+                after.shortfall_tenths if financial and after is not None else None,
             )
         )
     return rows

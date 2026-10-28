@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Annotated
 
 from api.db.session import get_db_session
+from api.repositories.fixture_read_repository import FixtureReadRepository
 from api.repositories.my_team_projection_repository import MyTeamProjectionRepository
 from api.repositories.plan_repository import PlanNotFoundError, PlanNotReadyError, PlanRepository
 from api.repositories.player_read_repository import PlayerReadRepository
@@ -61,6 +62,7 @@ def get_plan_transfer_analysis_service(
         lookup=SquadPlayerLookupRepository(db_session),
         runs=ProjectionRunRepository(db_session),
         projections=MyTeamProjectionRepository(db_session),
+        schedule=FixtureReadRepository(db_session),
         teams=TeamReadRepository(db_session),
     )
 
