@@ -1,6 +1,6 @@
 # Phase 003 Current-State Assessment, Risks and Implementation Slices
 
-Date: 2026-10-28. Supports [spec.md](spec.md). This is source inspection only: no code, test, database or migration was run or changed while preparing it, so nothing here is runtime-verified. File references are repository-relative and were read on branch `feature/planner-transfer-workflow` (clean working tree, merged Phase 002 at `d2b9e17`).
+Date: 2026-10-28, revised after the Phase 003 / Phase 004 split (Duplicate Plan findings removed; recoverable from Git history, commit `a3c5144`). Supports [spec.md](spec.md). This is source inspection only: no code, test, database or migration was run or changed while preparing it, so nothing here is runtime-verified. File references are repository-relative and were read on branch `feature/planner-transfer-workflow` (clean working tree, merged Phase 002 at `d2b9e17`).
 
 ## 1. Current-state assessment
 
@@ -45,15 +45,11 @@ Note: the project memory records an approved "official run before the gameweek d
 - The inline transfer picker calls `fetchPlayers({position, status: "a", sort: "price_desc", page_size: 50})`: no search, projections, fixtures or selectability data, and a hard cap of 50 players per position. Playing status `a` conflicts with the My Team decision that status is advisory only.
 - Autosave: `PlanSaveCoordinator` (`apps/web/src/lib/plan-save-coordinator.ts`) is plan-scoped and held in a module-level `Map` (`getPlanSaveCoordinator`), so it survives client-side navigation but not a reload or new tab. Statuses `saved`, `saving`, `not_saved`, `conflict`, `error`, `missing`; `hasUnsavedWork()`; `retry`, `reconcile`, `revalidate`.
 - Departure protection (`beforeunload`, link-click confirm, `installHistoryDepartureGuard`) is installed only inside `PlanBoard`. The Explorer has none.
-- The plan page header is a server component (`apps/web/src/app/plans/[id]/page.tsx`) holding the "Back to plans" link above `PlanBoard`. A Duplicate button needs the client-side save state, so it must live in client code that can read the plan's coordinator, or the header must move into it.
 - No component displays the projection run for the Planner (`ProjectionRunBadge` is used only by the Explorer and My Team recommendation).
 
-### 1.5 Plan creation, loading, persistence and deletion
+### 1.5 Plan loading and locking
 
-- Create: `CreatePlanService` captures My Team into a canonical boundary, evaluates, then `PlanRepository.create` (also fills the legacy float `initial_bank` and `initial_free_transfers` columns) plus `save_canonical`; the router commits (`_commit`).
 - Load: `load_canonical` raises `PlanNotReadyError` for `foundation_state != "ready"`; the router maps it to 409 `plan_not_ready` on mutations; GET returns a read-only view with an initialisation reason. Initialisation is an explicit CLI (`apps/api/src/api/scripts/initialize_planner_foundations.py`), never done by a GET.
-- Delete: `DeletePlanService`; all plan child tables use `ON DELETE CASCADE` (gameweeks, starting players, decisions through gameweeks, mutations).
-- Constraints: `plans.name` is `String(100)` with no uniqueness; `_validate_name` rejects empty and over-100. Slot, ownership and decision uniqueness is per plan (`uq_plan_starting_slot`, `uq_plan_starting_ownership`, `uq_plan_transfer_decision` per gameweek), so identifiers could technically be reused across plans, but `Plan.__post_init__` and `load_canonical` assume plan-local uniqueness.
 - Locking: `lock_plan` takes `SELECT ... FOR UPDATE` on the plan row; `get_for_view` takes a shared lock.
 
 ## 2. Already satisfied (Phase 003 must not rebuild)
@@ -76,7 +72,7 @@ Note: the project memory records an approved "official run before the gameweek d
 7. Explorer has no departure guard or autosave awareness; a Planner-mode commit must use the plan's coordinator or an equivalent that preserves revision and retry rules.
 8. Explorer has no search, filters, fixtures or alternative sorts; the Planner picker is capped at 50 players and ignores selectability.
 9. The Planner does not show which model and run produced its xPts.
-10. No way to duplicate a plan; no naming convention; no server-side serialised name allocation.
+10. Explorer services read the My Team repository directly and mix context lookup with analysis; there is no seam between resolving a planning context and analysing it. Phase 004 (scenario tree) will change how contexts are resolved and where confirmations are written, so Phase 003 introduces a small separation (see plan.md).
 
 ## 4. Risks, conflicts and ambiguities
 
@@ -89,41 +85,28 @@ Note: the project memory records an approved "official run before the gameweek d
 | R5 | **Coordinator lifetime.** The save coordinator is a module singleton; a hard reload inside the Explorer loses in-flight state. | Confirmation across a reload could look unsaved or be replayed incorrectly. | FR-032 to FR-035, FR-041; the same mutation ID and receipt lookup already cover reconciliation |
 | R6 | **Horizon past the plan end and Free Hit.** A horizon beyond the plan's last gameweek, or a Free Hit gameweek, make "gain" ambiguous. | Overstated or understated gains. | FR-020, FR-025, FR-026 |
 | R7 | **Completed gameweeks are editable but have no projections.** | Explorer cannot rank them. | Explicit unavailable state (US1-8); no fabrication |
-| R8 | **Duplicate: concurrent name allocation without a unique constraint.** Two simultaneous requests can pick the same name. | Duplicate names in a family. | FR-055; needs a serialising lock (planning detail) |
-| R9 | **Duplicate: lost response.** Retrying can create a second copy unless the request is idempotent. | Extra copy (not destructive). | FR-056, Q-4 resolved (no migration; single-flight and explicit unknown-outcome message) |
-| R10 | **Duplicate: pending server receipts on the source.** Copying only committed state would silently omit an accepted-but-unwritten edit, especially from another tab. | Silent data loss in the copy. | FR-052, FR-053 (block only when the pending receipt is resumable at the current revision) |
-| R11 | **Duplicate: identity remapping.** Slot, ownership and decision UUIDs are referenced from lineups, decisions, bank-assumption markers and the client's source-decision bindings. A partial remap would link plans or corrupt references. | Cross-plan coupling or invalid copy. | FR-058, Equivalence guarantee |
-| R12 | **Duplicate: legacy float columns.** `plans.initial_bank` and `initial_free_transfers` are non-null legacy columns that creation fills; a copy must fill them consistently. | NOT NULL failure or inconsistent legacy values. | Planning detail |
-| R13 | **Name edge cases.** Truncation near 100 characters, renamed originals, manual suffixes, case. | Surprising family membership. | Naming rules 1 to 7 |
-| R14 | **Header placement.** The Duplicate button sits in a server-component header; it needs client save state. | Button could be enabled while unsaved. | FR-051; planning detail |
-| R15 | **Scope creep toward Phase 004.** Search, filter and sort could grow into a redesign. | Violates constitution VIII. | FR-046, Out of Scope |
-| R16 | **Price drift between preview and confirm.** `add_transfer` captures the latest stored prices at commit, and the Planner contract forbids browser-authored quotes, so saved prices could differ from those previewed. | Surprising bank change versus what the user approved. | FR-033, Q-7 resolved (reject and re-preview; previewed prices are a guard only) |
-| R17 | **Per-candidate plan evaluation cost.** Plan-aware legality, plan impact and clash detection for a pool of several hundred players each need a replay of the plan. | Slow candidate list. | SC-014, Q-8 resolved (3 s list, 2 s preview; measured, not a licence for premature optimisation). Plan impact needs the candidate plan replayed and scored per gameweek (today `score_gameweek` is applied in `GetPlanViewService`); how to do this per candidate is a planning concern |
+| R8 | **Scope creep.** Search, filter and sort could grow into a redesign, or the Phase 004 scenario tree could leak into this phase. | Violates constitution VIII. | FR-046, Out of Scope |
+| R9 | **Price drift between preview and confirm.** `add_transfer` captures the latest stored prices at commit, and the Planner contract forbids browser-authored quotes, so saved prices could differ from those previewed. | Surprising bank change versus what the user approved. | FR-033, Q-7 resolved (reject and re-preview; previewed prices are a guard only) |
+| R10 | **Per-candidate plan evaluation cost.** Plan-aware legality, plan impact and clash detection for a pool of several hundred players each need a replay of the plan. | Slow candidate list. | SC-011, Q-8 resolved (3 s list, 2 s preview; measured, not a licence for premature optimisation). Plan impact needs the candidate plan replayed and scored per gameweek (today `score_gameweek` is applied in `GetPlanViewService`); how to do this per candidate is a planning concern |
+| R11 | **Phase 004 rework.** The scenario tree changes how a planning context is resolved, addressed and written. If the Explorer reaches into plan storage and the writer, Phase 004 must untangle it. | Avoidable rework. | FR-047, FR-048, SC-013; three small seams in plan.md |
+| R12 | **Over-engineering the seams.** Generic scenario or repository abstractions would guess at Phase 004's design. | Speculative complexity (constitution II, VIII). | Seams limited to one resolver function, one context dataclass, a read-only analysis service and a `commit` prop; no option or branch types |
 
-## 5. Recommended approach for duplication (architecture-level; the plan phase commits to detail)
+## 5. Phase 004 compatibility (summary)
 
-1. Run in one database transaction. Lock the source plan row, check it is `ready`, check its revision equals the caller's expected revision, and check there is no resumable pending receipt at that revision.
-2. Load the canonical `Plan` with the existing `load_canonical`, then build a new `Plan` by remapping every slot, ownership and decision UUID through one consistent mapping (lineups, boundary players, transfer decisions, bank-assumption markers), keeping all values, prices, provenance and chips verbatim. Do not use My Team or any live price. Set revision 0.
-3. Allocate the name inside the same transaction under a serialising lock keyed to the family base (for example a transaction-scoped advisory lock), applying the naming rules to the names read after the lock is taken.
-4. Create the plan row through the existing `PlanRepository.create` (filling legacy columns as creation does), then `save_canonical` with an evaluation from `evaluate_plan`. This reuses the tested writer and its saved selling prices, so no second persistence path is introduced.
-5. Do not copy `plan_mutations` rows or legacy snapshot tables. Commit once; any failure rolls back everything.
-6. Return the new plan so the browser can navigate. Do not write to the source plan (no revision bump, no `updated_at` change, no receipt).
-7. No schema change is required for this flow, and none is to be added solely for retry idempotency (Q-4 resolved).
+Phase 004 (Branching Scenario Planner, [vision](../004-branching-scenario-planner/vision.md)) replaces the linear plan with a scenario tree of options, immutable saved options and editable drafts. Phase 003 keeps the existing linear Planner and prepares only these seams: a context resolver separate from analysis, an analysis service with read-only dependencies, and a commit descriptor handed to the Planner's own writer. The engine already works on a linear `Plan` value, so a selected path can later be flattened into it. The table of components and contracts that Phase 004 will need to adapt is in [plan.md](plan.md).
 
 ## 6. Suggested implementation slices (high level, independently testable)
 
 | Slice | Content | Owning layer and tests |
 |---|---|---|
-| S1 | Plan-aware transfer evaluation: a pure, non-raising evaluation of a hypothetical `add`/replace at a gameweek returning legality reasons, closing bank, transfers made, hit before and after, chip effects, later-gameweek effects, the first downstream conflict (gameweek and decision) and the per-gameweek squad and lineup needed to score plan impact, with a labelled hypothetical continuation of the plan's final state beyond the plan's end. | `fpl_engine`: domain tests for ordinary, Wildcard, Free Hit, Bench Boost, Triple Captain, first gameweek, FT 0, estimated basis, shortfall, same-gameweek replacement and downstream clash |
-| S2 | Planner-mode Explorer read API: ranking and preview anchored at gameweek N, run pinning and disclosure, partial and unavailable coverage, selectability pool, integer-tenths money, plan impact per gameweek, blocked-candidate truncation, and the previewed-price guard input for confirmation. Reuses ranking; My Team API untouched. | `apps/api`: service and router tests; My Team regression tests; guarded integration test confirming My Team data untouched |
-| S3 | Server-side selectability enforcement on new or edited planned transfers (per Q-3), and the Explorer-confirmation price guard (per Q-7: reject when the outgoing or incoming latest market price differs from the previewed one). | `apps/api` and `fpl_engine` tests; Planner inline-picker regression |
-| S4 | Explorer UI Planner mode: context in the URL, mode banner, outgoing selection, candidate table, preview, confirm through the plan coordinator, error and conflict states, departure guard, return to the Planner with gameweek, highlight and scroll. | `apps/web`: component tests with deferred promises; Playwright journey (explore, preview, confirm, return, reload, failure) at 1440 and 390 widths |
+| S1 | Engine analysis: non-raising verdict extracted from `validate_candidate`, `hypothetical.py` (candidate assessment on in-memory plan copies, first downstream conflict), `impact.py` (plan impact, hit deltas, labelled continuation of the plan's final state), selectability rule extraction. | `fpl_engine`: domain tests including verdict-equals-`apply_intents`; ordinary, Wildcard, Free Hit, Bench Boost, Triple Captain, first gameweek, FT 0, estimated basis, shortfall, same-gameweek replacement, downstream clash |
+| S2 | Mutation guard and selectability: optional compare-only price guard, `prices_changed`, `player_not_selectable` and `selectability_unknown` on new or edited transfers. | `apps/api` service and router tests; inline-picker regression |
+| S3 | Context resolver, analysis service and API: `plan_context.py`, `plan_transfer_analysis.py`, router and schemas; run pinning, partial and unavailable coverage, selectability pool, tenths money, blocked-candidate truncation, `planning_context` ref; performance gate. | `apps/api`: no-database analysis tests, router tests, My Team regression; guarded no-write integration test |
+| S4 | Explorer UI (Planner mode): URL context, banner, outgoing selection, preview, `commit` prop, coordinator `abandon()`, shared departure guard, Planner explore links, gameweek and highlight on arrival. | `apps/web`: component tests with deferred promises; Playwright journeys at 1440 and 390 |
 | S5 | Search, filter, sort and fixtures for candidates (client re-presentation of server results). | `apps/web` component tests; Playwright smoke |
-| S6 | Duplicate Plan service and endpoint: remap, naming under lock, atomic creation, refusals. | `apps/api`: service and router tests; guarded PostgreSQL tests for atomicity, concurrency, no partial plans, original unchanged, independence; naming unit tests |
-| S7 | Duplicate Plan UI: header control, gating on save state and legacy, single-flight, navigation, confirmation and errors. | `apps/web` component tests; Playwright journey incl. independence of edits |
-| S8 | Hardening: full quality gates, independent review per the code-review skill, browser verification, final diff review. | Cross-cutting |
+| S6 | Hardening: full quality gates, independent review per the code-review skill, browser verification, final diff review. | Cross-cutting |
 
-Order: S6 and S7 are independent of S1 to S5 and can ship first or last. S1 precedes S2; S2 and S3 precede S4; S5 follows S4.
+Order: S1 precedes S3; S2 is independent of S1 and precedes S4's confirmation step; S3 precedes S4; S5 follows S4.
 
 ## 7. Evidence index
 

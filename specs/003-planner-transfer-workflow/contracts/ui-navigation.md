@@ -21,7 +21,6 @@ Invalid Planner-mode parameters (non-numeric `plan`, `gw` or `out`) show an expl
 
 ## Planner page changes
 
-- Header row: "Back to plans" (left, existing markup) and "Duplicate Plan" (right), in one flex row inside `PlanBoard` (the server page no longer renders the link; loading, error and missing states still show it).
 - Highlight: the incoming player's card gains a visible highlighted state and is scrolled into view once on arrival; reduced-motion respected.
 - Confirmation notice region (`role="status"`) shows the one-shot message.
 
@@ -45,11 +44,13 @@ Accessibility and viewports: keyboard operable controls with labels, visible foc
 | Component | Responsibility | Inputs |
 |---|---|---|
 | `TransferExplorerEntry` | choose mode from `plan` parameter | search params |
-| `PlannerTransferExplorer` | state machine, fetching, coordinator interplay, navigation | `planId`, `gameweek`, `out`, `horizon`, `run` |
+| `PlannerTransferExplorer` | state machine, fetching, navigation; confirms through a `commit` function prop | `planId`, `gameweek`, `out`, `horizon`, `run`, `commit` |
+| `commit` prop (default adapter over `PlanSaveCoordinator.enqueue`) | submits the preview's `commit` descriptor to the Planner's writer; reports saving, saved, rejected, not saved, conflict | descriptor, `expected_revision` |
 | `PlannerContextBanner` | mode and context | plan summary |
 | `PlannerCandidateTable` | rendering, client-side search, filter, sort of server results (no domain logic) | candidates, horizon, controls state |
 | `PlannerTransferPreview` | preview and commit region | preview state, coordinator snapshot |
-| `DuplicatePlanButton` | gating, single-flight, navigation, errors | coordinator snapshot, plan id and name |
 | `useDepartureGuard` | extracted unsaved-work protection | coordinator |
+
+Phase 004 note: the address parameters `plan` and `gw`, the `?gw` and `highlight` return parameters, and the `commit` adapter are the parts expected to change when plans become scenario trees; nothing in this contract names options or branches.
 
 Client-side only presentation: sorting, filtering and formatting. Legality, money, gains, impact and fixtures are always server values.

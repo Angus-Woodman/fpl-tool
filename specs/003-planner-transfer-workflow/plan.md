@@ -1,18 +1,20 @@
-# Implementation Plan: Planner Transfer Workflow
+# Implementation Plan: Planner-aware Transfer Explorer
 
 **Branch**: `feature/planner-transfer-workflow` | **Date**: 2026-10-28 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/003-planner-transfer-workflow/spec.md` (clarifications Q-1 to Q-8 resolved). Supporting design: [research.md](research.md), [data-model.md](data-model.md), [contracts/](contracts/), [quickstart.md](quickstart.md), [current-state-assessment.md](current-state-assessment.md).
 
+**Revision note (2026-10-28)**: Phase 003 was split. Plan duplication was removed from this phase (design preserved only in Git history, commit `a3c5144`), and the Branching Scenario Planner became Phase 004 ([../004-branching-scenario-planner/vision.md](../004-branching-scenario-planner/vision.md)). This plan keeps Phase 003 on the existing linear Planner and adds a few deliberate, small seams so Phase 004 causes less rework. No Phase 004 behaviour is built here.
+
 **Scope of this document**: design only. No application code, migration or task list is produced here (`/speckit-tasks` comes next). Evidence marked "measured" comes from a throwaway micro-benchmark of pure engine code on the development machine (no database; noisy; not a substitute for the verification gate in [quickstart.md](quickstart.md)).
 
 ## Summary
 
-Two independent capabilities on the existing Planner foundations, with **no database schema change and no new dependency**.
+One capability on the existing linear Planner, with **no database schema change and no new dependency**: a Planner-aware Transfer Explorer.
 
-**A. Planner-aware Transfer Explorer.** A new read-only, plan-scoped evaluation service ranks and previews replacements for one player in one plan gameweek. It reuses, rather than re-implements: the candidate pool rules, `rank_replacement_candidates` (best-XI gain), the projection repositories, `evaluate_plan` (authoritative replay), and the acceptance rules inside `apply_intents`. Hypothetical transfers are evaluated on in-memory copies of the canonical `Plan`; nothing is persisted. Confirming goes through the existing `POST /plans/{id}/mutations` (`add_transfer` / `edit_transfer`), extended with a compare-only price guard and a server-side selectability rule. The Explorer page gains a Planner mode selected by URL parameters; My Team mode is untouched.
+A read-only analysis service ranks and previews replacements for one player in one plan gameweek. It reuses, rather than re-implements: the candidate pool rules, `rank_replacement_candidates` (best-XI gain), the projection repositories, `evaluate_plan` (authoritative replay), and the acceptance rules inside `apply_intents`. Hypothetical transfers are evaluated on in-memory copies of a resolved planning context; nothing is persisted. Confirming goes through the existing `POST /plans/{id}/mutations` (`add_transfer` / `edit_transfer`), extended with a compare-only price guard and a server-side selectability rule. The Explorer page gains a Planner mode selected by URL parameters; My Team mode is untouched.
 
-**B. Duplicate Plan.** A single-transaction service locks the source plan, verifies revision and pending-edit state, remaps every internal identity in the canonical `Plan` with one pure function, allocates the `(option N)` name under a transaction-scoped advisory lock, and writes the copy with the existing `create` + `save_canonical` path (stored selling prices copied verbatim). The Plan page gets a `Duplicate Plan` control gated on the autosave coordinator.
+Three seams keep the design adaptable to Phase 004 without building it: (1) resolving the planning context is separate from analysing it, (2) analysis cannot write, (3) confirmation is a descriptor handed to the Planner's own writer. See "Separation of concerns and Phase 004 adaptability".
 
 ## Technical Context
 
@@ -20,7 +22,7 @@ Two independent capabilities on the existing Planner foundations, with **no data
 
 **Primary Dependencies**: Existing only: FastAPI 0.114.1, Pydantic 2.9.2, SQLAlchemy 2.0.34 + psycopg 3.2.1, Alembic (no new revision), Vitest 2, Testing Library, Playwright 1.46. **No new dependency.**
 
-**Storage**: PostgreSQL 16 (Docker Compose locally). **Schema unchanged**; Alembic head stays `c6f91a2d83b0`. Name allocation uses `pg_advisory_xact_lock` (Postgres-only, already the only supported database: JSONB columns).
+**Storage**: PostgreSQL 16 (Docker Compose locally). **Schema unchanged**; Alembic head stays `c6f91a2d83b0`. Read paths only; no new locks beyond the existing row locks.
 
 **Testing**: pytest for `packages/fpl_engine` and `apps/api` (guarded PostgreSQL integration via `TEST_DATABASE_URL`, `RUN_DB_TESTS=1`, isolated-schema fixtures such as `planner_session`); Vitest component tests; Playwright journeys following `.github/skills/ui-browser-verification`.
 
@@ -28,7 +30,7 @@ Two independent capabilities on the existing Planner foundations, with **no data
 
 **Project Type**: Web application in a pnpm/uv monorepo: `apps/web`, `apps/api`, `packages/fpl_engine`.
 
-**Performance Goals**: SC-014: candidate list within 3 s, preview within 2 s on a full-season dataset with an 8-gameweek plan (38-gameweek plan measured, not gated).
+**Performance Goals**: SC-011: candidate list within 3 s, preview within 2 s on a full-season dataset with an 8-gameweek plan (38-gameweek plan measured, not gated).
 
 **Constraints**: Authoritative rules only in `fpl_engine`; exact integer-tenths money; no writes on read paths; My Team mode behaviour and tests unchanged; single Planner writer; database safety rules in `AGENTS.md`.
 
@@ -40,14 +42,14 @@ Two independent capabilities on the existing Planner foundations, with **no data
 
 | Principle | Assessment | Evidence in this design |
 |---|---|---|
-| I. Domain correctness and boundaries | Pass | Legality, accounting, plan impact and remapping live in `fpl_engine` (pure, no FastAPI). The API layer supplies data and orchestration. The Explorer reuses the same acceptance logic as `apply_intents`; the browser only re-presents server results (FR-045). Selectability is enforced in the shared mutation path. |
+| I. Domain correctness and boundaries | Pass | Legality, accounting and plan impact live in `fpl_engine` (pure, no FastAPI). The API layer supplies data and orchestration. The Explorer reuses the same acceptance logic as `apply_intents`; the browser only re-presents server results (FR-045). Selectability is enforced in the shared mutation path. |
 | II. Human ownership | Pass | Significant choices are listed under "Decisions Requiring Approval". |
-| III. Small reviewable slices | Pass | Eight independently testable slices are derivable; duplication is independent of the Explorer. |
+| III. Small reviewable slices | Pass | Six independently testable slices (see "Delivery slices"); the context/analysis/commit seams are what make them separable. |
 | IV. Test at the owning layer | Pass | Test ownership table below. |
 | V. Independent verification | Pass | Verification gates in [quickstart.md](quickstart.md); `code-review` skill before completion; equivalence test between the read-only verdict and the real mutation. |
 | VI. Browser verification | Pass | Durable Playwright journeys at 1440 and 390 widths; isolated preview per the skill. |
 | VII. Safe database testing | Pass | Integration tests use `TEST_DATABASE_URL`, `ensure_test_database_url` and isolated schemas; read endpoints never write; no development-data mutation. |
-| VIII. No silent scope expansion | Pass with noted touches | Three small, justified edits to Phase 002 code are called out explicitly (coordinator `abandon`, shared departure-guard hook, plan-page header move). No Phase 004 work. |
+| VIII. No silent scope expansion | Pass with noted touches | Two small, justified edits to Phase 002 code are called out explicitly (coordinator `abandon`, shared departure-guard hook). Three light seams prepare for Phase 004; none implements it, and no speculative framework is added. |
 | IX. Acceptance criteria first | Pass | Governed by spec FR/SC; approach, assumptions and risks stated here. |
 | X. Final review and gates | Planned | `make lint typecheck test test-integration`, web build, browser journeys, final diff review. |
 
@@ -67,7 +69,6 @@ Two independent capabilities on the existing Planner foundations, with **no data
 | Scoring | `fpl_engine.rules.score_gameweek`, `chip_states` | none |
 | Persisting a transfer | `POST /plans/{id}/mutations`, `add_transfer`, `edit_transfer`, receipts, `PlanSaveCoordinator` | optional price-guard fields on the two intents; selectability check in `_capture`; coordinator `abandon()` |
 | Projection access | `ProjectionRunRepository`, `MyTeamProjectionRepository.list_player_fixture_projections_for_run` | optional `min_gameweek` and `max_gameweek` filter |
-| Persisting a whole plan | `PlanRepository.create`, `save_canonical`, `load_canonical` | `load_decision_sales`, family-name query, advisory-lock helper |
 | Explorer UI parts | `HorizonSelector`, `ProjectionRunBadge`, `OutgoingPlayerSelector`, `describeLegalityReasons`, `playingStatusWarning`, `SquadPlayerCard` (already has `transferHref`) | Planner-mode components under `components/transfers/planner/` |
 
 ### Data flow: Planner-mode Explorer
@@ -81,16 +82,17 @@ sequenceDiagram
   participant DB as PostgreSQL
   P->>X: /transfers?plan&gw&out
   X->>A: GET /plans/{id}/gameweeks/{gw}/transfers/{out}
-  A->>DB: load canonical plan (shared lock), then end the read transaction
+  A->>DB: resolve PlanningContext (load canonical plan, then end the read transaction)
+  Note over A: analysis below has read-only ports and no plan storage access
   A->>DB: pool, run, projections (gw..gw+4), team difficulty
   A->>E: evaluate_plan (baseline, once)
   A->>E: rank_replacement_candidates (best-XI)
   loop each pool candidate
     A->>E: assess on in-memory plan copy (no writes)
   end
-  A-->>X: candidates, plan impact, conflicts, run
+  A-->>X: planning_context ref, candidates, plan impact, conflicts, run
   X->>A: GET .../preview?player_in_id&projection_run_id
-  A-->>X: per-gameweek preview, commit descriptor, price guard
+  A-->>X: planning_context ref, per-gameweek preview, commit descriptor, price guard
   X->>X: coordinator.enqueue(add or edit transfer + guard)
   X->>A: POST /plans/{id}/mutations (existing)
   A->>E: apply_intents (authoritative), receipts, save_canonical
@@ -100,13 +102,39 @@ sequenceDiagram
 
 ### How hypothetical transfers are evaluated without modifying persisted plans
 
-1. **Read once, release the lock.** `PlanRepository.load_canonical` takes a shared row lock. The service ends its read transaction immediately after loading, so autosave writers are never blocked while candidates are computed. The response carries `plan.revision`; stale results are caught at confirm time by `expected_revision`.
+1. **Resolve once, release the lock.** The context resolver calls `PlanRepository.load_canonical`, which takes a shared row lock, and ends its read transaction immediately after loading, so autosave writers are never blocked while candidates are computed. The response carries the context's revision; stale results are caught at confirm time by `expected_revision`.
 2. **Immutable inputs.** `Plan`, `Boundary`, `GameweekDecision` and `TransferDecision` are frozen dataclasses. A candidate is `dataclasses.replace(plan, gameweeks=...)` with one extra (or replaced) `TransferDecision` built from the candidate's quote and a deterministic `uuid5` identity. No repository method is called with it; there are no receipts, no flush, no session writes. Tests assert the input plan is unchanged and that database row counts, `revision`, `updated_at` and My Team rows are identical before and after (SC-004).
 3. **The same operation the user will confirm.** The Explorer response includes the exact intent (`add_transfer` or `edit_transfer`) and the rule that picks it: if the outgoing player's ownership in the displayed gameweek was acquired by a decision in that same gameweek, replace that decision; otherwise add. The browser submits that descriptor, so the add-versus-edit rule exists once, server-side, and matches the existing inline picker.
 4. **Authoritative verdict, non-raising.** `validate_candidate` today evaluates before and after and raises at the first problem. It is split into (a) a pure function returning every introduced diagnostic and every new or worsened shortfall, and (b) the raising wrapper. `apply_intents` (the commit path) keeps calling the wrapper, so commit behaviour is unchanged. The Explorer calls (a) with a baseline evaluation computed once. `confirmable` is therefore true exactly when `apply_intents` would not reject the candidate. An equivalence test runs both over every pool candidate of reference plans (SC-003).
 5. **Why not call `apply_intents` per candidate.** It raises at the first rejection (hiding which gameweek conflicts and how many problems there are), re-evaluates the baseline each time, and returns no per-gameweek detail. The shared extraction gives the same rules without those limits.
 
 **Conflict classification.** From the candidate replay: a diagnostic or shortfall in the selected gameweek makes the candidate `unavailable`; a first diagnostic or shortfall at a later gameweek makes it `blocked_by_later_decision`, identifying that gameweek and (when present) the decision. Values are shown through the last valid gameweek: for a structural conflict at gameweek *c*, through *c-1* (no squad exists at *c*); for a financial conflict at *c*, through *c* (the shortfall is the explanation) and nothing after. A candidate being sold by another transfer in the same gameweek is detected up front (constructing that plan would raise `same_gameweek_round_trip`) and reported as `sold_this_gameweek`. No later decision is ever altered.
+
+### Separation of concerns and Phase 004 adaptability
+
+Phase 004 turns the linear plan into a scenario tree: several options per gameweek, each with one parent, immutable saved options, editable drafts, and a Transfer Explorer that targets an exact option and its inherited path. Phase 003 does not build any of this. It makes three deliberate, minimal choices so that Phase 004 changes the edges of the Explorer, not its core.
+
+1. **Context resolution is separate from analysis.** A small function `resolve_planning_context(plan_id, gameweek)` (in `services/plan_context.py`) is the only Explorer code that reads plan storage. It returns a plain frozen `PlanningContext`: a `ContextRef` (`plan_id`, `gameweek`, `revision`), the engine's linear `Plan` value for that context, player rule metadata for the plan's players, and the baseline `PlanEvaluation`. The analysis service takes a `PlanningContext`, never a plan id or repository. Phase 004's resolver would flatten the selected root-to-option path into the same linear `Plan` value; the analysis, ranking and impact code would not change. No interface, registry or plugin mechanism is introduced: it is one function and one dataclass.
+2. **Analysis cannot write.** `PlanTransferAnalysisService` is constructed only with read-only ports (player read, projection runs and rows, team difficulty). It has no plan repository, no session and no mutation service. Hypothetical evaluation uses `fpl_engine.planning.hypothetical` and `impact`, which take `Plan` and metadata values and return values. A service test builds a `PlanningContext` in memory and runs the whole analysis with no database (SC-013).
+3. **Confirmation is a descriptor, not a write.** The preview returns `commit.intent`, the compare-only `guard`, and the `planning_context` ref. The Explorer UI receives a single `commit` function prop (default implementation wraps `getPlanSaveCoordinator(plan).enqueue`). Phase 004 swaps that adapter for one that targets a draft option; the Explorer's state machine is unchanged.
+
+What is deliberately **not** done: no `Scenario`, `Option` or `Branch` types, no option identifiers in contracts, no abstraction over "plan" versus "option", no generalised repository interface, no feature flags. Engine functions already depend only on the canonical `Plan` value and `PlayerRuleData`, never on tables, so nothing needs to be moved.
+
+**What Phase 004 will need to adapt** (the review list for its specification stage):
+
+| Phase 003 component or contract | Why it changes in Phase 004 | Expected size |
+|---|---|---|
+| `services/plan_context.py` resolver | resolves an option and its path instead of a plan gameweek; flattens the path into a linear `Plan` | replace |
+| `ContextRef` in responses (`plan_id`, `gameweek`, `revision`) | gains option identity and a version token for the option or draft | additive field change |
+| Explorer routes `/plans/{id}/gameweeks/{gw}/transfers/...` and UI parameters `plan`, `gw` | address an option, not a gameweek of a linear plan | route and URL change |
+| Commit adapter (default: `PlanSaveCoordinator.enqueue`) and `PlanSaveCoordinator` | apply to a draft option or create a draft alternative; saved options are immutable | new adapter; coordinator semantics for drafts |
+| `commit.intent` kinds (`add_transfer`, `edit_transfer`) and add-versus-edit rule | the target is a draft option's decision set; "replace a transfer decided in this gameweek" becomes "within this option" | rule re-expressed |
+| Meaning of "later planned decisions", "plan end" and "assumed continuation" in `impact.py` and the preview | later decisions are those on the selected path's descendants; the end is the end of the selected path | definition change, code localized to the resolver and the impact horizon |
+| Planner return navigation (`?gw`, `highlight`) and gameweek selection | replaced by Previous GW and Next GW navigation along a selected option path, with exact option restore | UI change |
+| Departure guard hook, `abandon()` | reused; draft autosave state replaces plan-level save state | reuse |
+| Reference plans in tests | become path fixtures | fixture change |
+
+Reused as is: candidate pool and selectability rules, price guard, `rank_replacement_candidates`, `evaluate_plan` and the acceptance verdict, `hypothetical.py`, scoring and projection access, My Team mode.
 
 ### Plan impact and assumed continuation
 
@@ -136,33 +164,17 @@ Approach, in order:
 
 Correctness guards for any optimisation: the verdict-equals-`apply_intents` test, an optimised-equals-baseline test over all pool candidates of the reference plans, and the My Team regression suites.
 
-### Duplicate Plan: atomic copy, identity remapping, financial preservation, concurrent naming
-
-One service, one transaction (the router's session; a single commit; any exception rolls back everything, including the advisory lock):
-
-1. `lock_plan(source)` (`FOR UPDATE`): serialises against mutations of the source while copying.
-2. Refuse `foundation_state != ready` (409 `plan_not_ready`; nothing modified or initialised), a revision different from the caller's `expected_revision` (409 `revision_conflict`), and any `validated_pending` receipt still resumable at the current revision (409 `pending_edit_unresolved`), using the same resumability test as `PlanMutationService._pending` so there is one definition.
-3. `load_canonical(source)` plus the stored per-decision selling prices (`load_decision_sales`, a new read-only query).
-4. **Remap** with pure `fpl_engine.planning.clone.clone_plan`: one mapping from old to new UUID for every starting slot, ownership episode and transfer decision, applied to boundary players, boundary and per-gameweek lineup roles, transfer decisions (`outgoing_ownership_id`, `incoming_ownership_id`, `decision_id`) and `bank_assumptions` (UUIDs with no referent in the plan get fresh UUIDs too, so no identifier is shared). Revision 0. All values (prices in tenths, provenance, confirmations, observation source and time, chips, lineups, horizon, free transfers, bank) are copied verbatim. Receipts, mutation IDs, legacy snapshot rows and derived caches are not copied. Provenance `source` strings are copied verbatim: they are opaque labels, not lookup keys.
-5. **Name** under `pg_advisory_xact_lock(hashtextextended(family_base, 0))` taken just before reading family names, so concurrent duplications in a family queue; READ COMMITTED means the second sees the first's committed row. Pure `plan_naming` implements the spec rules (strip one trailing ` (option N)`, highest existing member plus one, exact comparison, shorten the base to fit 100 characters, advance past any collision).
-6. Create the plan row with `PlanRepository.create` (fills the legacy float columns exactly as creation does) and write the canonical copy with `save_canonical(..., initial_sales=<remapped stored sales>)` and an **empty evaluation**, so stored selling prices are copied verbatim and plans with financial shortfalls or blocked decisions copy faithfully (no re-pricing, no re-validation).
-7. In-transaction round-trip check: `load_canonical(new)` must equal the in-memory clone (order-insensitive for decisions); a mismatch raises and rolls back.
-8. The source row is never written: revision, `updated_at` and receipts are unchanged (SC-012).
-
-No schema change and no idempotency table (Q-4): single-flight in the UI plus the explicit unknown-outcome message.
-
 ### UI integration
 
 - **Routing.** `/transfers` renders either the existing `TransferExplorer` (no `plan` parameter, untouched) or a new `PlannerTransferExplorer` (when `plan` is present), chosen in a small wrapper used by `app/transfers/page.tsx`. Parameters: `plan`, `gw`, optional `out`, `h` (1, 3 or 5), `run`. See [contracts/ui-navigation.md](contracts/ui-navigation.md).
 - **Planner to Explorer.** Squad cards pass `transferHref` (the existing "Explore transfers" affordance); the gameweek header gets "Explore transfers for this gameweek". Immediately before navigating, the Planner records its gameweek in its own history entry (`?gw=`, `replaceState`) so browser Back restores it.
-- **Commit.** The Explorer obtains the plan's coordinator with `getPlanSaveCoordinator(plan)` and `enqueue`s the descriptor from the preview. States come from the coordinator snapshot: saving; saved (then navigate to `/plans/{id}?gw&highlight` with a one-shot notice); rejected (`prices_changed` triggers an automatic fresh preview, never an automatic resubmit); not saved (existing retry and check-status); conflict (new `abandon()`, then reload and re-preview; `revalidate()` is deliberately not offered because it would replay the old preview).
+- **Commit.** `PlannerTransferExplorer` takes a `commit` function prop. The default implementation obtains the plan's coordinator with `getPlanSaveCoordinator(plan)` and `enqueue`s the descriptor from the preview. States come from the coordinator snapshot: saving; saved (then navigate to `/plans/{id}?gw&highlight` with a one-shot notice); rejected (`prices_changed` triggers an automatic fresh preview, never an automatic resubmit); not saved (existing retry and check-status); conflict (new `abandon()`, then reload and re-preview; `revalidate()` is deliberately not offered because it would replay the old preview).
 - **Departure protection.** The existing effect in `PlanBoard` is extracted unchanged into a shared hook and used by both screens (FR-041).
-- **Plan page header.** `Back to plans` moves from the server page into `PlanBoard`'s header row so the right-aligned `Duplicate Plan` control can read coordinator state; markup and classes are preserved.
 - **Highlight and scroll.** `SquadPlayerCard` gains an optional highlighted state; `PlanBoard` honours `gw` and `highlight` on arrival only.
 
 ### Contracts
 
-See [contracts/planner-transfer-explorer-api.md](contracts/planner-transfer-explorer-api.md), [contracts/mutation-guard-and-selectability.md](contracts/mutation-guard-and-selectability.md), [contracts/duplicate-plan-api.md](contracts/duplicate-plan-api.md) and [contracts/ui-navigation.md](contracts/ui-navigation.md).
+See [contracts/planner-transfer-explorer-api.md](contracts/planner-transfer-explorer-api.md), [contracts/mutation-guard-and-selectability.md](contracts/mutation-guard-and-selectability.md) and [contracts/ui-navigation.md](contracts/ui-navigation.md).
 
 ## Testing Strategy (owning layer)
 
@@ -170,16 +182,15 @@ See [contracts/planner-transfer-explorer-api.md](contracts/planner-transfer-expl
 |---|---|---|
 | Non-raising verdict equals `apply_intents`; ordinary, Wildcard, Free Hit, Bench Boost, Triple Captain, first gameweek, FT 0, estimated basis, shortfall, same-gameweek replacement, downstream clash; inputs never mutated | `packages/fpl_engine/tests/test_planning_hypothetical.py` | domain |
 | Plan impact: roles per gameweek (start, bench, captain), chips, hit deltas, continuation after the final gameweek including Free Hit restoration and the unavailable-roles case, validity truncation | `test_planning_impact.py` | domain |
-| Clone: no shared identifier, equal evaluation modulo identifiers, bank-assumption remap, revision 0 | `test_planning_clone.py` | domain |
 | Existing ranking, single-transfer, rules and planning behaviour unchanged | existing suites | regression |
-| Explorer services: pool, selectability-unknown state, run pinning, partial coverage, unavailable states, plan-not-ready, My Team untouched | `apps/api/tests/plans/test_plan_transfer_explorer_service.py` and router test | service and router, fakes |
+| Context resolver: ready plan, legacy plan not ready, gameweek outside plan, blocked evaluation, lock released before return | `apps/api/tests/plans/test_plan_context.py` | service with fakes and guarded PostgreSQL |
+| Analysis service on an in-memory `PlanningContext` with read-only fakes (no database, no write capability): pool, selectability-unknown state, run pinning, partial coverage, unavailable states, plan impact, blocked candidates | `apps/api/tests/plans/test_plan_transfer_analysis_service.py` | service, fakes (SC-013) |
+| Router composition: resolver then analysis, error mapping, `planning_context` echo, My Team untouched | `apps/api/tests/plans/test_plan_transfers_router.py` | router, fakes |
 | Guard and selectability in mutations: `prices_changed`, not selectable, unknown, saved decisions not re-checked, digest includes guard | `apps/api/tests/plans/test_plan_services.py`, router tests | service and router |
-| Plan naming rules, truncation, gaps, renames | `apps/api/tests/plans/test_plan_naming.py` | pure unit |
-| Duplicate service and router: refusals, revision, pending receipt, legacy | `test_duplicate_plan_service.py`, router test | service and router |
-| Duplicate atomicity (injected failure leaves no rows), concurrency (two sessions), source unchanged (revision, `updated_at`, receipts), independence after edits, identifier disjointness, shortfall and blocked plans copy faithfully, Explorer read paths write nothing | `apps/api/tests/repositories/test_plan_duplicate_integration.py` | guarded PostgreSQL (`TEST_DATABASE_URL`, isolated schema) |
+| Explorer read paths write nothing (row counts, revision, `updated_at`, receipts, My Team rows unchanged); explorer-originated confirm followed by GET | `apps/api/tests/repositories/test_plan_transfer_explorer_integration.py` | guarded PostgreSQL (`TEST_DATABASE_URL`, isolated schema) |
 | Performance gate | guarded PostgreSQL, synthetic full-season data, opt-in | timing report |
-| Explorer wrapper, Planner-mode states, filters and sorting, preview rendering (saved versus assumed), commit state machine (deferred promises), duplicate control gating, header, highlight, coordinator `abandon`, shared guard hook | `apps/web/tests/transfers/`, `apps/web/tests/plans/` | component and unit |
-| Journeys: explore, preview, confirm, return; reload inside Explorer; blocked candidate; prices changed; duplicate, navigate, independent edit | `apps/web/tests/e2e/planner-transfer-workflow.spec.ts` | Playwright (mocked and guarded real-API), 1440 and 390 widths |
+| Explorer wrapper, Planner-mode states, filters and sorting, preview rendering (saved versus assumed), commit state machine driven through the `commit` prop with a fake adapter and with the real coordinator (deferred promises), highlight, coordinator `abandon`, shared guard hook | `apps/web/tests/transfers/`, `apps/web/tests/plans/` | component and unit |
+| Journeys: explore, preview, confirm, return; reload inside Explorer; blocked candidate; prices changed; save failure and conflict | `apps/web/tests/e2e/planner-transfer-workflow.spec.ts` | Playwright (mocked and guarded real-API), 1440 and 390 widths |
 | Independent review | `.github/skills/code-review` | before completion |
 
 ## Project Structure
@@ -197,10 +208,12 @@ specs/003-planner-transfer-workflow/
 ├── contracts/
 │   ├── planner-transfer-explorer-api.md
 │   ├── mutation-guard-and-selectability.md
-│   ├── duplicate-plan-api.md
 │   └── ui-navigation.md
 ├── checklists/requirements.md
 └── tasks.md                 # NOT created here (/speckit-tasks)
+
+specs/004-branching-scenario-planner/
+└── vision.md                # forward-looking product document; not part of this feature
 ```
 
 ### Source code (existing monorepo; additions marked +)
@@ -210,30 +223,25 @@ packages/fpl_engine/src/fpl_engine/
 ├── planning/
 │   ├── mutations.py         # extract non-raising verdict; validate_candidate unchanged in behaviour
 │   ├── hypothetical.py      # + candidate assessment on in-memory plan copies
-│   ├── impact.py            # + plan impact, continuation, hit deltas
-│   └── clone.py             # + identity remapping
+│   └── impact.py            # + plan impact, continuation, hit deltas
 └── transfers/candidate_pool.py   # extract incoming_selectability_exclusion
-packages/fpl_engine/tests/   # + test_planning_hypothetical.py, test_planning_impact.py, test_planning_clone.py
+packages/fpl_engine/tests/   # + test_planning_hypothetical.py, test_planning_impact.py
 
 apps/api/src/api/
-├── routers/plan_transfers.py      # + GET list and preview; registered in main.py
-├── routers/plans.py               # + POST /{plan_id}/duplicate
-├── schemas/plan_transfers.py      # + response models
-├── schemas/plans.py               # + guard fields on add/edit intents; duplicate models
-├── services/get_plan_transfer_explorer.py  # + list and preview service
-├── services/duplicate_plan.py     # + transactional copy
-├── services/plan_naming.py        # + pure naming rules
-├── services/plans.py              # selectability and price guard in _capture; resumable-pending probe
-├── repositories/plan_repository.py                # + load_decision_sales, family names, advisory lock
+├── routers/plan_transfers.py      # + GET list and preview; composes resolver then analysis; registered in main.py
+├── schemas/plan_transfers.py      # + response models (including the planning_context ref)
+├── schemas/plans.py               # + optional guard fields on add/edit intents
+├── services/plan_context.py       # + resolve_planning_context and PlanningContext (reads plan storage)
+├── services/plan_transfer_analysis.py  # + list and preview analysis (read-only ports only)
+├── services/plans.py              # selectability and price guard in _capture
 ├── repositories/my_team_projection_repository.py  # optional gameweek bounds
 └── repositories/squad_player_lookup_repository.py # selectability flags (defaulted)
 apps/api/tests/              # + plans/ and repositories/ cases listed above
 
 apps/web/src/
 ├── app/transfers/page.tsx                    # chooses mode wrapper
-├── components/transfers/planner/             # + explorer, banner, table, preview
-├── components/plans/plan-board.tsx           # header row, Duplicate button, explore links, gw and highlight
-├── components/plans/duplicate-plan-button.tsx  # +
+├── components/transfers/planner/             # + explorer (commit prop), banner, table, preview
+├── components/plans/plan-board.tsx           # explore links, gw and highlight on arrival
 ├── components/team/squad-player-card.tsx     # optional highlight
 ├── lib/api.ts, plan-save-coordinator.ts      # client functions, guard fields, abandon()
 └── lib/use-departure-guard.ts                # + extracted hook
@@ -244,7 +252,7 @@ apps/web/tests/              # + transfers/, plans/ and e2e/ cases listed above
 
 ## Dependencies, Risks and Trade-offs
 
-**Dependencies**: Phase 002 canonical model and mutation contract (stable); existing projection runs (`component_v3`); existing coordinator and departure-guard code; PostgreSQL advisory locks.
+**Dependencies**: Phase 002 canonical model and mutation contract (stable); existing projection runs (`component_v3`); existing coordinator and departure-guard code.
 
 | Risk | Likelihood / impact | Mitigation |
 |---|---|---|
@@ -255,23 +263,20 @@ apps/web/tests/              # + transfers/, plans/ and e2e/ cases listed above
 | Coordinator `revalidate` would replay a stale preview | Medium / High | Explorer never calls it; add `abandon()` with tests |
 | Selectability check makes the inline picker stricter | Medium / Low | Approved (Q-3); existing rejection panel shows the reason; saved decisions never re-checked |
 | Free-Hit-final continuation roles illegal for the restored squad | Low / Low | reported unavailable, never repaired |
-| Duplicate name races | Medium / Medium | advisory lock; two-session integration test |
-| Lost duplicate response creates an extra copy | Low / Low | accepted (Q-4); explicit message, no auto-retry |
-| Plan page header move breaks existing tests | Medium / Low | update tests in the same slice; markup preserved |
+| Phase 004 needs more rework than expected | Medium / Medium | three small seams (resolver, read-only analysis, commit descriptor); adaptation list above feeds Phase 004's specification; no speculative abstractions |
 | Projection run differs between Planner page and Explorer | Low / Medium | Explorer discloses and pins its run; noted, not fixed |
 
-**Trade-offs**: new read services instead of overloading `apply_intents` (clearer, small extraction); verbatim stored prices on copy instead of re-pricing (faithful, relies on the round-trip check); no durable idempotency (simpler, per Q-4); synthetic dataset for the gate (safe, may differ from real data).
+**Trade-offs**: new read services instead of overloading `apply_intents` (clearer, small extraction); a resolver function and `commit` prop as seams instead of waiting for Phase 004 (small cost now, avoids reworking the Explorer core later) while declining any branching-shaped types (avoids guessing at a design that Phase 004's specification will settle); synthetic dataset for the gate (safe, may differ from real data).
 
 ## Decisions Requiring Approval
 
 1. **Extend the existing mutation contract** (additive, optional): compare-only price guard on `add_transfer` and `edit_transfer`, and a `prices_changed` rejection (HTTP 422 with a diagnostic code). Alternative: a new Explorer-only commit endpoint, rejected as a second writer.
-2. **Touch three Phase 002 areas**: add `PlanSaveCoordinator.abandon()`, extract the departure-guard effect into a shared hook, move the plan header into `PlanBoard`.
+2. **Touch two Phase 002 areas**: add `PlanSaveCoordinator.abandon()` and extract the departure-guard effect into a shared hook.
 3. **Selectability scope detail**: enforce when a transfer is added or its incoming player changes; an `edit_transfer` that leaves the incoming player unchanged is not re-checked.
 4. **Conflict display rule**: a structural conflict shows values through the previous gameweek; a financial conflict shows through the conflicting gameweek and nothing later; a Free-Hit-final continuation with illegal roles is reported unavailable.
 5. **Performance evidence**: gate on a synthetic full-season dataset in the guarded test database; optionally also a read-only timing run against development data (your call).
-6. **Postgres advisory lock** for naming (Postgres-specific by design).
-7. **Read-endpoint locking**: end the read transaction right after loading the plan so autosave is never blocked.
-8. **Copy semantics**: stored selling prices and provenance labels copied verbatim; no re-evaluation.
+6. **Read-endpoint locking**: end the read transaction right after the planning context is resolved so autosave is never blocked.
+7. **Phase 004 seams**: the `PlanningContext` resolver function, a read-only analysis service, the `planning_context` ref in responses, and the `commit` prop on the Explorer. Alternative: build none and accept more rework in Phase 004; or build a generic scenario abstraction now (rejected as speculative).
 
 ## Complexity Tracking
 
@@ -282,3 +287,12 @@ No constitution violations. No new abstractions beyond three pure engine modules
 - Phase 0 research: [research.md](research.md), no unresolved clarifications.
 - Phase 1 design: [data-model.md](data-model.md), [contracts/](contracts/), [quickstart.md](quickstart.md).
 - Phase 2 tasks: not started (next command: `/speckit-tasks`).
+
+## Delivery slices (input for `/speckit-tasks`)
+
+1. **Engine analysis**: non-raising verdict extraction, `hypothetical.py`, `impact.py`, selectability rule extraction; domain tests including verdict-equals-`apply_intents`.
+2. **Mutation guard and selectability**: optional guard fields, `prices_changed`, `player_not_selectable` / `selectability_unknown`; service and router tests.
+3. **Context resolver, analysis service and API**: `plan_context.py`, `plan_transfer_analysis.py`, router, schemas; no-database analysis tests; guarded no-write integration test; performance gate.
+4. **Explorer UI (Planner mode)**: wrapper, explorer with `commit` prop, banner, preview, table; coordinator `abandon()`, shared departure-guard hook; Planner explore links, `gw` and highlight on arrival; component tests and Playwright journeys.
+5. **Search, filter, sort and fixtures** for candidates.
+6. **Hardening**: lint, typecheck, full tests, guarded integration, browser verification at 1440 and 390, independent review, final diff review.

@@ -1,6 +1,6 @@
 # Phase 003 Research
 
-Date: 2026-10-28. Source of intent: [spec.md](spec.md) (Q-1 to Q-8 resolved). Evidence is source inspection of the repository plus one throwaway pure-Python micro-benchmark (not committed). Nothing was run against any database. No `NEEDS CLARIFICATION` remains.
+Date: 2026-10-28 (revised after the Phase 003 / Phase 004 split). Source of intent: [spec.md](spec.md) (active clarifications Q-1 to Q-3 and Q-6 to Q-8 resolved; Q-4 and Q-5 withdrawn with Duplicate Plan). The earlier Duplicate Plan research (transactional copy, identity remapping, advisory-lock naming, verbatim stored prices) was removed from this phase and survives only in Git history (commit `a3c5144`). Evidence is source inspection of the repository plus one throwaway pure-Python micro-benchmark (not committed). Nothing was run against any database. No `NEEDS CLARIFICATION` remains.
 
 Format: **Decision**, **Rationale**, **Alternatives considered**.
 
@@ -112,30 +112,35 @@ A first profile showed the optimiser dominating ranking (two `optimise_lineup` c
 
 **Alternatives.** An Explorer-private save path (second writer). Duplicating the guard code (drift).
 
-## 13. Duplicate Plan
+## 13. Test data and safety
 
-**Decisions and rationale.**
-
-- **One transaction, source locked.** `FOR UPDATE` on the source prevents a concurrent mutation between checks and copy, and is released at commit or rollback.
-- **Reuse the proven writers.** `PlanRepository.create` fills the non-null legacy float columns exactly as creation does; `save_canonical` writes starting players, gameweeks, lineups and decisions. Passing an empty evaluation plus remapped stored sales copies saved selling prices verbatim and works for plans with shortfalls or blocked decisions (`save_canonical` otherwise raises on an unevaluated new sale).
-- **Identity remapping as a pure function.** Slot, ownership and decision identities appear in lineups, boundary players, transfer decisions and `bank_assumptions`; one old-to-new map applied everywhere keeps the copy internally consistent and disjoint from the source. UUIDs per plan are unique by constraint, but `load_canonical` and `Plan.__post_init__` assume plan-local identity, and the client binds edits to `source_decision_id`, so sharing identifiers across plans would be fragile and violates FR-058.
-- **Provenance text left verbatim.** Rebased plans store source labels such as `decision:<uuid>@...` referring to decisions removed from that plan; they are never looked up, so rewriting adds risk without benefit.
-- **Revision 0, no receipts.** Receipts are keyed `(plan_id, mutation_id)` and tied to revisions; copying them could replay or collide.
-- **Pending-edit detection.** Reuse `PlanMutationService._pending`'s resumability test (same base revision, evaluator version and rule fingerprint) so "resumable" has one definition; stale receipts do not block.
-- **Names.** Pure rules in `plan_naming` plus `pg_advisory_xact_lock(hashtextextended(base, 0))` before reading family names. No unique index (no schema change); renames remain free-form.
-- **No idempotency key** (Q-4). Single-flight client guard, no automatic retry, explicit unknown-outcome message.
-- **Round-trip check** inside the transaction guards the persistence mapping.
-
-**Alternatives.** Rebuild the copy from My Team (forbidden by the spec). Copy rows with SQL `INSERT ... SELECT` (bypasses the domain model and the remap, harder to test). Re-evaluate and re-price on copy (not verbatim). A unique constraint on names or a copy-lineage column (schema change, not needed).
-
-## 14. Test data and safety
-
-**Decision.** Integration tests use the existing isolated-schema fixtures on the `_test` database (`planner_session`, `ensure_test_database_url`), including two concurrent sessions for naming. The performance gate generates a synthetic full-season dataset (about 600 players, 20 clubs, one projection run) in an isolated schema; an optional read-only timing run against development data is offered for approval, never mutating it.
+**Decision.** Integration tests use the existing isolated-schema fixtures on the `_test` database (`planner_session`, `ensure_test_database_url`). The performance gate generates a synthetic full-season dataset (about 600 players, 20 clubs, one projection run) in an isolated schema; an optional read-only timing run against development data is offered for approval, never mutating it.
 
 **Rationale.** AGENTS.md and constitution VII. Trimmed repository fixture JSON is not representative of pool size.
 
-## 15. Schema and dependencies
+## 14. Schema and dependencies
 
 **Decision.** No Alembic revision, no new dependency, no new service or container.
 
 **Rationale.** Everything needed is derivable from the canonical tables; advisory locks are built into PostgreSQL 16.
+
+## 15. Phase 004 adaptability (Branching Scenario Planner)
+
+Phase 004's product direction is captured in [../004-branching-scenario-planner/vision.md](../004-branching-scenario-planner/vision.md). Phase 003 does not implement it; this section records the few design choices made to limit foreseeable rework, and the ones deliberately declined.
+
+**Decision.** Three seams, each one function, one dataclass or one prop:
+
+1. `resolve_planning_context(plan_id, gameweek) -> PlanningContext` (plan storage access, the only Explorer code that reads it) separated from a `PlanTransferAnalysisService` that takes a `PlanningContext`. The context holds a `ContextRef` (plan, gameweek, revision), the engine's linear `Plan`, player rule metadata and the baseline `PlanEvaluation`.
+2. The analysis service is constructed from read-only ports only, so analysis cannot write by construction; engine functions take and return values.
+3. The preview returns a commit descriptor (`commit.intent`, `guard`, `expected_revision`) and the `planning_context` ref; the Explorer UI receives a `commit` function prop whose default wraps the existing save coordinator.
+
+**Rationale.** The engine already depends only on the canonical `Plan` value and `PlayerRuleData`. In Phase 004 a selected path from the common start to an option can be flattened into that same linear value, so hypothetical evaluation, ranking, plan impact and the acceptance verdict are reusable unchanged. The parts that must change are exactly the edges: how a context is resolved, how it is addressed (routes, URL, revision token) and where a confirmation is written (a draft option, never an immutable saved option). Making those edges explicit now is cheap; retrofitting them later would mean separating analysis from persistence inside a working feature.
+
+**Alternatives considered.**
+- *Build nothing extra and refactor in Phase 004*: smallest Phase 003, but Explorer services would reach into plan storage and writers, so Phase 004 would have to untangle them.
+- *Generalised `Scenario`/`Option` abstraction now*: speculative; the vision leaves open questions (path flattening, continuation semantics, draft addressing) that Phase 004's specification should settle first.
+- *Repository interface or dependency-injection framework for context sources*: unnecessary indirection; a function parameter is enough.
+- *Option identifiers in the contract now*: would freeze guesses about Phase 004's identity model.
+
+**Known adaptation points** (see the table in [plan.md](plan.md)): the resolver, the `planning_context` ref, Explorer routes and URL parameters, the commit adapter and coordinator semantics for drafts, the definition of "later planned decisions" and "plan end" for continuation, Planner navigation (return context becomes option-aware), and reference fixtures.
+

@@ -1,21 +1,26 @@
 # Phase 003 Data Model
 
-Design only. **No persisted schema change**: no table, column, index, constraint or Alembic revision is added. Everything below is either an existing persisted structure, read unchanged, or an in-memory value that is computed per request and never stored.
+Design only (revised after the Phase 003 / Phase 004 split; plan duplication structures were removed and survive only in Git history, commit `a3c5144`). **No persisted schema change**: no table, column, index, constraint or Alembic revision is added. Everything below is either an existing persisted structure, read unchanged, or an in-memory value that is computed per request and never stored.
 
 ## 1. Persisted structures used (unchanged)
 
 | Structure | Used for | Notes |
 |---|---|---|
-| `plans` | source and new plan rows | `revision`, `foundation_state`, `name` (100 chars, not unique), legacy float `initial_bank` and `initial_free_transfers` (non-null) |
-| `plan_starting_players` | boundary squad, per-plan unique `slot_id`, `ownership_id`, `player_id` | copied with remapped identifiers |
-| `plan_gameweeks` | `planned_chip`, `slot_lineup` JSONB | copied; lineups reference slot identifiers |
-| `plan_transfer_decisions` | transfers with saved prices | unique per gameweek on `decision_id`, outgoing and incoming player, incoming ownership; `selling_price_tenths` materialisation copied verbatim |
-| `plan_mutations` | receipts | read only for the pending-edit check; never copied |
+| `plans` | `revision`, `foundation_state`, horizon, boundary fields | read by the context resolver; never written by the Explorer read paths |
+| `plan_starting_players` | boundary squad (slot, ownership, player, purchase price, provenance) | read |
+| `plan_gameweeks` | `planned_chip`, `slot_lineup` JSONB | read |
+| `plan_transfer_decisions` | transfers with saved prices | read; written only by the existing mutation path when a transfer is confirmed |
+| `plan_mutations` | receipts | written only by the existing mutation path |
 | `players`, `teams`, `projection_runs`, `projections`, `fixtures` | pool, metadata, projections, fixtures | read only |
 
-Plan-local identifier uniqueness is enforced by constraints and assumed by `Plan.__post_init__`; identifiers are not constrained across plans, which is why a copy could technically reuse them but must not (see section 4).
+The Explorer read paths write nothing. Confirmation uses the existing mutation endpoint and tables exactly as the Planner's inline picker does today.
 
 ## 2. Engine values (new, in memory, frozen dataclasses)
+
+### `ContextRef` and `PlanningContext`
+`ContextRef`: `plan_id`, `gameweek`, `revision`. It is echoed in every Explorer response as `planning_context` and identifies what a preview was computed for.
+
+`PlanningContext` (frozen, in memory, produced by `resolve_planning_context` and consumed by analysis): `ref` (`ContextRef`), `plan` (the engine's linear `Plan` for this context), `metadata` (player rule data for the plan's players), `baseline` (`PlanEvaluation`), and the selected gameweek's evaluated squad and accounting taken from the baseline. It holds no repository, session or connection. Phase 004 is expected to produce the same value by flattening a selected option path; no option, branch or scenario types exist in Phase 003.
 
 ### `CandidateQuote`
 `player_id`, `outgoing_market_tenths`, `incoming_price_tenths`. Built from latest stored prices (`exact_tenths`), identical to what `PlanMutationService._capture` will capture at commit.
@@ -44,9 +49,6 @@ State precedence: a conflict at the selected gameweek yields `unavailable`; othe
 ### `PlanImpact`
 `by_gameweek: tuple[GameweekImpact, ...]`; `totals[horizon]` for horizon 1, 3, 5 with `saved_plan`, `assumed_continuation` (each `None` when no available gameweek of that basis), `valid_through_gameweek`; `hit_change` and `net_saved_plan = saved_plan - hit_change` per horizon. Saved and assumed totals are never summed.
 
-### `ClonedPlan`
-`plan` (new `Plan`, revision 0), `id_map` (old UUID to new UUID, test-visible), `sales` (new decision id to saved selling price tenths).
-
 ## 3. Validity truncation
 
 Let *c* be the first conflict gameweek (selected gameweek included).
@@ -59,36 +61,7 @@ Let *c* be the first conflict gameweek (selected gameweek included).
 
 `valid_through_gameweek` is computed once per candidate and applied to accounting, plan impact and consequences. Best-XI gain is a static-squad measure independent of later decisions and is always shown (FR-025, FR-016).
 
-## 4. Identity remapping (`clone_plan`)
-
-| Identifier | Where it appears | Treatment |
-|---|---|---|
-| `slot_id` | `Boundary.players[*]`, `Boundary.lineup[*]`, every `GameweekDecision.lineup[*]` | one new UUID per boundary slot, applied to all |
-| `ownership_id` | `Boundary.players[*]`, `TransferDecision.outgoing_ownership_id`, `TransferDecision.incoming_ownership_id`, `Boundary.bank_assumptions` | one new UUID per distinct old value; values without a referent in the plan (possible in `bank_assumptions` after a rebase) also get fresh UUIDs |
-| `decision_id` | `TransferDecision.decision_id`, saved sales map | one new UUID per decision |
-| `PurchaseProvenance.source` | boundary players | copied verbatim (opaque label; may mention removed decisions) |
-| everything else | prices (tenths), confirmations, bank, free transfers, chips, used chips, FH19 flag, origin, horizon, observation source and time, origin tags | copied verbatim |
-| `revision` | `Plan.revision` | 0 |
-| `name` | `Plan.name` | allocated (section 5) |
-
-Invariants (tested): the set of old UUIDs and the set of new UUIDs are disjoint; every reference in the copy resolves within the copy; `evaluate_plan(copy)` equals `evaluate_plan(source)` after mapping identifiers back; plan-level constructors (`Plan.__post_init__`) pass without special cases.
-
-## 5. Naming algorithm
-
-Inputs: source name, existing plan names (from a prefix query taken under the advisory lock).
-
-1. `s = name.strip()`; `base = s` with one trailing ` (option N)` removed when `N` is a whole number >= 2 without leading zeros.
-2. Members of the family: names equal to `base` (option 1) or `base + " (option N)"` with the same `N` rule. Exact, case-sensitive comparison.
-3. `n = max(N over members, 1) + 1`.
-4. Candidate = `fit(base, n)`: if `len(base) + len(" (option n)") > 100`, shorten `base` (then rstrip whitespace) so the whole name is at most 100 characters; the suffix is never shortened.
-5. While the candidate equals any existing name, `n += 1` and recompute.
-6. Lock key: `"plan-name-family:" + base`.
-
-Examples: `{"My Plan"}` gives `My Plan (option 2)`; `{"My Plan","My Plan (option 2)","My Plan (option 3)"}` gives `(option 4)`; after deleting `(option 3)` gives `(option 3)`; after deleting only `(option 2)` gives `(option 4)`; source `My Plan (option 3)` with no `My Plan` present gives `My Plan (option 4)` when option 3 is the highest. A renamed original (no longer matching the base) is not a member.
-
-Known edge (accepted): for names whose base is shortened, later duplicates compute their family from the shortened base, so the original long-named plan is not counted; uniqueness is still guaranteed by step 5.
-
-## 6. Client state (Planner-mode Explorer)
+## 4. Client state (Planner-mode Explorer)
 
 States: `loading plan` → `choose outgoing` (no `out`) or `loading candidates` → `ready` ⇄ `previewing (loading/ready/error/unavailable)` → `confirming` (coordinator saving) → `saved` (navigate) | `rejected` | `not saved` | `conflict`.
 
@@ -98,9 +71,7 @@ Transitions of note:
 - Any change of outgoing player or horizon cancels in-flight requests and ignores late responses.
 - Leaving while `confirming` or `not saved` triggers the departure guard.
 
-Duplicate control states are the table in the spec; transitions: `enabled` → `duplicating` → `navigated` | `error (known)` | `unknown outcome` (control re-enabled with explicit message and a link to the Plans list).
-
-## 7. Validation rules carried from the spec
+## 5. Validation rules carried from the spec
 
 - Money is integer tenths end to end in Planner mode; the browser formats £m only.
 - Horizon gameweeks are `N..N+h-1` limited to covered projections; never zero-filled for gameweeks the run does not cover.

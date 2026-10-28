@@ -31,7 +31,7 @@ Applied inside the shared mutation path (`_capture`), so it covers the Explorer 
 | `add_transfer` | incoming player |
 | `edit_transfer` that changes `incoming_player_id` | the new incoming player |
 | `edit_transfer` that leaves the incoming player unchanged | not checked |
-| replay of saved decisions (GET, other mutations, duplication) | never checked |
+| replay of saved decisions (GET, other mutations) | never checked |
 
 Source of truth: the imported `can_select` and `can_transact` flags through the pure `incoming_selectability_exclusion` rule (same precedence as My Team: known non-selectable, then unknown).
 

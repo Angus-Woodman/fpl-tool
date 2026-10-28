@@ -1,6 +1,6 @@
 # Planner Transfer Explorer API Contract
 
-Two read-only endpoints. Neither writes data, creates receipts, or reads or writes My Team. Money fields named `*_tenths` are integers (50 = £5.0m); points are floats; gameweeks are 1-38. Existing My Team endpoints (`/my-team/transfers/...`) are unchanged.
+Two read-only endpoints. Neither writes data, creates receipts, or reads or writes My Team. Internally each request first resolves a planning context (plan storage access) and then analyses it with read-only dependencies; the contract exposes only the context's identity, as `planning_context`, so that a later phase can change how contexts are addressed without changing how analysis results are shaped. Money fields named `*_tenths` are integers (50 = £5.0m); points are floats; gameweeks are 1-38. Existing My Team endpoints (`/my-team/transfers/...`) are unchanged.
 
 ## GET /plans/{plan_id}/gameweeks/{gameweek}/transfers/{player_out_id}
 
@@ -16,6 +16,7 @@ Query:
 ### 200 response
 
 ```text
+planning_context: { plan_id, gameweek, revision }                       # what this response was computed for
 plan: { plan_id, name, revision, start_gameweek, end_gameweek, gameweek, chip, evaluator_version }
 projection: {
   model_version, run_id, generated_at, newer_run_available,
@@ -85,7 +86,7 @@ Query: `player_in_id` (required), `projection_run_id` (recommended; same rules a
 ### 200 response
 
 ```text
-plan, projection, accounting_before, outgoing              # as above
+planning_context, plan, projection, accounting_before, outgoing   # as above
 candidate: { player_id, web_name, team_short_name, position, status, price_tenths }
 state, reasons, conflict, valid_through_gameweek           # as for a candidate
 confirmable: bool                                          # true only when state == "available"
@@ -93,7 +94,7 @@ commit: {
   intent: { kind: "add_transfer", gameweek_number, outgoing_player_id, outgoing_ownership_id, incoming_player_id }
         | { kind: "edit_transfer", decision_id, incoming_player_id },
   guard: { expected_outgoing_market_tenths, expected_incoming_price_tenths },
-  expected_revision: int
+  expected_revision: int                                   # equals planning_context.revision
 }
 gameweeks: [ {
   gameweek, basis: "saved_plan" | "assumed_continuation", valid: bool, chip,
@@ -112,12 +113,12 @@ best_xi: { gain_by_horizon: { "1","3","5": float }, direct_xpts_difference: floa
 Semantics:
 
 - Preview of an `unavailable` or `blocked_by_later_decision` candidate returns 200 with `confirmable: false`, the reasons or conflict, and `gameweeks` only through `valid_through_gameweek`; later entries are `valid: false` with `reason: "beyond_valid_range"` and no values. (Same pattern as My Team, where an illegal preview is a normal 200.)
-- `commit.intent` is exactly what the browser submits to `POST /plans/{plan_id}/mutations`; `commit.guard` is submitted with it (see [mutation-guard-and-selectability.md](mutation-guard-and-selectability.md)). The browser does not decide add versus edit.
+- `commit.intent` is exactly what the browser submits, through the Planner's own writer, to `POST /plans/{plan_id}/mutations`; `commit.guard` is submitted with it (see [mutation-guard-and-selectability.md](mutation-guard-and-selectability.md)). The browser does not decide add versus edit.
 - A candidate that is not in the pool (owned, wrong position, non-selectable) is 422 `player_not_in_candidate_pool` (same code family as My Team preview).
 - Same error table as the list endpoint, plus 404 `player_not_found`.
 
 ## Non-functional
 
 - No database writes; the read transaction on the plan is ended immediately after the plan is loaded.
-- Target: list within 3 s and preview within 2 s on the representative dataset (SC-014).
+- Target: list within 3 s and preview within 2 s on the representative dataset (SC-011).
 - Responses are deterministic for a given plan revision, run and price data.

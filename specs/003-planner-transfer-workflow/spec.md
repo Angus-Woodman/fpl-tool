@@ -1,12 +1,12 @@
-# Feature Specification: Planner Transfer Workflow
+# Feature Specification: Planner-aware Transfer Explorer
 
 **Feature Branch**: `feature/planner-transfer-workflow`
 
 **Created**: 2026-10-28
 
-**Status**: Draft (all clarifications Q-1 to Q-8 resolved; ready for `/speckit-plan`)
+**Status**: Draft, revised 2026-10-28 after the Phase 003 / Phase 004 split (all active clarifications resolved)
 
-**Input**: User description: "Phase 003 connects the Transfer Explorer and the Planner, and adds plan duplication. (A) Let a manager explore, compare and select transfers for a particular gameweek within an existing plan, using that plan's hypothetical squad, bank, selling prices, free transfers, chips and future-gameweek projections instead of their actual My Team, then confirm the transfer into that Planner gameweek through the established Planner mutation system and return to the plan with the consequences for later gameweeks recalculated. My Team's Transfer Explorer must keep working unchanged. (B) Add a Duplicate Plan action on the individual Plan page that creates an independent, fully saved copy of the plan's canonical state, named with an `(option N)` convention, so alternative transfer strategies can be compared. Out of scope: broader UI/UX redesign (Phase 004), historical plan evaluation against actual results (Phase 005), projection-model changes, multi-gameweek optimisation or automated replanning, and historical My Team reconstruction."
+**Input**: User description: "Phase 003 connects the Transfer Explorer and the Planner. Let a manager explore, compare and select transfers for a particular gameweek within an existing plan, using that plan's hypothetical squad, bank, selling prices, free transfers, chips and future-gameweek projections instead of their actual My Team, then confirm the transfer into that Planner gameweek through the established Planner mutation system and return to the plan with the consequences for later gameweeks recalculated. My Team's Transfer Explorer must keep working unchanged. Phase 003 works on the existing linear Planner. Out of scope: the Phase 004 Branching Scenario Planner (multiple options per gameweek, scenario tree, draft and saved options; see [../004-branching-scenario-planner/vision.md](../004-branching-scenario-planner/vision.md)), plan duplication (withdrawn, see Clarifications), broader UI/UX redesign, historical plan evaluation against actual results, projection-model changes, multi-gameweek optimisation or automated replanning, and historical My Team reconstruction."
 
 Supporting evidence for every statement in **Background** is in [current-state-assessment.md](current-state-assessment.md). That file also holds the risk register and the suggested implementation slices; this specification stays at the level of user-visible behaviour and domain rules.
 
@@ -17,7 +17,6 @@ This section is context, not a requirement.
 - **Transfer Explorer** serves only the saved My Team squad. Its squad, bank and free transfers come from My Team; replacements are ranked by projected team gain over 1, 3 and 5 gameweeks using the latest `component_v3` projection run; the horizon starts at the first gameweek that has projections, not at a chosen gameweek; selling price is approximated as current market price and labelled as such; applying a transfer rewrites the saved My Team squad.
 - **Planner** (Phase 002) holds one independent, revisioned canonical state per plan (starting boundary, per-gameweek decisions, saved price assumptions). Squads, banks, free transfers, hits, chip availability and financial status are derived by replay. All changes to an existing plan go through one guarded mutation operation with revisions, retry identity, and a plan-scoped autosave coordinator.
 - **Planner transfers today** are made through a small inline picker on a squad card. It lists at most 50 available players per position by descending price, has no search, no projections and no fixtures, and the choice of gameweek lives only in the Planner page's local state.
-- **Plan lifecycle**: plans are created from My Team, listed, renamed, resized and deleted. There is no way to copy one. Plan names are not unique and are limited to 100 characters.
 - Plans created before Planner Foundations that have not been initialised are visible but read-only.
 
 The two workflows are not connected: the Explorer cannot be told about a plan, and the Planner cannot hand a player or gameweek to the Explorer.
@@ -31,14 +30,11 @@ Resolved by the product owner:
 - Q: What does "projected gain" mean in Planner mode? (Q-1) → A: Rank by the existing best-XI projected gain, and separately display the actual impact on the plan's current lineup. See FR-023, FR-029.
 - Q: When a candidate clashes with a later planned decision in the same plan, what does the Explorer do? (Q-2) → A: The candidate stays visible and available for exploration and preview; the affected gameweek is identified and the reason it cannot currently be committed is explained; Confirm is disabled. No automatic or guided repair is built into the Explorer. See FR-016, FR-030.
 - Q: Is incoming-player selectability enforced only when filtering the Explorer, or authoritatively? (Q-3) → A: Authoritatively, through the shared Planner mutation path, for new or edited transfers, without retroactively invalidating saved decisions. See FR-012.
-- Q: Must a lost-response retry of Duplicate Plan be exactly-once? (Q-4) → A: No. No database migration solely for duplication idempotency; uncertain outcomes are handled explicitly and accidental repeated requests are prevented. See FR-056.
-- Q: After copies are deleted, which option number is used next? (Q-5) → A: The highest option number among currently existing plans in the same family, plus one; numbers freed by deletion may be reused; no numbering history is persisted. See FR-049, naming rule 3.
-- Accepted defaults: duplication is blocked while saves are pending or failed; legacy plans awaiting initialisation are refused and not initialised; the Duplicate Plan control appears only on the individual plan page; no projection model selector is introduced.
-
 - Q: For which gameweeks is the plan impact measured when a horizon spans several gameweeks? (Q-6) → A: Option B. Each gameweek of the horizon that the saved plan covers uses the plan's actual saved squad, lineup, bench and captaincy decisions for that gameweek. Horizon gameweeks beyond the plan's end use a hypothetical continuation of the plan's final state (the final gameweek's squad and lineup roles after the transfer and all later planned decisions, with Free Hit restoration), visibly distinguished as assumed and never implying the plan has decisions beyond its horizon. Plan impact reflects the transfer's valid consequences, not a raw comparison of two players' projections, and the best-XI gain ranking is preserved separately. See FR-023, FR-025.
 - Q: If relevant market prices change between preview and confirmation, what happens? (Q-7) → A: Option A. The confirmation is rejected and a refreshed preview is required; different financial assumptions are never accepted silently. See FR-033.
-- Q: What response times are acceptable for the candidate list and preview? (Q-8) → A: Option A. Candidate list within 3 seconds and an individual preview within 2 seconds on the representative local dataset, with loading states; these are measurable targets, not a licence for premature optimisation. See SC-014.
+- Q: What response times are acceptable for the candidate list and preview? (Q-8) → A: Option A. Candidate list within 3 seconds and an individual preview within 2 seconds on the representative local dataset, with loading states; these are measurable targets, not a licence for premature optimisation. See SC-011.
 - Confirmed: the plan-impact column appears in the candidate list as well as the preview; for blocked candidates, valid information is shown up to the first downstream conflict, the affected gameweek and decision are identified, and dependent later values are not presented as valid; later planned decisions are never altered or repaired automatically.
+- **Scope split (2026-10-28).** The previously drafted Duplicate Plan feature is withdrawn from Phase 003 and is not implemented here. Its decisions (Q-4: no migration solely for duplication idempotency; Q-5: highest existing option number plus one, deleted numbers reusable) are retained only as history in Git (commit `a3c5144`) and are not active requirements. Q-4 and Q-5 are therefore withdrawn; their identifiers are not reused. The Branching Scenario Planner is Phase 004, captured in [../004-branching-scenario-planner/vision.md](../004-branching-scenario-planner/vision.md); this phase only keeps its architecture adaptable (FR-047, FR-048).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -46,7 +42,7 @@ Resolved by the product owner:
 
 A manager viewing gameweek 7 of a plan chooses a player in that gameweek's squad and opens the Transfer Explorer for that player. The Explorer shows it is working inside that plan and gameweek, lists suitable replacements ranked with the existing logic, and calculates affordability, selling price and projections from the plan's squad and finances at gameweek 7, not from My Team.
 
-**Why this priority**: Everything else in Feature A depends on a trustworthy, plan-aware candidate list. It is also the smallest piece that is useful on its own: a manager can see which replacements make sense for a future gameweek, even before committing anything.
+**Why this priority**: Everything else in this phase depends on a trustworthy, plan-aware candidate list. It is also the smallest piece that is useful on its own: a manager can see which replacements make sense for a future gameweek, even before committing anything.
 
 **Independent Test**: In a plan whose gameweek 7 squad differs from My Team (different players, different bank), open the Explorer from a gameweek 7 player. Confirm the outgoing player, bank, owned-player exclusions, selling price and affordability all reflect the plan, the horizon labels read GW7, GW7-9 and GW7-11, and My Team is untouched.
 
@@ -75,7 +71,7 @@ A manager viewing gameweek 7 of a plan chooses a player in that gameweek's squad
 
 After comparing options, the manager previews one replacement and sees exactly how it would change the plan: bank, squad, transfers made, points hit and projected performance. Previewing changes nothing. Confirming writes the transfer into that plan gameweek through the Planner's established saving path.
 
-**Why this priority**: This closes the loop that makes Feature A worth having, and it is where Planner correctness (finances, free transfers, chips, concurrency) is most at risk.
+**Why this priority**: This closes the loop that makes the integration worth having, and it is where Planner correctness (finances, free transfers, chips, concurrency) is most at risk.
 
 **Independent Test**: Preview a transfer in a plan gameweek, confirm nothing is saved, then confirm it. Reopen the plan and verify the new squad, bank, free transfers, hit and later gameweeks match an independent hand calculation, and My Team's saved squad, bank and free transfers are byte-for-byte unchanged.
 
@@ -97,6 +93,7 @@ After comparing options, the manager previews one replacement and sees exactly h
 14. **Given** a candidate that clashes with a later planned decision (for example GW10 already sells the outgoing player, or buys the candidate), **When** the user previews it, **Then** the preview opens normally, shows the valid information up to the first downstream conflict (the selected gameweek's figures and those of any later gameweeks before the conflict, including plan impact for those gameweeks), names the affected gameweek and the clashing planned transfer, explains why the transfer cannot currently be committed, shows no later value that depends on the clash as valid, and keeps Confirm disabled.
 15. **Given** a blocked candidate, **When** the user looks for a way to fix the clash, **Then** the Explorer offers no automatic or guided repair and changes no later decision; it only identifies the gameweek, so the user can adjust the plan in the Planner and return.
 16. **Given** the outgoing or incoming player's latest known market price at confirmation differs from the one previewed, **When** the user confirms, **Then** nothing is saved, the Explorer says prices changed, shows the new figures and requires a fresh preview; different financial assumptions are never accepted silently.
+17. **Given** any list or preview response, **When** it is inspected, **Then** it identifies the planning context it was computed for (plan, gameweek and revision), the offered commit is a descriptor of an existing Planner mutation tied to that revision, and a confirmation against any other revision is reported as a conflict rather than applied (FR-047, FR-048).
 
 ---
 
@@ -124,7 +121,7 @@ After confirming (or backing out), the manager lands back on the same plan and g
 
 While deciding, the manager narrows and reorders replacements: searching by name, filtering by club, price, affordability and playing status, sorting by projected gain over each horizon, price, resulting bank and upcoming fixture difficulty, and seeing each candidate's fixtures over the horizon.
 
-**Why this priority**: It makes Stories 1 and 2 pleasant on a pool of hundreds of players but is not required for the journey to be correct. It is deliberately limited and is not the Phase 004 redesign.
+**Why this priority**: It makes Stories 1 and 2 pleasant on a pool of hundreds of players but is not required for the journey to be correct. It is deliberately limited and is not a broader redesign of the Explorer or the Planner.
 
 **Independent Test**: In Planner mode with a realistic pool, search for a player, filter to affordable candidates from one club, sort by price and by 3-gameweek gain, and confirm results, order and fixture columns are correct and that the browser performs no domain recalculation.
 
@@ -137,33 +134,7 @@ While deciding, the manager narrows and reorders replacements: searching by name
 5. **Given** filters or search that match nothing, **When** the list is shown, **Then** an explicit empty state says so and how to clear the filters.
 6. **Given** the My Team Explorer, **When** it is used, **Then** it is unchanged unless a shared control is deliberately reused without altering its behaviour.
 
----
-
-### User Story 5 - Duplicate a plan to compare alternative strategies (Priority: P2)
-
-A manager on a plan's page chooses Duplicate Plan and, once everything is saved, immediately lands on a new, independent plan that is an exact saved copy of the original, named with the next "(option N)". They can then change the copy freely without affecting the original.
-
-**Why this priority**: It is independent of Feature A, is small, and unlocks strategy comparison immediately. It carries the strongest data-integrity requirements (exact copy, atomicity, no shared identity), so it is specified in full under **Duplicate Plan Specification**.
-
-**Independent Test**: Duplicate a plan with transfers, a Wildcard, estimated starting prices and a financially unresolved gameweek. Verify the copy's saved inputs match the original, its derived results match exactly, the original's revision and update time are unchanged, and edits to either plan never appear in the other.
-
-**Acceptance Scenarios**:
-
-1. **Given** a plan page where everything is saved, **When** the user chooses Duplicate Plan, **Then** a new plan is created, the user is taken to it, and a message names the new plan and its source.
-2. **Given** the original is named "My Plan", **When** it is duplicated, **Then** the copy is "My Plan (option 2)"; duplicating the original again, or the copy, gives "My Plan (option 3)", then "My Plan (option 4)", never "My Plan (option 2) (option 2)".
-3. **Given** the original has unsaved or failed edits, **When** the user views the Duplicate Plan control, **Then** it is disabled with an explanation, and no copy can be made that omits those edits.
-4. **Given** the original is awaiting Planner initialisation, **When** the user views the control or the request is made directly, **Then** duplication is refused with an explicit reason and the plan is not modified or initialised.
-5. **Given** a successful duplication, **When** either plan is edited, **Then** the other is unaffected, in saved state and in everything derived from it.
-6. **Given** duplication fails, **When** the user sees the result, **Then** they stay on the original with a clear error, no new plan exists, and the original is unchanged.
-7. **Given** repeated clicks while a request is running, **When** the request finishes, **Then** exactly one new plan exists for that action, because the control is disabled from the first click until the outcome is known.
-8. **Given** the response to a duplication is lost or times out, **When** the user sees the result, **Then** the message says the outcome is unknown, that a copy may already exist, and links to the Plans list; no automatic retry occurs; the control becomes available again so a deliberate retry is possible.
-9. **Given** "My Plan", "My Plan (option 2)" and "My Plan (option 3)" exist and "(option 3)" is deleted, **When** "My Plan" is duplicated, **Then** the copy is "My Plan (option 3)"; **Given** instead "(option 2)" is deleted and "(option 3)" remains, **Then** the copy is "My Plan (option 4)".
-
----
-
 ### Edge Cases
-
-**Feature A**
 
 - The outgoing player was bought earlier in the same plan: the transfer carries that acquisition's saved price as its cost basis, and replacing it in the same gameweek replaces the acquisition (US2-9).
 - A later planned transfer sells the outgoing player, or buys the candidate: the candidate stays visible, explorable and previewable, is flagged with the clashing gameweek and cannot be confirmed (FR-016); nothing is silently retargeted, dropped or repriced, and no repair is offered in the Explorer.
@@ -177,16 +148,6 @@ A manager on a plan's page chooses Duplicate Plan and, once everything is saved,
 - Player availability data (selectability) is unknown for any relevant candidate: the existing explicit refresh-required state is shown; playing status never decides eligibility (My Team UX FR-013, FR-013b).
 - The plan is deleted or becomes unavailable while the Explorer is open: explicit "plan no longer exists" state; nothing is saved.
 - Two browser tabs: latest accepted save wins as in Planner Foundations; a stale confirmation is reported as a conflict, not applied.
-
-**Feature B**
-
-- The original is renamed or deleted after the copy exists: the plans stay independent; the family naming of later duplicates uses current names only.
-- Names near the 100-character limit: the base is shortened so the result fits (FR-050).
-- The original has a financially unresolved gameweek or provisional prices: the copy carries the same saved inputs and shows the same derived status (FR-059).
-- A save on the original is accepted by the server but not yet written (accepted-not-saved), including from another tab: duplication is blocked until it is resolved (FR-053).
-- Two duplications of the same family run at once: both succeed with different names, or one fails with a retryable error; two plans never receive the same name (FR-055).
-- An unsubmitted rename in progress is not part of the plan's saved state and is not copied.
-- Duplicating from the Plans list is not offered in this phase.
 
 ## Requirements *(mandatory)*
 
@@ -265,90 +226,22 @@ Rule references reuse the registers in [Planner Foundations](../002-planner-foun
 - **FR-043**: Planner mode MUST let the user search candidates by name; filter by club, maximum price, "available to apply only" and playing status; and sort by gain at each horizon, price, resulting bank and upcoming fixture difficulty, with a stable tie-break. Active filters and the active sort MUST be visible and clearable.
 - **FR-044**: Each candidate MUST show its fixtures over the selected horizon (opponent, home or away, difficulty rating) starting at the selected gameweek.
 - **FR-045**: Searching, filtering and sorting MUST be re-presentations of server-computed results; the browser MUST NOT recompute legality, money, gains or fixtures. `[Constitution I]`
-- **FR-046**: Comparison controls MUST NOT introduce new ranking models, saved filters, side-by-side comparison panels or other work belonging to Phase 004.
+- **FR-046**: Comparison controls MUST NOT introduce new ranking models, saved filters, side-by-side comparison panels or other work belonging to later phases, including the Phase 004 scenario tree.
 
-**Duplicate Plan**
+**Forward compatibility (Phase 004)**
 
-- **FR-047**: The individual plan page MUST offer a "Duplicate Plan" control at the top right of the header row that holds the existing "Back to plans" link at the left, in the existing visual conventions, without otherwise redesigning the page.
-- **FR-048**: Duplicating a plan MUST create a new plan with its own identity whose saved canonical state is a complete, independent copy of the original's, as specified in **Duplicate Plan Specification**. The original MUST NOT be modified (revision, update time, content and receipts unchanged).
-- **FR-049**: The copy's name MUST follow the naming rules in **Duplicate Plan Specification**.
-- **FR-050**: Names MUST fit the 100-character limit by shortening the base name, never by dropping or altering the "(option N)" suffix.
-- **FR-051**: The duplicate MUST represent a consistent, successfully saved snapshot. The control MUST be disabled, with a reason, while the plan is saving, has an unsaved or failed edit, has a revision conflict, is missing, or is still loading. It MUST re-enable automatically when the plan is fully saved. There is no automatic "duplicate after saving" queue.
-- **FR-052**: The request MUST identify the plan revision the user has seen saved, and the server MUST refuse to copy a different revision, so a copy can never silently omit committed changes.
-- **FR-053**: The server MUST refuse to duplicate a plan that has an accepted-but-not-saved edit still resumable at the current revision, with an explicit reason. Stale, non-resumable receipts MUST NOT block duplication.
-- **FR-054**: A plan awaiting Planner initialisation MUST NOT be duplicated and MUST NOT be initialised or modified by the attempt; the refusal MUST say initialisation is required.
-- **FR-055**: Duplication MUST be atomic: either the complete new plan exists or nothing was created. Concurrent duplications MUST NOT produce two plans with the same name.
-- **FR-056**: Repeated clicks MUST create one plan: the control MUST be disabled from the first click until the outcome is known. No database change is made solely to make retries idempotent. If the outcome is unknown (response lost or timed out), the interface MUST say so explicitly, state that a copy may already exist, link to the Plans list and MUST NOT retry automatically; the control becomes available again so the user can retry deliberately. `[Q-4]`
-- **FR-057**: After success the user MUST be navigated to the new plan, with the original still reachable via browser Back, and shown the new plan's name and its source. After failure the user MUST stay on the original with a clear, specific error and no new plan.
-- **FR-058**: The two plans MUST be fully independent: edits, renames, horizon changes, deletion or autosave on either MUST NOT affect the other, and they MUST NOT share any identifier that links their saved state.
-- **FR-059**: Duplication MUST be available for a plan that is financially unresolved or has provisional prices; the copy MUST show the same derived status.
-
-### Duplicate Plan Specification
-
-**What is copied (saved canonical inputs, verbatim)**
-
-- Horizon (first and last gameweek).
-- Starting boundary: the 15 starting players with their stable lineup slots; each player's purchase price, source, original price, basis kind and confirmation status (including "assumed" and "user-confirmed"); starting bank; starting free transfers; chips declared used before the plan; the Free Hit gameweek 19 declaration; the boundary's origin and bank-assumption markers.
-- For each gameweek: the planned chip; the starting XI, bench order, captain and vice-captain (the slot-based lineup).
-- All planned transfers: outgoing and incoming players, which owned-player episode is being sold, saved market assumption for the outgoing player, saved acquisition price, observation source and time, origin, and the saved selling-price result.
-
-**What is not copied**
-
-- Mutation receipts (pending or committed), mutation identifiers and their digests. The copy starts its own history at revision 0 with no receipts, so nothing can be replayed or collide.
-- Derived and quarantined data: evaluated squads, banks, free transfers, hits, chip availability, financial status, projections, and the legacy snapshot and accounting rows kept only for migration.
-- Anything from My Team. The copy is never reconstructed from My Team; saved prices are not refreshed, so live market changes after the original was created do not alter the copy.
-- Unsubmitted editor text such as a rename not yet submitted.
-
-**What is regenerated**
-
-- Plan identifier, creation and update times, name, revision.
-- Every internal identifier that links parts of the plan together (lineup slots, owned-player episodes, transfer decision identifiers, and the bank-assumption markers that reference them), remapped consistently so every reference inside the copy points at the copy's own identifiers and none points at the original's.
-
-**Equivalence guarantee (acceptance test)**: read at the same moment, the copy and the original MUST show identical evaluated results (per-gameweek squad, lineup, bank, free transfers, transfers made, hit, chip availability, financial status and decision errors), differing only in plan identifier, name, revision and internal identifiers.
-
-**Naming rules**
-
-1. The **family base** is the source plan's name with leading and trailing whitespace trimmed and a single trailing " (option N)" removed, where N is a whole number of 2 or more without leading zeros. "My Plan" and "My Plan (option 3)" share the base "My Plan". Only one suffix is removed, so a name that already had two is handled by removing the last.
-2. A plan is a **member** of a family if its name equals the base (counted as option 1) or the base followed by " (option N)". Comparison is exact and case-sensitive.
-3. The new name is the base followed by " (option N)" where N is one more than the highest option number among the members that currently exist, so the first duplicate of "My Plan" is "(option 2)". Numbers freed by deletion may therefore be reused (if "(option 3)" was the highest and is deleted, the next copy is "(option 3)" again; if only "(option 2)" is deleted while "(option 3)" remains, the next copy is "(option 4)"). No record of deleted names or numbering counters is kept. `[Q-5]`
-4. If that name already exists for any reason, N increases until the name is unused, so the result is always unique and deterministic for a given set of existing names.
-5. If the base and suffix would exceed 100 characters, the base is shortened (and trailing whitespace trimmed) so the whole name fits; the suffix is never shortened. The family for such a name is then computed from the shortened base.
-6. Renamed plans are judged by their current names only: if the original was renamed, it is no longer a family member; its copies keep their names.
-7. Names are not required to be unique outside this rule; renaming remains free-form as today. No link between a copy and its source is stored.
-
-**User interaction**
-
-| State of the original plan | Duplicate Plan control |
-|---|---|
-| Loading, or plan missing | Not offered / disabled |
-| Saved, nothing pending | Enabled |
-| Saving, queued edits | Disabled: "Waiting for changes to save"; re-enables when saved |
-| Not saved (retryable failure), or save outcome unknown | Disabled: "Resolve the unsaved edit before duplicating", with the existing retry and check-status actions beside it |
-| Revision conflict | Disabled: "Reconcile with the current plan first" |
-| Awaiting Planner initialisation | Disabled: "This plan must be initialised before it can be duplicated" |
-| Duplication in progress | Disabled, shows "Duplicating..." |
-
-**Failure behaviour**
-
-| Failure | Result |
-|---|---|
-| Original changed since the user saw it (revision mismatch) | Refused; message asks the user to reload the plan; nothing created |
-| Original has a resumable accepted-but-not-saved edit | Refused with explicit reason; nothing created |
-| Original awaiting initialisation | Refused with explicit reason; original untouched |
-| Original deleted meanwhile | Refused as plan not found; nothing created |
-| Any storage failure during creation | Whole operation rolled back; no new plan; original untouched; user sees a retryable error |
-| Response lost / outcome unknown | Message says the outcome is unknown, that a copy may already exist, and links to the Plans list; no automatic retry; the control is available again |
+- **FR-047**: Transfer analysis (candidate assessment, ranking inputs, plan impact, preview) MUST operate on an explicitly resolved planning context: the planned squad, finances, free transfers, chip, saved lineups and later planned decisions that apply at the selected gameweek, together with the revision they were resolved at. Resolving that context from storage MUST be a separate step from analysing it. Analysis MUST NOT depend on how plans are stored and MUST hold no capability to write data; it can be exercised in automated tests on an in-memory context with no database. `[Phase 004 vision, constitution I and III]`
+- **FR-048**: Every Explorer response MUST identify the planning context it was computed for (plan, gameweek and revision), and the commit it offers MUST be a descriptor of an existing Planner mutation that is submitted to the Planner's own writer, not a persistence action performed by the Explorer. A confirmation MUST apply only to the context that was previewed, using the revision as the staleness guard (FR-034). `[002 contracts/planner-api.md]`
 
 ### Key Entities
 
 - **Explorer Context**: the mode (My Team or Planner), and in Planner mode the plan, the gameweek and the outgoing player, carried in the page address.
+- **Planning Context**: the resolved, in-memory description of what is planned at the selected gameweek (squad, finances, free transfers, chip, saved lineups, later planned decisions) and the revision it was resolved at. It is the sole input to transfer analysis (FR-047).
 - **Plan Gameweek Squad State**: the squad, lineup, bank, free transfers, chip and cost bases the Planner shows for one gameweek; the sole financial and squad input in Planner mode.
 - **Planner Replacement Candidate**: a pool player evaluated for one outgoing player in one plan gameweek: price, selling-price breakdown, resulting bank, best-XI gains by horizon, plan impact, upcoming fixtures, legality and unavailability reasons, status advisory, and any clash with later planned decisions.
 - **Plan Impact**: the difference in the plan's projected points, per horizon gameweek and in total, between the plan with a candidate transfer applied and the plan without it, split into saved-plan gameweeks and assumed-continuation gameweeks, shown before points hit.
 - **Planned Transfer Preview**: the read-only account of what confirming a candidate would do to that gameweek and later ones.
 - **Projection Source**: model, run identifier, generation time and the gameweeks actually evaluated for the session.
-- **Plan Family**: plans sharing a base name; the scope of "(option N)" numbering.
-- **Duplicate Request**: one user action to copy one plan revision, with its outcome (created plan, or refusal reason).
 
 ## Success Criteria *(mandatory)*
 
@@ -363,12 +256,10 @@ Rule references reuse the registers in [Planner Foundations](../002-planner-foun
 - **SC-007**: After confirming or backing out, the manager is back on the same plan and gameweek in 100% of cases, including after a reload inside the Explorer.
 - **SC-008**: A not-saved, conflicted or rejected transfer is never presented as saved, and an interrupted confirmation is never lost silently.
 - **SC-009**: With a realistic candidate pool, a manager can find a named player, or narrow to affordable candidates from one club, using search and filters, and re-order them, without leaving the list.
-- **SC-010**: A duplicate is created in one action once the plan is saved, and the manager lands on it. The copy's saved inputs match the original's, and its derived results match exactly, in 100% of reference plans (with transfers, chips, estimated prices, financial shortfalls and Free Hit gameweeks).
-- **SC-011**: Over repeated and concurrent duplication, 0 plans share a name within a family, 0 duplicates are created by repeated clicks, and 0 partial plans exist after any injected failure.
-- **SC-012**: Duplicating never modifies the original (revision, update time, content, receipts), and edits to either plan never appear in the other.
-- **SC-013**: The My Team Transfer Explorer, My Team and the existing Planner journeys keep passing their existing automated tests, and the main new journeys pass in a real browser at desktop and mobile widths.
-- **SC-014**: On the representative local dataset (a full-season player pool with a current projection run and a plan of up to 8 gameweeks), the Planner-mode candidate list is shown within 3 seconds and an individual preview within 2 seconds, with a visible loading state until then. A longer plan (up to 38 gameweeks) is measured and reported but is not a gate. These are measurable verification targets; optimisation beyond what is needed to meet them is not required. `[Q-8]`
-- **SC-015**: In reference scenarios in which the outgoing player's role differs between gameweeks (starting, benched, captain), with Bench Boost, Triple Captain, Wildcard and Free Hit gameweeks, with a horizon extending beyond the plan's end, and with a blocked candidate, the displayed plan impact matches independently hand-calculated values in 100% of cases, assumed-continuation gameweeks are always labelled as such, and no value depending on a downstream conflict is shown as valid.
+- **SC-010**: The My Team Transfer Explorer, My Team and the existing Planner journeys keep passing their existing automated tests, and the main new journeys pass in a real browser at desktop and mobile widths.
+- **SC-011**: On the representative local dataset (a full-season player pool with a current projection run and a plan of up to 8 gameweeks), the Planner-mode candidate list is shown within 3 seconds and an individual preview within 2 seconds, with a visible loading state until then. A longer plan (up to 38 gameweeks) is measured and reported but is not a gate. These are measurable verification targets; optimisation beyond what is needed to meet them is not required. `[Q-8]`
+- **SC-012**: In reference scenarios in which the outgoing player's role differs between gameweeks (starting, benched, captain), with Bench Boost, Triple Captain, Wildcard and Free Hit gameweeks, with a horizon extending beyond the plan's end, and with a blocked candidate, the displayed plan impact matches independently hand-calculated values in 100% of cases, assumed-continuation gameweeks are always labelled as such, and no value depending on a downstream conflict is shown as valid.
+- **SC-013**: Candidate assessment, plan impact and preview run in automated tests against an in-memory planning context with no database, and the services that perform them hold no write capability; confirmation is only a descriptor handed to the Planner's existing writer. `[FR-047, FR-048]`
 
 ## Assumptions
 
@@ -379,21 +270,22 @@ Rule references reuse the registers in [Planner Foundations](../002-planner-foun
 - **Selectability is latest-known.** Incoming eligibility uses the latest imported data, the same data My Team mode uses, including for future gameweeks.
 - **Completed gameweeks.** Completed gameweeks remain editable in the Planner `[002 Q-5]`, but have no projections, so the Explorer shows its unavailable state for them.
 - **Hits.** The Explorer shows the marginal hit a transfer causes. Ranking is by best-XI xPts gain and is not hit-adjusted; plan impact is shown before hit, with the hit and the resulting net shown separately (FR-029).
-- **Representative dataset.** Performance targets (SC-014) are measured on a full-season import with a current projection run, not on trimmed test fixtures.
+- **Representative dataset.** Performance targets (SC-011) are measured on a full-season import with a current projection run, not on trimmed test fixtures.
 - **Accessibility and viewports.** New screens meet the keyboard, tap-target and 1440 and 390 pixel width expectations already verified for Planner Foundations.
-- **No new infrastructure.** No new dependencies or services. No database schema change is required or planned; in particular none is made solely for duplication idempotency. Any schema change would require an Alembic migration and the human's agreement first.
+- **No new infrastructure.** No new dependencies or services. No database schema change is required or planned. Any schema change would require an Alembic migration and the human's agreement first.
 - **Tests.** Database-touching tests use the dedicated test database through `TEST_DATABASE_URL` and the existing safeguards; nothing runs against development data. `[Constitution VII]`
-- **Duplication placement.** Only the plan page offers Duplicate Plan in this phase; the Plans list does not.
+- **Linear Planner only.** Phase 003 works on the existing linear plan (one decision set per gameweek). The Phase 004 Branching Scenario Planner will replace that model; this phase does not implement or pre-build any part of it, and only FR-047 and FR-048 are shaped by it.
 - **Existing inline Planner picker.** It stays as it is, except that new or edited transfers from it are subject to server-side rules added by this phase (FR-012).
 
 ## Out of Scope
 
-- Broader UI/UX improvements and redesign (Phase 004), including side-by-side comparison of plans or candidates.
-- Historical plan evaluation against actual gameweek results (Phase 005).
+- The Phase 004 Branching Scenario Planner: multiple options per gameweek, scenario-tree navigation, draft and saved options, sequential gameweek navigation. See [../004-branching-scenario-planner/vision.md](../004-branching-scenario-planner/vision.md).
+- Duplicating a plan, plan naming conventions for copies, and any copy-related schema or API work (withdrawn from this phase).
+- Broader UI/UX improvements and redesign of the Planner or Explorer, including side-by-side comparison of plans or candidates.
+- Historical plan evaluation against actual gameweek results.
 - Changes to projection models, new models, or a model selector.
 - Optimal multi-gameweek transfer optimisation, automated replanning, or automatic chip or transfer suggestions.
 - Historical reconstruction of My Team.
 - Redesign of the inline Planner transfer picker beyond the server-side rules in FR-012.
-- Duplicate Plan from the Plans list, a stored link between a copy and its source, bulk duplication, and any persisted history of deleted option numbers.
 - Changing the My Team Transfer Explorer's selling-price approximation or ranking behaviour.
 - Predicting future price changes.

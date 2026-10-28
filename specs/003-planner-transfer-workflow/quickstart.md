@@ -1,6 +1,6 @@
 # Phase 003 Quickstart: Validation Guide
 
-Run and validation guide for the planned design. It describes what to run and what must be observed once implemented; nothing here has been executed yet (planning stage). Contracts: [contracts/](contracts/). Model: [data-model.md](data-model.md).
+Run and validation guide for the planned design (revised after the Phase 003 / Phase 004 split: Duplicate Plan validation was removed from this phase). It describes what to run and what must be observed once implemented; nothing here has been executed yet (planning stage). Contracts: [contracts/](contracts/). Model: [data-model.md](data-model.md).
 
 ## Prerequisites and safety
 
@@ -23,7 +23,7 @@ Focused commands (illustrative; paths from the plan):
 
 ```sh
 uv run --package fpl-engine pytest -q packages/fpl_engine/tests/test_planning_hypothetical.py \
-  packages/fpl_engine/tests/test_planning_impact.py packages/fpl_engine/tests/test_planning_clone.py
+  packages/fpl_engine/tests/test_planning_impact.py
 PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q apps/api/tests/plans apps/api/tests/transfers
 pnpm --filter web test:run -- tests/transfers tests/plans
 ```
@@ -33,7 +33,7 @@ Guarded integration subset:
 ```sh
 mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@localhost:5432/fpl_test \
   PYTHONPATH=packages/fpl_engine/src uv run --package api pytest -q \
-  apps/api/tests/repositories/test_plan_duplicate_integration.py apps/api/tests/plans
+  apps/api/tests/repositories/test_plan_transfer_explorer_integration.py apps/api/tests/plans
 ```
 
 ## Validation scenarios
@@ -44,12 +44,11 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 |---|---|---|---|
 | D1 | For every pool candidate of each reference plan, compare the non-raising verdict with `apply_intents` | `confirmable` iff `apply_intents` does not raise; unavailable and blocked reasons match the raised diagnostics | SC-003, FR-016 |
 | D2 | Ordinary, Wildcard, Free Hit, Bench Boost, Triple Captain gameweeks; first plan gameweek; starting FT 0; estimated purchase basis; unaffordable; same-gameweek replacement of a planned acquisition | bank, FT, hits, selling price and provisional flags equal hand calculations | SC-002 |
-| D3 | Later planned decision sells the outgoing player or buys the candidate | state `blocked_by_later_decision`, correct gameweek and decision; values after the validity limit absent; no later decision altered | SC-015, FR-016 |
+| D3 | Later planned decision sells the outgoing player or buys the candidate | state `blocked_by_later_decision`, correct gameweek and decision; values after the validity limit absent; no later decision altered | SC-012, FR-016 |
 | D4 | Player starting GW7, benched GW8, captain GW9 | per-gameweek impact uses those roles (including Bench Boost and Triple Captain effects) | Q-6, FR-023 |
 | D5 | Horizon extends past the plan end; final gameweek is ordinary; final gameweek is Free Hit | continuation uses the permanent (restored) squad and final-gameweek roles; labelled and totalled separately; illegal roles reported unavailable | Q-6, FR-023 |
-| D6 | Clone | no shared identifier; `evaluate_plan(copy)` equals the source after id mapping; revision 0 | SC-010, FR-058 |
-| D7 | Inputs unchanged | the input `Plan` and baseline evaluation compare equal before and after assessing all candidates | FR-028 |
-| D8 | Regression | existing ranking, single-transfer, rules and planning tests pass unmodified | SC-013 |
+| D6 | Inputs unchanged | the input `Plan` and baseline evaluation compare equal before and after assessing all candidates | FR-028 |
+| D7 | Regression | existing ranking, single-transfer, rules and planning tests pass unmodified | SC-010 |
 
 ### API and persistence
 
@@ -61,12 +60,8 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | A4 | Mutation guard: unchanged prices, changed outgoing price, changed incoming price, retry with same id | commit; `prices_changed` 422 with no receipt; identical retry resumes | Q-7, FR-033 |
 | A5 | Selectability: non-selectable, unknown, unchanged incoming on edit, saved decision replay | rejected with specific codes; edit without incoming change accepted; replay unaffected | Q-3, FR-012 |
 | A6 | Explorer-originated confirm followed by GET plan | later gameweeks recalculated; My Team squad, bank and free transfers byte-identical | FR-036, FR-037, SC-004 |
-| A7 | Duplicate: ordinary plan; plan with Wildcard and Free Hit; estimated prices; shortfall; blocked decisions (guarded fixtures) | new plan evaluates identically modulo ids; stored selling prices identical; source revision, `updated_at`, receipts unchanged | SC-010, SC-012 |
-| A8 | Duplicate refusals | legacy plan, stale revision, resumable pending receipt, deleted source all refused with the contract codes; stale pending receipt does not block; nothing created | FR-051 to FR-054 |
-| A9 | Duplicate atomicity: inject failure after the plan row and after the starting players | no `plans`, `plan_starting_players`, `plan_gameweeks` or decision rows remain | FR-055, SC-011 |
-| A10 | Concurrent duplication: two sessions on the same source; and on source and copy of one family | distinct names, consecutive numbers, no partial plans | FR-055, SC-011 |
-| A11 | Independence: mutate the copy, then the source | neither shows the other's change; no shared identifiers | FR-058, SC-012 |
-| A12 | Naming | spec examples, deleted-number reuse, 100-character fit, renamed original, case sensitivity | FR-049, FR-050 |
+| A7 | Analysis on an in-memory `PlanningContext` with read-only fakes (no database); inspect the service's constructor dependencies | full list and preview results produced with no database; no plan repository, session or mutation service reachable from the analysis service; identical results to the router path | FR-047, SC-013 |
+| A8 | Preview and list responses | each carries `planning_context` (plan, gameweek, revision); the commit descriptor's `expected_revision` equals it; a confirmation against an older revision is a conflict | FR-048, FR-034 |
 
 ### Performance gate (G-PERF; opt-in, guarded)
 
@@ -84,10 +79,9 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | W2 | Planner-mode states | loading, no outgoing player, empty pool, each unavailable code, invalid link, plan missing, plan not ready |
 | W3 | Candidate table | search, filters, sorts, stable tie-break, active-filter chips, empty state; ranking order equals server order by default; no domain recalculation |
 | W4 | Preview | saved-plan and assumed-continuation blocks separate and labelled; totals never summed; blocked candidate shows values only through the valid range and the conflicting gameweek and decision; Confirm disabled with the reason |
-| W5 | Commit state machine (deferred promises) | saving then saved navigates only after acknowledged revision; double click sends once; `prices_changed` refreshes preview without resubmitting; not saved offers retry and check status; conflict calls `abandon()` and requires re-preview |
+| W5 | Commit state machine (deferred promises), driven once through the `commit` prop with a fake adapter and once with the real coordinator | saving then saved navigates only after acknowledged revision; double click sends once; `prices_changed` refreshes preview without resubmitting; not saved offers retry and check status; conflict calls `abandon()` and requires re-preview |
 | W6 | Coordinator | `abandon()` semantics; existing coordinator tests unchanged |
-| W7 | Plan page | header row, Duplicate gating for saved, saving, not saved, conflict, missing, not ready; single-flight; success navigates; error and unknown-outcome messages with Plans link; highlight and `gw` handling on arrival only |
-| W8 | Shared departure guard | behaviour identical to before for the Planner; same warning in the Explorer |
+| W7 | Shared departure guard | behaviour identical to before for the Planner; same warning in the Explorer |
 
 ### Browser (Playwright; isolated preview; 1440x900 and 390x844)
 
@@ -98,11 +92,27 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | B3 | Blocked candidate (later planned sale of the outgoing player) | visible, previewable, conflicting gameweek named, Confirm disabled, no repair offered, no later decision changed |
 | B4 | Prices change between preview and confirm (guarded harness updates a stored price) | confirmation rejected, fresh preview shown, nothing saved |
 | B5 | Save failure and conflict injected through the existing guarded fault harness | not saved with retry; conflict requires a fresh preview |
-| B6 | Duplicate Plan: top-right control aligned with Back to plans; disabled while saving; success lands on the new plan with its name; edit the copy, original unchanged | as described; console free of errors and unexpected requests |
-| B7 | Existing My Team Explorer journey | unchanged |
+| B6 | Existing My Team Explorer journey | unchanged |
 
 Report exactly what was observed, which states were not exercised, the preview port and cleanup result.
 
 ## Completion report (per AGENTS.md)
 
 Files changed; important decisions and trade-offs; tests and checks run (with counts); browser verification performed; performance numbers (median and worst, dataset description); known limitations; anything not verified; and whether the final diff was reviewed for unintended changes.
+
+## Traceability (requirements to scenarios, contracts, validation and success criteria)
+
+| Requirements | Spec scenarios | Contract | Validation | Success criteria |
+|---|---|---|---|---|
+| FR-001 to FR-007 mode and context | US1-1, 2, 12, 13; US3-4, 5 | [ui-navigation](contracts/ui-navigation.md); error table in [explorer API](contracts/planner-transfer-explorer-api.md) | A1, W1, W2, B2, B6 | SC-001, SC-007, SC-010 |
+| FR-008 to FR-012 squad and pool, selectability | US1-3, 10, 11; US2-10 | explorer API candidates; [mutation guard and selectability](contracts/mutation-guard-and-selectability.md) | D2, A1, A5, W3 | SC-003 |
+| FR-013 to FR-019 finance and accounting | US1-4, 5; US2-1, 3, 4, 5 | explorer API `outgoing`, `accounting_before`, preview `gameweeks` | D2, A1 | SC-002 |
+| FR-020 to FR-027 projections and ranking | US1-6 to 9, 14 to 16 | explorer API `projection`, `plan_impact_by_horizon` | D4, D5, A2, W4 | SC-005, SC-006, SC-012 |
+| FR-028 to FR-031 preview | US2-1 to 6, 14, 15 | explorer API preview | D3, D6, A3, W4, B3 | SC-004, SC-012 |
+| FR-032 to FR-038 commit | US2-7 to 13, 16 | mutation guard; preview `commit` | A4, A5, A6, W5, B1, B4, B5 | SC-003, SC-004, SC-008 |
+| FR-039 to FR-042 navigation and states | US3-1 to 7 | ui-navigation | W5, W6, W7, B1, B2, B5 | SC-007, SC-008 |
+| FR-043 to FR-046 comparison | US4-1 to 6 | explorer API candidate fields; ui-navigation screen contract | W3 | SC-009 |
+| FR-047, FR-048 forward compatibility | US2-17 | `planning_context` in explorer API; `commit` prop in ui-navigation | A7, A8 | SC-013 |
+| Performance targets | (SC-011) | explorer API non-functional | G-PERF | SC-011 |
+| Regression of existing behaviour | US1-13; US4-6 | explorer API (My Team endpoints unchanged) | D7, B6 | SC-010 |
+
