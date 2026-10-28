@@ -40,6 +40,8 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 
 ### Domain (fpl_engine)
 
+Reference plans for the engine tests are built by `packages/fpl_engine/tests/planning_reference_plans.py` from pure engine objects. API tests build their own equivalents in `apps/api/tests/plans/explorer_builders.py`. Neither layer imports the other's test fixtures.
+
 | ID | Scenario | Pass when | Spec |
 |---|---|---|---|
 | D1 | For every pool candidate of each reference plan, compare the non-raising verdict with `apply_intents` | `confirmable` iff `apply_intents` does not raise; unavailable and blocked reasons match the raised diagnostics | SC-003, FR-016 |
@@ -79,9 +81,11 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | W2 | Planner-mode states | loading, no outgoing player, empty pool, each unavailable code, invalid link, plan missing, plan not ready |
 | W3 | Candidate table | search, filters, sorts, stable tie-break, active-filter chips, empty state; ranking order equals server order by default; no domain recalculation |
 | W4 | Preview | saved-plan and assumed-continuation blocks separate and labelled; totals never summed; blocked candidate shows values only through the valid range and the conflicting gameweek and decision; Confirm disabled with the reason |
-| W5 | Commit state machine (deferred promises), driven once through the `commit` prop with a fake adapter and once with the real coordinator; preview marked stale when the acknowledged revision changes; success only from the submission's own acknowledgement | saving then saved navigates only after acknowledged revision; double click sends once; `prices_changed` refreshes preview without resubmitting; not saved offers retry and check status; conflict calls `abandon()` and requires re-preview |
+| W5 | Commit state machine (deferred promises), driven once through the `commit` prop with a fake adapter and once with the real coordinator; preview marked stale when the acknowledged revision changes; success only from the submission's own acknowledgement | saving then saved navigates only after acknowledged revision; double click sends once; `prices_changed` refreshes preview without resubmitting; not saved offers retry and check status; conflict calls `abandon()` and requires re-preview; a rejection (including `prices_changed`) keeps its message visible above the fresh preview, clears the record, never resubmits, and Confirm needs a new click that creates a new submission |
 | W6 | Coordinator pinned submission ([contract](contracts/pinned-submission.md)) | see the dedicated matrix below; existing coordinator tests unchanged |
 | W7 | Shared departure guard | behaviour identical to before for the Planner; same warning in the Explorer |
+| W8 | Accepted-but-not-saved ([contract](contracts/pinned-submission.md)) | the warning is visible next to "Stop tracking this transfer" before the action; afterwards the not-added notice shows; no text says the transfer was saved, cancelled, deleted or removed (negated forms only); no navigation, no highlight; the reloaded plan lacks the transfer; a pending record cannot be read as committed; fresh preview required |
+| W9 | Terminal record found on mount (`rejected`, `committed`, `plan_missing`) | message shown once and the record cleared with `abandon()`; no submission, no navigation; a following preview and confirmation work |
 
 ### Coordinator pinned submission matrix (Vitest, deferred promises; `apps/web/tests/plans/plan-save-coordinator-pinned.test.ts`)
 
@@ -105,6 +109,9 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | C16 | Planner edit enqueued while pinned is `sending` | queued behind it; dispatched after the pinned outcome against the then-acknowledged revision | FR-052 |
 | C17 | Re-obtaining the coordinator after navigation (`getPlanSaveCoordinator`) | pinned state retained; `hasUnsavedWork()` true for `sending`, `unknown`, `pending_unsaved`, `conflict`, false for `committed`, `rejected` and after `abandon()` | FR-041, FR-051, US2-21 |
 | C18 | Existing coordinator suites (`plan-save-coordinator.test.ts`) | all pass unmodified | FR-052, SC-014 |
+| C19 | `abandon()` on `pending_unsaved` | result `abandoned` with `serverReceiptRetained: true`; only a plan load is sent (no mutation, no receipt request); the refreshed plan lacks the transfer; `pinned` is `null`, never `committed`; a later `submitPinned` uses a new mutation identity | FR-051, US2-22 |
+| C20 | `abandon()` on `rejected` (including `prices_changed`) | result `abandoned` with `serverReceiptRetained: false` and the cleared record in `previous` (message and diagnostics); no server contact; Planner `error` status cleared; `hasUnsavedWork()` false | FR-034, US2-23 |
+| C21 | After a rejection: unacknowledged record, then acknowledged | with the record present `submitPinned` is refused `pinned_exists` and nothing is sent; after `abandon()` a fresh `submitPinned` at the current revision sends a new identity; nothing is ever resubmitted automatically; Planner `enqueue` is unaffected by the record; the record survives `getPlanSaveCoordinator` | FR-034, FR-049, FR-052, US2-23, US2-24 |
 
 ### Browser (Playwright; isolated preview; 1440x900 and 390x844)
 
@@ -113,8 +120,8 @@ mise exec -- env RUN_DB_TESTS=1 TEST_DATABASE_URL=postgresql+psycopg://fpl:fpl@l
 | B1 | Plan, GW7 player, Explore, candidate list, Preview, Confirm, back on the Planner | same gameweek selected, incoming player highlighted and in view, notice shown, later gameweeks changed, My Team unchanged |
 | B2 | Reload inside the Explorer; open the address in a new tab; browser Back and Forward | same mode, plan, gameweek and player; no fall-through to My Team |
 | B3 | Blocked candidate (later planned sale of the outgoing player) | visible, previewable, conflicting gameweek named, Confirm disabled, no repair offered, no later decision changed |
-| B4 | Prices change between preview and confirm (guarded harness updates a stored price) | confirmation rejected, fresh preview shown, nothing saved |
-| B5 | Save failure and conflict injected through the existing guarded fault harness; a competing Planner edit committed between preview and confirm | not saved with same-identity retry; conflict or stale preview requires a fresh preview; the transfer is never submitted against the newer revision; navigating away and back shows the unresolved submission |
+| B4 | Prices change between preview and confirm (guarded harness updates a stored price) | confirmation rejected, message retained, fresh preview shown with the new prices, nothing saved or resubmitted automatically; an explicit second Confirm then saves it as a new submission |
+| B5 | Save failure and conflict injected through the existing guarded fault harness; a competing Planner edit committed between preview and confirm | not saved with same-identity retry (and, for accepted-but-not-saved, "Stop tracking this transfer" with its warning and the not-added notice); conflict or stale preview requires a fresh preview; the transfer is never submitted against the newer revision; navigating away and back shows the unresolved submission |
 | B6 | Existing My Team Explorer journey | unchanged |
 
 Report exactly what was observed, which states were not exercised, the preview port and cleanup result.
@@ -133,7 +140,7 @@ Files changed; important decisions and trade-offs; tests and checks run (with co
 | FR-020 to FR-027 projections and ranking | US1-6 to 9, 14 to 16 | explorer API `projection`, `plan_impact_by_horizon` | D4, D5, A2, W4 | SC-005, SC-006, SC-012 |
 | FR-028 to FR-031 preview | US2-1 to 6, 14, 15 | explorer API preview | D3, D6, A3, W4, B3 | SC-004, SC-012 |
 | FR-032 to FR-038 commit | US2-7 to 13, 16 | mutation guard; preview `commit` | A4, A5, A6, W5, B1, B4, B5 | SC-003, SC-004, SC-008 |
-| FR-049 to FR-052 commit integrity (revision pinning, own acknowledgement, abandon, preserved guarantees) | US2-18 to 21 | [pinned-submission](contracts/pinned-submission.md); mutation guard (revision pinning) | C1 to C18, W5, W6, B5 | SC-014 |
+| FR-049 to FR-052 commit integrity (revision pinning, own acknowledgement, abandon, preserved guarantees); FR-034 rejected clearing | US2-18 to 24 | [pinned-submission](contracts/pinned-submission.md); mutation guard (revision pinning) | C1 to C21, W5, W6, W8, W9, B4, B5 | SC-014 |
 | FR-039 to FR-042 navigation and states | US3-1 to 7 | ui-navigation | W5, W6, W7, B1, B2, B5 | SC-007, SC-008 |
 | FR-043 to FR-046 comparison | US4-1 to 6 | explorer API candidate fields; ui-navigation screen contract | W3 | SC-009 |
 | FR-047, FR-048 forward compatibility | US2-17 | `planning_context` in explorer API; `commit` prop in ui-navigation | A7, A8 | SC-013 |

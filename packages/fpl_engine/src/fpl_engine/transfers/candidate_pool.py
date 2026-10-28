@@ -6,12 +6,29 @@ from typing import Literal
 from fpl_engine.rules import RuleViolationError
 from fpl_engine.transfers.priced_player import PricedPlayer
 
+IncomingSelectabilityExclusion = Literal["player_not_selectable", "selectability_unknown"]
+
 CandidatePoolExclusion = Literal[
     "player_already_in_squad",
     "different_position",
     "player_not_selectable",
     "selectability_unknown",
 ]
+
+
+def incoming_selectability_exclusion(
+    can_select: bool | None, can_transact: bool | None
+) -> IncomingSelectabilityExclusion | None:
+    """Why an incoming player cannot be bought on imported flags alone, else None.
+
+    A known False in either flag wins over a missing other flag; any remaining
+    missing flag is unknown (never eligible). Playing status is not an input.
+    """
+    if can_select is False or can_transact is False:
+        return "player_not_selectable"
+    if can_select is None or can_transact is None:
+        return "selectability_unknown"
+    return None
 
 
 def candidate_pool_exclusion(
@@ -37,8 +54,4 @@ def candidate_pool_exclusion(
         return "player_already_in_squad"
     if candidate.position != outgoing.position:
         return "different_position"
-    if candidate.can_select is False or candidate.can_transact is False:
-        return "player_not_selectable"
-    if candidate.can_select is None or candidate.can_transact is None:
-        return "selectability_unknown"
-    return None
+    return incoming_selectability_exclusion(candidate.can_select, candidate.can_transact)

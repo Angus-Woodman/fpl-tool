@@ -1,7 +1,11 @@
 import pytest
 from fpl_engine.domain import PlayerPosition
 from fpl_engine.rules import RuleViolationError
-from fpl_engine.transfers import PricedPlayer, candidate_pool_exclusion
+from fpl_engine.transfers import (
+    PricedPlayer,
+    candidate_pool_exclusion,
+    incoming_selectability_exclusion,
+)
 
 OUTGOING_ID = 1
 
@@ -137,3 +141,34 @@ def test_outgoing_player_must_be_in_the_squad() -> None:
         candidate_pool_exclusion(_squad(), 999, _candidate())
 
     assert exc_info.value.code == "player_not_in_squad"
+
+
+@pytest.mark.parametrize(
+    ("can_select", "can_transact", "expected"),
+    [
+        (True, True, None),
+        (False, True, "player_not_selectable"),
+        (True, False, "player_not_selectable"),
+        (False, False, "player_not_selectable"),
+        (False, None, "player_not_selectable"),
+        (None, False, "player_not_selectable"),
+        (None, None, "selectability_unknown"),
+        (True, None, "selectability_unknown"),
+        (None, True, "selectability_unknown"),
+    ],
+)
+def test_incoming_selectability_exclusion_matches_pool_precedence(
+    can_select: bool | None, can_transact: bool | None, expected: str | None
+) -> None:
+    assert incoming_selectability_exclusion(can_select, can_transact) == expected
+    candidate = _candidate(can_select=can_select, can_transact=can_transact)
+    assert candidate_pool_exclusion(_squad(), OUTGOING_ID, candidate) == expected
+
+
+def test_incoming_selectability_exclusion_takes_no_playing_status_input() -> None:
+    import inspect
+
+    assert list(inspect.signature(incoming_selectability_exclusion).parameters) == [
+        "can_select",
+        "can_transact",
+    ]

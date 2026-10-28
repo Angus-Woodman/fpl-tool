@@ -15,6 +15,8 @@ class SquadPlayerLookupItem:
     web_name: str
     position: str
     current_price: float
+    can_select: bool | None = None
+    can_transact: bool | None = None
 
 
 class SquadPlayerLookupRepository:
@@ -32,6 +34,8 @@ class SquadPlayerLookupRepository:
                 PlayerModel.web_name,
                 PlayerModel.position,
                 PlayerModel.current_price,
+                PlayerModel.can_select,
+                PlayerModel.can_transact,
             )
             .join(TeamModel, TeamModel.id == PlayerModel.team_id)
             .where(PlayerModel.id.in_(player_ids))
@@ -44,6 +48,8 @@ class SquadPlayerLookupRepository:
                 web_name=row[2],
                 position=row[3].value if hasattr(row[3], "value") else str(row[3]),
                 current_price=float(row[4]),
+                can_select=row[5],
+                can_transact=row[6],
             )
             for row in rows
         ]

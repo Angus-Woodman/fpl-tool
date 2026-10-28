@@ -113,6 +113,7 @@ best_xi: { gain_by_horizon: { "1","3","5": float }, direct_xpts_difference: floa
 Semantics:
 
 - Preview of an `unavailable` or `blocked_by_later_decision` candidate returns 200 with `confirmable: false`, the reasons or conflict, and `gameweeks` only through `valid_through_gameweek`; later entries are `valid: false` with `reason: "beyond_valid_range"` and no values. (Same pattern as My Team, where an illegal preview is a normal 200.)
+- `commit` is `null` unless `confirmable` is true: no descriptor is offered for a transfer the Planner would reject. Optional intent fields that do not apply (`decision_id` for an add, the outgoing fields for an edit) are omitted, not null.
 - `commit.intent` is exactly what the browser submits, through the Planner's own writer, to `POST /plans/{plan_id}/mutations`; `commit.guard` is submitted with it (see [mutation-guard-and-selectability.md](mutation-guard-and-selectability.md)). The browser does not decide add versus edit.
 - A candidate that is not in the pool (owned, wrong position, non-selectable) is 422 `player_not_in_candidate_pool` (same code family as My Team preview).
 - Same error table as the list endpoint, plus 404 `player_not_found`.

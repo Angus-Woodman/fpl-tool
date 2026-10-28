@@ -651,6 +651,8 @@ export type PlanIntent =
       outgoing_player_id: number;
       outgoing_ownership_id: string;
       incoming_player_id: number;
+      expected_outgoing_market_tenths?: number;
+      expected_incoming_price_tenths?: number;
     }
   | {
       kind: "edit_transfer";
@@ -659,6 +661,8 @@ export type PlanIntent =
       outgoing_ownership_id?: string;
       outgoing_source_decision_id?: string;
       incoming_player_id?: number;
+      expected_outgoing_market_tenths?: number;
+      expected_incoming_price_tenths?: number;
     }
   | { kind: "remove_transfer"; decision_id: string };
 

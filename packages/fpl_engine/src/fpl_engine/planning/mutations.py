@@ -60,14 +60,32 @@ def _diagnostic_key(error: Diagnostic) -> tuple[object, ...]:
     )
 
 
-def validate_candidate(
+@dataclass(frozen=True)
+class CandidateVerdict:
+    """Everything the Planner's acceptance rules would reject about a candidate plan."""
+
+    evaluation: PlanEvaluation
+    diagnostics: tuple[Diagnostic, ...]
+    shortfalls: tuple[Diagnostic, ...]
+
+    @property
+    def accepted(self) -> bool:
+        return not self.diagnostics and not self.shortfalls
+
+
+def candidate_verdict(
     previous: Plan,
     candidate: Plan,
     metadata: Mapping[int, PlayerRuleData],
     *,
     purchase_correction: bool = False,
-) -> PlanEvaluation:
-    before = evaluate_plan(previous, metadata)
+    baseline: PlanEvaluation | None = None,
+) -> CandidateVerdict:
+    """Non-raising acceptance verdict; `validate_candidate` raises from this same result.
+
+    `baseline` may carry a precomputed evaluation of `previous` (it is never mutated).
+    """
+    before = baseline if baseline is not None else evaluate_plan(previous, metadata)
     after = evaluate_plan(candidate, metadata)
     existing = {_diagnostic_key(error) for error in before.diagnostics}
     introduced = tuple(
@@ -88,7 +106,7 @@ def validate_candidate(
                 ),
             )
         )
-        raise MutationRejectedError(introduced)
+    shortfalls: list[Diagnostic] = []
     if not purchase_correction:
         old_weeks = {week.gameweek_number: week for week in before.gameweeks}
         for week in after.gameweeks:
@@ -103,16 +121,31 @@ def validate_candidate(
                 else current_shortfall > prior_shortfall
             )
             if worsened:
-                raise MutationRejectedError(
-                    (
-                        Diagnostic(
-                            "financial_shortfall",
-                            f"New or worsened shortfall of {current_shortfall} tenths",
-                            week.gameweek_number,
-                        ),
+                shortfalls.append(
+                    Diagnostic(
+                        "financial_shortfall",
+                        f"New or worsened shortfall of {current_shortfall} tenths",
+                        week.gameweek_number,
                     )
                 )
-    return after
+    return CandidateVerdict(after, introduced, tuple(shortfalls))
+
+
+def validate_candidate(
+    previous: Plan,
+    candidate: Plan,
+    metadata: Mapping[int, PlayerRuleData],
+    *,
+    purchase_correction: bool = False,
+) -> PlanEvaluation:
+    verdict = candidate_verdict(
+        previous, candidate, metadata, purchase_correction=purchase_correction
+    )
+    if verdict.diagnostics:
+        raise MutationRejectedError(verdict.diagnostics)
+    if verdict.shortfalls:
+        raise MutationRejectedError((verdict.shortfalls[0],))
+    return verdict.evaluation
 
 
 def _transfer_changes(plan: Plan, intents: tuple[Intent, ...]) -> Plan:

@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PlanBoard } from "@/components/plans/plan-board";
+import { getPlanSaveCoordinator } from "@/lib/plan-save-coordinator";
 import type {
   PlanChip,
   PlanDecision,
@@ -2709,5 +2710,54 @@ describe("PlanBoard US5 persistence", () => {
       expect(unload.defaultPrevented).toBe(true);
       gate.resolve();
     });
+  });
+});
+
+describe("PlanBoard with a pinned Explorer submission", () => {
+  it("never replays a pinned transfer when Revalidate With Current Data is pressed", async () => {
+    const plan = buildPlannerPlan(12, 14);
+    const posts: string[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (_input, init) => {
+      if (init?.method === "POST") {
+        posts.push(String(init.body));
+        return Response.json(
+          {
+            detail: {
+              code: "revision_conflict",
+              message: "Plan revision has advanced",
+            },
+          },
+          { status: 409 },
+        );
+      }
+      return Response.json(plan);
+    });
+    render(<PlanBoard planId={plan.plan_id} />);
+    await screen.findByLabelText("Gameweek 12");
+    const coordinator = getPlanSaveCoordinator(plan);
+
+    coordinator.submitPinned({
+      expectedRevision: 0,
+      intents: [
+        {
+          kind: "add_transfer",
+          gameweek_number: 12,
+          outgoing_player_id: 6,
+          outgoing_ownership_id: plannerIdentity(1006),
+          incoming_player_id: 106,
+        },
+      ],
+    });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Revalidate With Current Data",
+      }),
+    );
+
+    await waitFor(() => expect(coordinator.getSnapshot().pinned).toBeNull());
+    expect(posts).toHaveLength(1);
+    expect(
+      screen.queryByRole("button", { name: "Revalidate With Current Data" }),
+    ).not.toBeInTheDocument();
   });
 });
