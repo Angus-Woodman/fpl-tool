@@ -932,6 +932,212 @@ export async function fetchPlan(planId: number): Promise<PlanResponse | null> {
   return readPlanResponse(response, "Plan");
 }
 
+// Planner-aware Transfer Explorer (read-only list). Money is integer tenths of
+// a million end to end; the browser only formats it for display.
+export type PlanExplorerHorizonKey = "1" | "3" | "5";
+
+export type PlanExplorerHorizonInfo = {
+  horizon: TransferHorizon;
+  requested_gameweeks: number[];
+  evaluated_gameweeks: number[];
+  saved_plan_gameweeks: number[];
+  assumed_gameweeks: number[];
+  partial: boolean;
+};
+
+export type PlanExplorerProjection = {
+  model_version: string;
+  run_id: number;
+  generated_at: string;
+  newer_run_available: boolean;
+  primary_horizon: number;
+  horizons: PlanExplorerHorizonInfo[];
+  limited_to_selected_gameweek: boolean;
+  limited_reason: "free_hit_gameweek" | null;
+  unprojected_candidate_ids: number[];
+};
+
+export type PlanExplorerAccountingBefore = {
+  starting_bank_tenths: number | null;
+  closing_bank_tenths: number | null;
+  free_transfers_available: number | null;
+  transfers_made: number | null;
+  points_hit: number | null;
+  unlimited_transfers: boolean;
+  provisional: boolean;
+};
+
+export type PlanExplorerOutgoing = {
+  player_id: number;
+  web_name: string;
+  position: "GK" | "DEF" | "MID" | "FWD";
+  team_short_name: string;
+  ownership_id: string;
+  operation: "add_transfer" | "edit_transfer";
+  replaces_decision_id: string | null;
+  purchase_price_tenths: number;
+  purchase_basis: {
+    basis_kind: string;
+    confirmation: string | null;
+  };
+  market_price_tenths: number;
+  selling_price_tenths: number | null;
+  selling_provisional: boolean;
+  projected_points_by_horizon: Record<PlanExplorerHorizonKey, number>;
+};
+
+export type PlanExplorerConflict = {
+  kind: "structural" | "financial";
+  gameweek: number;
+  decision_id: string | null;
+  code: string;
+  message: string;
+  shortfall_tenths: number | null;
+};
+
+export type PlanExplorerImpact = {
+  saved_plan: number | null;
+  assumed_continuation: number | null;
+  net_saved_plan: number | null;
+  valid_through_gameweek: number | null;
+};
+
+export type PlanExplorerFixture = {
+  gameweek: number;
+  opponent_short_name: string | null;
+  is_home: boolean | null;
+  difficulty: number | null;
+};
+
+export type PlanExplorerCandidateState =
+  "available" | "unavailable" | "blocked_by_later_decision";
+
+export type PlanExplorerCandidate = {
+  player_id: number;
+  web_name: string;
+  team_short_name: string;
+  position: "GK" | "DEF" | "MID" | "FWD";
+  status: string;
+  price_tenths: number;
+  state: PlanExplorerCandidateState;
+  reasons: string[];
+  conflict: PlanExplorerConflict | null;
+  valid_through_gameweek: number | null;
+  resulting_bank_tenths: number | null;
+  points_hit_after: number | null;
+  best_xi_gain_by_horizon: Record<PlanExplorerHorizonKey, number>;
+  direct_xpts_difference: number | null;
+  plan_impact_by_horizon: Record<PlanExplorerHorizonKey, PlanExplorerImpact>;
+  fixtures: PlanExplorerFixture[];
+};
+
+export type PlanTransferExplorerResponse = {
+  planning_context: { plan_id: number; gameweek: number; revision: number };
+  plan: {
+    plan_id: number;
+    name: string;
+    revision: number;
+    start_gameweek: number;
+    end_gameweek: number;
+    gameweek: number;
+    chip: string | null;
+    evaluator_version: string;
+  };
+  projection: PlanExplorerProjection;
+  accounting_before: PlanExplorerAccountingBefore;
+  outgoing: PlanExplorerOutgoing;
+  candidates: PlanExplorerCandidate[];
+};
+
+export type PlanTransferExplorerFetchResult =
+  | { type: "ok"; data: PlanTransferExplorerResponse }
+  | { type: "plan_not_found" }
+  | { type: "plan_not_ready"; message: string }
+  | { type: "player_not_found" }
+  | {
+      type: "unavailable";
+      code: string;
+      message: string;
+      missingPlayerIds: number[];
+    };
+
+type PlanTransferErrorBody = {
+  detail?: {
+    code?: string;
+    message?: string;
+    missing_player_ids?: number[];
+  };
+};
+
+async function readPlanTransferErrorDetail(
+  response: Response,
+): Promise<NonNullable<PlanTransferErrorBody["detail"]>> {
+  try {
+    const body = (await response.json()) as PlanTransferErrorBody;
+    return typeof body.detail === "object" && body.detail !== null
+      ? body.detail
+      : {};
+  } catch {
+    // A non-JSON error body carries no contract code; callers fall back to a
+    // generic unavailable message rather than guessing a reason.
+    return {};
+  }
+}
+
+export async function fetchPlanTransferExplorer(params: {
+  planId: number;
+  gameweek: number;
+  playerOutId: number;
+  primaryHorizon?: TransferHorizon;
+  projectionRunId?: number | null;
+}): Promise<PlanTransferExplorerFetchResult> {
+  const query = new URLSearchParams({
+    primary_horizon: String(params.primaryHorizon ?? 5),
+  });
+  if (params.projectionRunId != null) {
+    query.set("projection_run_id", String(params.projectionRunId));
+  }
+  const response = await fetch(
+    `${API_BASE_URL}/plans/${params.planId}/gameweeks/${params.gameweek}/transfers/${params.playerOutId}?${query.toString()}`,
+  );
+
+  if (response.status === 404) {
+    const detail = await readPlanTransferErrorDetail(response);
+    return detail.code === "player_not_found"
+      ? { type: "player_not_found" }
+      : { type: "plan_not_found" };
+  }
+
+  if (response.status === 409) {
+    const detail = await readPlanTransferErrorDetail(response);
+    return {
+      type: "plan_not_ready",
+      message: detail.message ?? "This plan is not ready for transfers yet",
+    };
+  }
+
+  if (response.status === 422) {
+    const detail = await readPlanTransferErrorDetail(response);
+    return {
+      type: "unavailable",
+      code: detail.code ?? "transfer_explorer_unavailable",
+      message: detail.message ?? "This transfer could not be explored",
+      missingPlayerIds: detail.missing_player_ids ?? [],
+    };
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Planner transfer explorer request failed with status ${response.status}`,
+    );
+  }
+
+  return {
+    type: "ok",
+    data: (await response.json()) as PlanTransferExplorerResponse,
+  };
+}
+
 export async function createPlan(payload: {
   name: string;
   start_gameweek: number;

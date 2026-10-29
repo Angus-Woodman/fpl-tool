@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 
 import { PageHeader } from "@/components/layout/page-header";
-import { TransferExplorer } from "@/components/transfers/transfer-explorer";
+import { TransferExplorerEntry } from "@/components/transfers/transfer-explorer-entry";
 
 export default function TransfersPage(): JSX.Element {
   return (
@@ -11,7 +11,7 @@ export default function TransfersPage(): JSX.Element {
         description="Compare replacements for any squad player over 1, 3, and 5 gameweeks, including ones that are currently unavailable to apply."
       />
       <Suspense fallback={<p className="text-sm text-slate-600">Loading...</p>}>
-        <TransferExplorer />
+        <TransferExplorerEntry />
       </Suspense>
     </>
   );

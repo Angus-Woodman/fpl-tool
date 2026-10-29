@@ -36,6 +36,7 @@ import {
 import { SquadPitch } from "@/components/team/squad-pitch";
 import { SquadPlayerCard } from "@/components/team/squad-player-card";
 import { POSITION_ORDER, type Position } from "@/components/team/types";
+import { buildPlannerExplorerHref } from "@/lib/planner-explorer-url";
 
 const EMPTY_SUBSCRIBE = () => () => {};
 const EMPTY_SNAPSHOT = () => null;
@@ -969,6 +970,23 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     };
   }
 
+  function exploreLink(player: PlanPlayer): JSX.Element | null {
+    if (gameweek === null) return null;
+    return (
+      <a
+        href={buildPlannerExplorerHref({
+          planId: currentPlan.plan_id,
+          gameweek: gameweek.gameweek_number,
+          playerOutId: player.player_id,
+        })}
+        aria-label={`Explore transfers for ${player.web_name}`}
+        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+      >
+        Explore transfers
+      </a>
+    );
+  }
+
   function transferOptions(player: PlanPlayer): JSX.Element | null {
     if (transferOutId !== player.player_id) return null;
     return (
@@ -1229,6 +1247,15 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                       : 0}
                 </p>
               </div>
+              <a
+                href={buildPlannerExplorerHref({
+                  planId: currentPlan.plan_id,
+                  gameweek: gameweek.gameweek_number,
+                })}
+                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50"
+              >
+                Explore transfers for this gameweek
+              </a>
             </div>
 
             <div className="mt-4 flex flex-wrap gap-2">
@@ -1414,6 +1441,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                     >
                       VC
                     </button>
+                    {exploreLink(player)}
                   </div>
                   {transferOptions(player)}
                 </SquadPlayerCard>
@@ -1434,15 +1462,18 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   opponentLabel={opponentLabel(player)}
                   {...selectionProps(player.player_id)}
                 >
-                  <button
-                    type="button"
-                    aria-label={`Transfer ${player.web_name}`}
-                    aria-expanded={transferOutId === player.player_id}
-                    className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
-                    onClick={() => void handleOpenTransfer(player)}
-                  >
-                    Transfer
-                  </button>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      aria-label={`Transfer ${player.web_name}`}
+                      aria-expanded={transferOutId === player.player_id}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                      onClick={() => void handleOpenTransfer(player)}
+                    >
+                      Transfer
+                    </button>
+                    {exploreLink(player)}
+                  </div>
                   {transferOptions(player)}
                 </SquadPlayerCard>
               )}

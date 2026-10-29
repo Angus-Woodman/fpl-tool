@@ -2761,3 +2761,63 @@ describe("PlanBoard with a pinned Explorer submission", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("PlanBoard Explorer entry points", () => {
+  async function boardAtGameweek12() {
+    const plan = buildPlan([{ gameweek_number: 12 }, { gameweek_number: 13 }]);
+    mockFetch(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    await screen.findByLabelText("Gameweek 12");
+    return plan;
+  }
+
+  it("links every squad player to the Explorer for the selected plan and gameweek", async () => {
+    const plan = await boardAtGameweek12();
+    const playerLinks = await screen.findAllByRole("link", {
+      name: /^Explore transfers for (?!this gameweek)/,
+    });
+
+    const expectedIds = plan.gameweeks[0].players.map(
+      (player) => player.player_id,
+    );
+    expect(playerLinks.map((link) => link.getAttribute("href")).sort()).toEqual(
+      expectedIds
+        .map((id) => `/transfers?plan=${plan.plan_id}&gw=12&out=${id}`)
+        .sort(),
+    );
+  });
+
+  it("offers a gameweek-level link without an outgoing player", async () => {
+    const plan = await boardAtGameweek12();
+
+    expect(
+      await screen.findByRole("link", {
+        name: "Explore transfers for this gameweek",
+      }),
+    ).toHaveAttribute("href", `/transfers?plan=${plan.plan_id}&gw=12`);
+  });
+
+  it("follows the selected gameweek", async () => {
+    const plan = await boardAtGameweek12();
+
+    fireEvent.click(screen.getByLabelText("Gameweek 13"));
+
+    expect(
+      await screen.findByRole("link", {
+        name: "Explore transfers for this gameweek",
+      }),
+    ).toHaveAttribute("href", `/transfers?plan=${plan.plan_id}&gw=13`);
+    for (const link of screen.getAllByRole("link", {
+      name: /^Explore transfers for (?!this gameweek)/,
+    })) {
+      expect(link.getAttribute("href")).toContain("gw=13&out=");
+    }
+  });
+
+  it("does not change what the existing Transfer button opens", async () => {
+    await boardAtGameweek12();
+    const transfer = screen.getAllByRole("button", { name: /^Transfer / })[0];
+
+    expect(transfer).toHaveAttribute("aria-expanded", "false");
+  });
+});
