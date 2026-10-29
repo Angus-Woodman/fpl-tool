@@ -31,8 +31,13 @@ export type PreviewState =
     };
 
 export type ConfirmationNotice =
-  | { kind: "rejected"; message: string; code: string | null }
-  | { kind: "not_added" }
+  | {
+      kind: "rejected";
+      message: string;
+      code: string | null;
+      summary: string | null;
+    }
+  | { kind: "not_added"; summary: string | null }
   | { kind: "committed"; summary: string; incomingName: string }
   | { kind: "earlier"; text: string };
 
@@ -42,9 +47,6 @@ type OwnSubmission = {
   summary: string;
   incomingName: string;
 };
-
-const PRICES_CHANGED_NOTE =
-  "The preview below shows the current prices; confirm again to add it.";
 
 function notConfirmableReason(data: PlanTransferPreviewResponse): string {
   if (data.state === "unavailable") {
@@ -177,6 +179,19 @@ export function usePlannerConfirmation(params: {
     }
   }, [scope, reset]);
 
+  // A preview belongs to one projection run; a different run makes it obsolete. A horizon change keeps the run.
+  const lastRun = useRef(runId);
+  useEffect(() => {
+    if (runId === null) return;
+    if (lastRun.current !== null && lastRun.current !== runId) {
+      sequence.current += 1;
+      selectedRef.current = null;
+      setPreview({ kind: "idle" });
+      setNotice((current) => (current?.kind === "rejected" ? null : current));
+    }
+    lastRun.current = runId;
+  }, [runId]);
+
   const lastHorizon = useRef(horizon);
   useEffect(() => {
     if (lastHorizon.current !== horizon) {
@@ -187,7 +202,11 @@ export function usePlannerConfirmation(params: {
 
   const acknowledge = useCallback(
     async (record: PinnedSubmission, mine: OwnSubmission | null) => {
-      if (mine && record.status === "rejected") {
+      // Another candidate's open preview is not replaced by the outcome of an earlier transfer.
+      const owns = () =>
+        selectedRef.current === null ||
+        selectedRef.current === mine?.playerInId;
+      if (mine && record.status === "rejected" && owns()) {
         sequence.current += 1;
         setPreview({ kind: "loading", playerInId: mine.playerInId });
       }
@@ -215,8 +234,9 @@ export function usePlannerConfirmation(params: {
               ? "Prices changed since you previewed this transfer."
               : "The server rejected this transfer."),
           code: previous.code,
+          summary: mine.summary,
         });
-        void loadPreview(mine.playerInId);
+        if (owns()) void loadPreview(mine.playerInId);
       } else {
         setNotice({ kind: "earlier", text: describeEarlier(previous) });
       }
@@ -313,12 +333,21 @@ export function usePlannerConfirmation(params: {
   }, [commit, loadPreview]);
 
   const stopTracking = useCallback(async () => {
+    const before = commit.getView();
+    const summary =
+      before.label ??
+      (own.current?.submissionId === before.pinned?.submissionId
+        ? (own.current?.summary ?? null)
+        : null);
     const result = await commit.abandon();
     if (result.type === "abandoned") {
-      sequence.current += 1;
-      selectedRef.current = null;
-      setPreview({ kind: "idle" });
-      setNotice({ kind: "not_added" });
+      // Only the stopped transfer's own preview needs a fresh preview; another candidate's stays open.
+      if (own.current?.playerInId === selectedRef.current) {
+        sequence.current += 1;
+        selectedRef.current = null;
+        setPreview({ kind: "idle" });
+      }
+      setNotice({ kind: "not_added", summary });
     } else if (result.type === "refresh_failed") {
       setNotice({
         kind: "earlier",
@@ -328,6 +357,11 @@ export function usePlannerConfirmation(params: {
   }, [commit]);
 
   const record = view.pinned;
+  const unresolvedLabel =
+    view.label ??
+    (own.current?.submissionId === record?.submissionId
+      ? (own.current?.summary ?? null)
+      : null);
   let pinnedModel: CommitRegionModel | null = null;
   if (record?.status === "sending") {
     pinnedModel = {
@@ -359,12 +393,22 @@ export function usePlannerConfirmation(params: {
   let model: CommitRegionModel | null = null;
   if (preview.kind === "ok") {
     const data = preview.data;
-    if (pinnedModel) {
-      model = pinnedModel;
-    } else if (record) {
+    if (record) {
+      // Controls for the unresolved submission live in their own region, not in this preview.
+      const named = unresolvedLabel ?? "an earlier transfer";
       model = {
         kind: "disabled",
-        reason: "Finishing the previous confirmation. One moment.",
+        reason: !pinnedModel
+          ? "Finishing the previous confirmation. One moment."
+          : record.status === "sending"
+            ? `A transfer confirmation is already being saved (${named}).`
+            : `A transfer confirmation is still unresolved (${named}). Resolve it above first.`,
+      };
+    } else if (runId === null || data.projection.run_id !== runId) {
+      model = {
+        kind: "disabled",
+        reason: "The projection run changed since this preview, preview again",
+        onPreviewAgain: previewAgain,
       };
     } else if (!data.confirmable || !data.commit) {
       model = { kind: "disabled", reason: notConfirmableReason(data) };
@@ -393,8 +437,9 @@ export function usePlannerConfirmation(params: {
     preview,
     notice,
     model,
-    // An unresolved submission stays actionable even when no preview is open.
-    unresolved: preview.kind === "ok" ? null : pinnedModel,
+    // An unresolved submission stays actionable, apart from whichever candidate is previewed.
+    unresolved: pinnedModel,
+    unresolvedLabel,
     openPreview,
     closePreview,
     dismissNotice: () => setNotice(null),

@@ -110,11 +110,14 @@ function ConfirmationNoticeView({
           data-testid="commit-rejection"
           className={ALERT_CLASSES}
         >
-          <p className="font-medium">Not added: {notice.message}</p>
+          <p className="font-medium">
+            Not added{notice.summary ? ` (${notice.summary})` : ""}:{" "}
+            {notice.message}
+          </p>
           {notice.code === "prices_changed" && (
             <p className="mt-1">
-              The preview below shows the current prices; confirm again to add
-              it. Nothing was submitted automatically.
+              Check the current prices in a fresh preview and confirm again to
+              add it. Nothing was submitted automatically.
             </p>
           )}
           {dismiss}
@@ -128,6 +131,9 @@ function ConfirmationNoticeView({
           className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"
         >
           <p>{NOT_ADDED_NOTICE}</p>
+          {notice.summary && (
+            <p className="mt-1">Stopped tracking: {notice.summary}.</p>
+          )}
           <p className="mt-1">Preview the transfer again to confirm it.</p>
           {dismiss}
         </div>
@@ -528,6 +534,7 @@ function ExplorerWorkspace({
         <PlannerCommitRegion
           gameweek={gameweek}
           model={confirmation.unresolved}
+          label={confirmation.unresolvedLabel}
           standalone
         />
       )}

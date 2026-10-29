@@ -187,6 +187,7 @@ type MockedServer = {
   plan: PlanResponse;
   revision: number;
   incomingPriceTenths: number;
+  latestRun: number;
   mutations: {
     mutation_id: string;
     expected_revision: number;
@@ -202,13 +203,18 @@ type MockedServer = {
   committed: number[];
 };
 
-function previewPayload(server: MockedServer, playerInId: number) {
+function previewPayload(
+  server: MockedServer,
+  playerInId: number,
+  runId: number,
+) {
   const base =
     playerInId === 103
       ? buildStructuralBlockedPreview()
       : buildPlannerPreviewResponse();
   const shift = GAMEWEEK - 9;
   const payload = structuredClone(base);
+  payload.projection.run_id = runId;
   payload.planning_context = {
     plan_id: server.plan.plan_id,
     gameweek: GAMEWEEK,
@@ -249,6 +255,7 @@ async function installTransferApi(page: Page, planName: string) {
     plan,
     revision: 0,
     incomingPriceTenths: 62,
+    latestRun: EXPLORER_RUN_ID,
     mutations: [],
     receipts: [],
     previewRequests: [],
@@ -337,13 +344,22 @@ async function installTransferApi(page: Page, planName: string) {
       const playerIn = Number(url.searchParams.get("player_in_id"));
       server.previewRequests.push(playerIn);
       return route.fulfill({
-        json: previewPayload(server, playerIn),
+        json: previewPayload(
+          server,
+          playerIn,
+          Number(url.searchParams.get("projection_run_id") ?? server.latestRun),
+        ),
         headers: HEADERS,
       });
     }
     if (url.pathname.includes("/transfers/")) {
       const payload = explorerPayload(plan.plan_id, plan.name);
       payload.planning_context.revision = server.revision;
+      payload.projection.run_id = Number(
+        url.searchParams.get("projection_run_id") ?? server.latestRun,
+      );
+      payload.projection.newer_run_available =
+        payload.projection.run_id !== server.latestRun;
       payload.candidates.push(buildFinancialBlockedCandidate());
       return route.fulfill({ json: payload, headers: HEADERS });
     }
@@ -658,6 +674,90 @@ for (const viewport of [
       ).toBeVisible();
       expect(server.mutations).toHaveLength(1);
       expect(server.committed).toEqual([]);
+    });
+
+    test("a preview made on one projection run cannot be confirmed on another", async ({
+      page,
+    }) => {
+      const server = await installTransferApi(page, "Run switch");
+      await openExplorer(page, server);
+      await page
+        .getByRole("button", { name: "Preview Available Alex" })
+        .click();
+      await expect(
+        page.getByRole("button", { name: "Confirm transfer" }),
+      ).toBeEnabled();
+      server.latestRun = EXPLORER_RUN_ID + 35;
+      // A horizon change keeps the run and the open preview.
+      await page.getByRole("button", { name: "3 GWs", exact: true }).click();
+      const notice = page.getByTestId("newer-run-notice");
+      await expect(notice).toBeVisible();
+      await expect(
+        page.getByRole("region", { name: "Transfer preview" }),
+      ).toBeVisible();
+      expect(server.previewRequests).toEqual([101]);
+
+      await notice.getByRole("button", { name: "Use the latest run" }).click();
+
+      await expect(page).toHaveURL(new RegExp(`run=${EXPLORER_RUN_ID + 35}$`));
+      await expect(
+        page.getByRole("table", { name: "Replacement candidates" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("region", { name: "Transfer preview" }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: "Confirm transfer" }),
+      ).toHaveCount(0);
+      expect(server.mutations).toHaveLength(0);
+
+      await page
+        .getByRole("button", { name: "Preview Available Alex" })
+        .click();
+      await expect(
+        page.getByRole("button", { name: "Confirm transfer" }),
+      ).toBeEnabled();
+      expect(server.previewRequests).toEqual([101, 101]);
+    });
+
+    test("B5 an unresolved submission keeps its own region when another candidate is previewed", async ({
+      page,
+    }) => {
+      const server = await installTransferApi(page, "B5 switch");
+      server.onMutation = () => "accepted_not_saved";
+      await openExplorer(page, server);
+      await page
+        .getByRole("button", { name: "Preview Available Alex" })
+        .click();
+      await page.getByRole("button", { name: "Confirm transfer" }).click();
+      const region = page.getByRole("region", {
+        name: "Unresolved transfer confirmation",
+      });
+      await expect(region).toContainText(
+        `P${OUTGOING_ID} to Available Alex in GW${GAMEWEEK}`,
+      );
+
+      await page.getByRole("button", { name: "Preview Blocked Ben" }).click();
+
+      const panel = page.getByRole("region", { name: "Transfer preview" });
+      await expect(
+        panel.getByRole("heading", { name: /for Blocked Ben/ }),
+      ).toBeVisible();
+      await expect(panel.getByTestId("commit-pending")).toHaveCount(0);
+      await expect(
+        panel.getByRole("button", { name: "Confirm transfer" }),
+      ).toBeDisabled();
+      await expect(panel.getByTestId("confirm-disabled-reason")).toContainText(
+        "Available Alex",
+      );
+      await expect(
+        region.getByRole("button", { name: "Stop tracking this transfer" }),
+      ).toBeVisible();
+      await expect(
+        region.getByRole("button", { name: "Retry same transfer" }),
+      ).toBeVisible();
+      expect(await smallTargets(page)).toEqual([]);
+      expect(server.mutations).toHaveLength(1);
     });
   });
 }

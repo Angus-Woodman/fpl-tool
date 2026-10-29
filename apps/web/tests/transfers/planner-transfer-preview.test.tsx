@@ -86,6 +86,9 @@ type Api = {
   /** Replies to a mutation immediately instead of waiting for the test. */
   autoMutation: ((envelope: PlanMutationEnvelope) => Response) | null;
   receiptReply: (() => Response) | null;
+  /** The run served when a request does not pin one. */
+  latestRun: number;
+  listCalls: URL[];
   spy: MockInstance<typeof fetch>;
 };
 
@@ -111,6 +114,8 @@ function installApi(plan: PlanResponse = freshPlan()): Api {
     mutations: [],
     autoMutation: null,
     receiptReply: null,
+    latestRun: EXPLORER_RUN_ID,
+    listCalls: [],
     spy: undefined as never,
   };
   const candidates = [
@@ -166,7 +171,11 @@ function installApi(plan: PlanResponse = freshPlan()): Api {
           const result = await source(
             api.previewCalls.filter((id) => id === playerIn).length,
           );
-          return result instanceof Response ? result : json(200, result);
+          if (result instanceof Response) return result;
+          result.projection.run_id = Number(
+            url.searchParams.get("projection_run_id") ?? api.latestRun,
+          );
+          return json(200, result);
         }
         if (url.pathname.includes("/transfers/")) {
           const response = forPlan(
@@ -174,6 +183,10 @@ function installApi(plan: PlanResponse = freshPlan()): Api {
             plan.plan_id,
           );
           response.planning_context.revision = api.plan.revision;
+          response.projection.run_id = Number(
+            url.searchParams.get("projection_run_id") ?? api.latestRun,
+          );
+          api.listCalls.push(url);
           return json(200, response);
         }
         throw new Error(`Unexpected request ${method} ${url.pathname}`);
@@ -196,20 +209,28 @@ function committedBody(
   };
 }
 
-function renderExplorer(
-  api: Api,
-  options: { commit?: PlannerCommitFactory; horizon?: 1 | 3 | 5 } = {},
-) {
-  return render(
+type ExplorerOptions = {
+  commit?: PlannerCommitFactory;
+  horizon?: 1 | 3 | 5;
+  runId?: number | null;
+};
+
+function renderExplorer(api: Api, options: ExplorerOptions = {}) {
+  const element = (next: ExplorerOptions) => (
     <PlannerTransferExplorer
       planId={api.plan.plan_id}
       gameweek={EXPLORER_GAMEWEEK}
       playerOutId={EXPLORER_OUTGOING_ID}
-      horizon={options.horizon ?? 5}
-      runId={EXPLORER_RUN_ID}
+      horizon={next.horizon ?? 5}
+      runId={next.runId === undefined ? EXPLORER_RUN_ID : next.runId}
       commit={options.commit}
-    />,
+    />
   );
+  const view = render(element(options));
+  return {
+    ...view,
+    rerenderWith: (next: ExplorerOptions) => view.rerender(element(next)),
+  };
 }
 
 async function openPreview(name = "Available Alex") {
@@ -465,6 +486,75 @@ describe("Planner transfer preview", () => {
     expect(
       within(panel).getByRole("button", { name: "Confirm transfer" }),
     ).toBeDisabled();
+  });
+
+  it("keeps the figures the server retained for a financially invalid gameweek, labelled as an invalid scenario", async () => {
+    const api = installApi();
+    renderExplorer(api);
+    const panel = await openPreview("Costly Cal");
+
+    const shortfall = within(panel).getByTestId("preview-gw-10");
+    expect(shortfall).toHaveAttribute("data-valid", "false");
+    expect(shortfall).toHaveTextContent("Starting");
+    expect(shortfall).toHaveTextContent("61.0");
+    expect(shortfall).toHaveTextContent("62.0");
+    expect(shortfall).toHaveTextContent("+1.0");
+    expect(shortfall).toHaveTextContent(/invalid scenario/i);
+    expect(within(panel).getByTestId("preview-gw-9")).not.toHaveTextContent(
+      /invalid scenario/i,
+    );
+  });
+
+  it("withholds everything the server withheld for dependent later gameweeks of a financial conflict", async () => {
+    const api = installApi();
+    renderExplorer(api);
+    const panel = await openPreview("Costly Cal");
+
+    for (const gameweek of [11, 12]) {
+      const row = within(panel).getByTestId(`preview-gw-${gameweek}`);
+      expect(row).toHaveAttribute("data-valid", "false");
+      expect(row).toHaveTextContent(/not valid/i);
+      expect(row.textContent).not.toMatch(/\d+\.\d/);
+      expect(row).not.toHaveTextContent(/starting|bench|captain/i);
+    }
+  });
+
+  it("still withholds the clashing gameweek and later ones of a structural conflict, and labels any figure it is given", async () => {
+    const api = installApi();
+    api.previews.set(103, () => {
+      const preview = previewAt(
+        buildStructuralBlockedPreview(),
+        api.plan.plan_id,
+        REVISION,
+      );
+      preview.gameweeks[2] = {
+        ...preview.gameweeks[2],
+        incoming_role: "bench",
+        points: { before: 50, after: 51, delta: 1 },
+      };
+      return preview;
+    });
+    renderExplorer(api);
+    const panel = await openPreview("Blocked Ben");
+
+    const clash = within(panel).getByTestId("preview-gw-11");
+    expect(clash).toHaveTextContent("Bench");
+    expect(clash).toHaveTextContent("+1.0");
+    expect(clash).toHaveTextContent(/invalid scenario/i);
+    const later = within(panel).getByTestId("preview-gw-12");
+    expect(later.textContent).not.toMatch(/\d+\.\d/);
+  });
+
+  it("shows no figures for a structural conflict's gameweeks when the server provides none", async () => {
+    const api = installApi();
+    renderExplorer(api);
+    const panel = await openPreview("Blocked Ben");
+
+    for (const gameweek of [11, 12]) {
+      const row = within(panel).getByTestId(`preview-gw-${gameweek}`);
+      expect(row).toHaveTextContent(/not valid/i);
+      expect(row.textContent).not.toMatch(/\d+\.\d/);
+    }
   });
 
   it("explains an unavailable candidate and keeps Confirm disabled", async () => {
@@ -852,8 +942,8 @@ describe("Planner transfer confirmation through the commit adapter", () => {
     ).not.toBeInTheDocument();
     expect(fake.abandon).not.toHaveBeenCalled();
     expect(
-      within(panel).queryByRole("button", { name: "Confirm transfer" }),
-    ).not.toBeInTheDocument();
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    ).toBeDisabled();
   });
 
   it("offers a refresh after a conflict, abandoning and previewing again from fresh data", async () => {
@@ -1244,6 +1334,7 @@ describe("Planner transfer confirmation after navigating away", () => {
     const region = await screen.findByRole("region", {
       name: "Unresolved transfer confirmation",
     });
+    expect(region).toHaveTextContent("P6 to Available Alex in GW9");
     expect(
       within(region).getByRole("button", {
         name: "Stop tracking this transfer",
@@ -1254,5 +1345,343 @@ describe("Planner transfer confirmation after navigating away", () => {
     ).toBeInTheDocument();
     expect(api.mutations).toHaveLength(1);
     expect(screen.queryByTestId("commit-success")).not.toBeInTheDocument();
+  });
+});
+
+describe("Planner transfer preview and the selected projection run", () => {
+  const regionName = { name: "Transfer preview" };
+
+  it("invalidates the open preview when the run changes and submits nothing", async () => {
+    const api = installApi();
+    const view = renderExplorer(api);
+    await openPreview();
+
+    view.rerenderWith({ runId: 43 });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("region", regionName)).not.toBeInTheDocument(),
+    );
+    await screen.findByRole("table");
+    expect(api.listCalls.at(-1)?.searchParams.get("projection_run_id")).toBe(
+      "43",
+    );
+    expect(screen.queryByRole("region", regionName)).not.toBeInTheDocument();
+    expect(api.previewCalls).toEqual([101]);
+    expect(api.mutations).toHaveLength(0);
+  });
+
+  it("ignores a late preview response from the previous run", async () => {
+    const api = installApi();
+    const late = deferred<Response>();
+    api.previews.set(101, () => late.promise);
+    const view = renderExplorer(api);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Preview Available Alex" }),
+    );
+    await waitFor(() => expect(api.previewCalls).toEqual([101]));
+
+    view.rerenderWith({ runId: 43 });
+    await screen.findByRole("table");
+    await act(async () => {
+      late.resolve(
+        json(
+          200,
+          previewAt(buildPlannerPreviewResponse(), api.plan.plan_id, REVISION),
+        ),
+      );
+    });
+
+    expect(screen.queryByRole("region", regionName)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Confirm transfer" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading preview...")).not.toBeInTheDocument();
+    expect(api.mutations).toHaveLength(0);
+  });
+
+  it("previews again on the new run, and only that preview can be confirmed", async () => {
+    const api = installApi();
+    const view = renderExplorer(api);
+    await openPreview();
+    view.rerenderWith({ runId: 43 });
+    await screen.findByRole("table");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Preview Available Alex" }),
+    );
+
+    const panel = await screen.findByRole("region", regionName);
+    expect(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    ).toBeEnabled();
+    const last = api.spy.mock.calls
+      .map(([input]) => new URL(String(input)))
+      .filter((url) => url.pathname.endsWith("/preview"))
+      .at(-1);
+    expect(last?.searchParams.get("projection_run_id")).toBe("43");
+  });
+
+  it("invalidates the preview when the latest run replaces the pinned one", async () => {
+    const api = installApi();
+    const view = renderExplorer(api);
+    await openPreview();
+    api.latestRun = 99;
+
+    view.rerenderWith({ runId: null });
+
+    await screen.findByRole("table");
+    await waitFor(() =>
+      expect(screen.queryByRole("region", regionName)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText(/component_v3/)).toBeInTheDocument();
+    expect(api.mutations).toHaveLength(0);
+  });
+
+  it("disables Confirm unless the preview was made on the selected run", async () => {
+    const api = installApi();
+    api.previews.set(101, () => {
+      const preview = previewAt(
+        buildPlannerPreviewResponse(),
+        api.plan.plan_id,
+        REVISION,
+      );
+      preview.projection.run_id = 41;
+      return json(200, preview);
+    });
+    renderExplorer(api);
+
+    const panel = await openPreview();
+
+    expect(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    ).toBeDisabled();
+    expect(
+      within(panel).getByTestId("confirm-disabled-reason"),
+    ).toHaveTextContent(/projection run/i);
+    expect(
+      within(panel).getByRole("button", { name: "Preview again" }),
+    ).toBeInTheDocument();
+    expect(api.mutations).toHaveLength(0);
+  });
+
+  it("keeps the preview, its run and Confirm when only the horizon changes", async () => {
+    const api = installApi();
+    const view = renderExplorer(api);
+    await openPreview();
+
+    view.rerenderWith({ horizon: 3, runId: EXPLORER_RUN_ID });
+
+    await screen.findByRole("table", { name: "Replacement candidates" });
+    const panel = screen.getByRole("region", regionName);
+    expect(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    ).toBeEnabled();
+    expect(api.previewCalls).toEqual([101]);
+    expect(api.listCalls.at(-1)?.searchParams.get("projection_run_id")).toBe(
+      "42",
+    );
+    expect(api.listCalls.at(-1)?.searchParams.get("primary_horizon")).toBe("3");
+  });
+});
+
+describe("Planner unresolved submissions stay with their own transfer", () => {
+  const LABEL = "P6 to Available Alex in GW9";
+  const unresolved = { name: "Unresolved transfer confirmation" };
+
+  async function submitThenSwitch(
+    status: "sending" | "unknown" | "pending_unsaved" | "conflict",
+  ) {
+    const api = installApi();
+    const harness = createFakeCommit(api);
+    renderExplorer(api, { commit: harness.factory });
+    const panel = await openPreview();
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    );
+    act(() =>
+      harness.set({
+        pinned: pinned({
+          submissionId: "own-1",
+          status,
+          message: "Server said so",
+        }),
+        idle: false,
+        label: LABEL,
+      }),
+    );
+    const region = await screen.findByRole("region", unresolved);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Preview Blocked Ben" }),
+    );
+    const other = await screen.findByRole("region", {
+      name: "Transfer preview",
+    });
+    await screen.findByRole("heading", { name: /for Blocked Ben/ });
+    return { api, ...harness, region, other };
+  }
+
+  it.each(["sending", "unknown", "pending_unsaved", "conflict"] as const)(
+    "names the transfer in its own region while %s and keeps its controls out of another candidate's preview",
+    async (status) => {
+      const { other, region } = await submitThenSwitch(status);
+
+      expect(region).toHaveTextContent(LABEL);
+      expect(screen.getByRole("region", unresolved)).toHaveTextContent(LABEL);
+      for (const id of [
+        "commit-unknown",
+        "commit-pending",
+        "commit-conflict",
+      ]) {
+        expect(within(other).queryByTestId(id)).not.toBeInTheDocument();
+      }
+      expect(
+        within(other).queryByRole("button", {
+          name: /retry same|check save|stop tracking|refresh and preview/i,
+        }),
+      ).not.toBeInTheDocument();
+      expect(
+        within(other).getByRole("button", { name: "Confirm transfer" }),
+      ).toBeDisabled();
+      expect(
+        within(other).getByTestId("confirm-disabled-reason"),
+      ).toHaveTextContent(LABEL);
+    },
+  );
+
+  it("reports a transfer that is still sending as a status of that transfer", async () => {
+    await submitThenSwitch("sending");
+
+    expect(
+      within(screen.getByRole("region", unresolved)).getByRole("status", {
+        name: /saving/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("retries and checks the same submission from its own region", async () => {
+    const { fake, region } = await submitThenSwitch("unknown");
+
+    fireEvent.click(
+      within(region).getByRole("button", { name: "Check save status" }),
+    );
+    fireEvent.click(
+      within(region).getByRole("button", { name: "Retry same transfer" }),
+    );
+
+    expect(fake.reconcile).toHaveBeenCalledTimes(1);
+    expect(fake.retry).toHaveBeenCalledTimes(1);
+    expect(fake.submit).toHaveBeenCalledTimes(1);
+    expect(
+      within(region).queryByRole("button", { name: /stop tracking/i }),
+    ).not.toBeInTheDocument();
+    expect(fake.abandon).not.toHaveBeenCalled();
+  });
+
+  it("stops tracking only the unresolved transfer and leaves the open preview alone", async () => {
+    const { fake, region } = await submitThenSwitch("pending_unsaved");
+    expect(region).toHaveTextContent(/stop tracking it, it will not be added/i);
+
+    fireEvent.click(
+      within(region).getByRole("button", {
+        name: "Stop tracking this transfer",
+      }),
+    );
+
+    const notice = await screen.findByTestId("not-added-notice");
+    expect(notice).toHaveTextContent(LABEL);
+    expect(notice).toHaveTextContent(
+      "Transfer not added to your plan. The server may still hold a pending record of it; that record is not a saved transfer and this app will not retry it.",
+    );
+    expect(fake.abandon).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("heading", { name: /for Blocked Ben/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("region", unresolved)).not.toBeInTheDocument();
+  });
+
+  it("refreshes after a conflict by previewing the transfer that conflicted", async () => {
+    const { api, fake, region } = await submitThenSwitch("conflict");
+
+    fireEvent.click(
+      within(region).getByRole("button", { name: "Refresh and preview again" }),
+    );
+
+    await waitFor(() => expect(fake.abandon).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.previewCalls.at(-1)).toBe(101));
+    await screen.findByRole("heading", { name: /for Available Alex/ });
+  });
+
+  it("keeps same-identity retry working after switching candidates with the real coordinator", async () => {
+    const api = installApi();
+    renderExplorer(api);
+    const panel = await openPreview();
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    );
+    await waitFor(() => expect(api.mutations).toHaveLength(1));
+    await act(async () => {
+      api.mutations[0].gate.reject(new TypeError("Failed to fetch"));
+    });
+    const region = await screen.findByRole("region", unresolved);
+    expect(region).toHaveTextContent(LABEL);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Preview Blocked Ben" }),
+    );
+    await screen.findByRole("heading", { name: /for Blocked Ben/ });
+    fireEvent.click(
+      within(screen.getByRole("region", unresolved)).getByRole("button", {
+        name: "Retry same transfer",
+      }),
+    );
+
+    await waitFor(() => expect(api.mutations).toHaveLength(2));
+    expect(api.mutations[1].envelope.mutation_id).toBe(
+      api.mutations[0].envelope.mutation_id,
+    );
+    expect(api.mutations[1].envelope.intents).toEqual(
+      api.mutations[0].envelope.intents,
+    );
+  });
+
+  it("does not replace another candidate's preview when a rejection arrives for the earlier transfer", async () => {
+    const api = installApi();
+    const harness = createFakeCommit(api);
+    renderExplorer(api, { commit: harness.factory });
+    const panel = await openPreview();
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    );
+    act(() =>
+      harness.set({
+        pinned: pinned({ submissionId: "own-1", status: "sending" }),
+        idle: false,
+        label: LABEL,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Preview Blocked Ben" }),
+    );
+    await screen.findByRole("heading", { name: /for Blocked Ben/ });
+
+    act(() =>
+      harness.set({
+        pinned: pinned({
+          submissionId: "own-1",
+          status: "rejected",
+          message: "Prices changed",
+          code: "prices_changed",
+        }),
+        idle: true,
+      }),
+    );
+
+    const rejection = await screen.findByTestId("commit-rejection");
+    expect(rejection).toHaveTextContent(LABEL);
+    expect(rejection).toHaveTextContent("Prices changed");
+    expect(
+      screen.getByRole("heading", { name: /for Blocked Ben/ }),
+    ).toBeInTheDocument();
+    expect(api.previewCalls).toEqual([101, 103]);
   });
 });

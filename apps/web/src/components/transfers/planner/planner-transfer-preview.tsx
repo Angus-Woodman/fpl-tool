@@ -53,6 +53,8 @@ function unavailableReason(week: PlanPreviewGameweek): string {
 
 function GameweekRow({ week }: { week: PlanPreviewGameweek }): JSX.Element {
   const accounting = week.accounting;
+  // The server keeps points and roles for a financially invalid gameweek; show what it returned, labelled.
+  const hasFigures = week.points !== null || week.incoming_role !== null;
   return (
     <tr
       data-testid={`preview-gw-${week.gameweek}`}
@@ -60,7 +62,7 @@ function GameweekRow({ week }: { week: PlanPreviewGameweek }): JSX.Element {
       data-basis={week.basis}
       data-valid={String(week.valid)}
       className={`border-b border-slate-100 align-top max-md:flex max-md:flex-col max-md:py-3 ${
-        week.valid ? "" : "bg-amber-50"
+        week.valid ? "" : "bg-amber-50 italic text-slate-600"
       }`}
     >
       <th scope="row" className={ROW_HEADER}>
@@ -85,24 +87,26 @@ function GameweekRow({ week }: { week: PlanPreviewGameweek }): JSX.Element {
           : "-"}
       </td>
       <td className={CELL} data-label="Incoming player">
-        {week.valid && week.incoming_role
+        {week.incoming_role
           ? ROLE_LABELS[week.incoming_role]
           : week.valid
             ? "Not in squad"
             : "-"}
       </td>
       <td className={CELL} data-label="Points before → after">
-        {week.valid && week.points
+        {week.points
           ? `${week.points.before.toFixed(1)} → ${week.points.after.toFixed(1)}`
           : "-"}
       </td>
       <td className={`${CELL} font-medium`} data-label="Change (before hits)">
-        {week.valid && week.points
-          ? formatSignedPoints(week.points.delta)
-          : "-"}
+        {week.points ? formatSignedPoints(week.points.delta) : "-"}
       </td>
       <td className="py-2 text-xs text-amber-900 max-md:py-1">
-        {week.valid ? "" : unavailableReason(week)}
+        {week.valid
+          ? ""
+          : hasFigures
+            ? `Invalid scenario. ${unavailableReason(week)}. Figures are shown only to explain it.`
+            : unavailableReason(week)}
       </td>
     </tr>
   );
@@ -363,11 +367,14 @@ export function PlannerCommitRegion({
   gameweek,
   model,
   standalone = false,
+  label = null,
 }: {
   gameweek: number;
   model: CommitRegionModel;
-  /** Shown without a preview: an unresolved submission found after navigation. */
+  /** An unresolved submission, shown apart from any candidate preview. */
   standalone?: boolean;
+  /** Names the submission a standalone region belongs to. */
+  label?: string | null;
 }): JSX.Element {
   const title = standalone
     ? "Unresolved transfer confirmation"
@@ -516,7 +523,11 @@ export function PlannerCommitRegion({
       aria-label={title}
       className="space-y-3 border-t border-slate-200 pt-4"
     >
-      <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
+      <h3 className="text-sm font-semibold text-slate-900">
+        {standalone
+          ? `Unresolved transfer: ${label ?? "an earlier transfer"}`
+          : title}
+      </h3>
       {content}
     </section>
   );
