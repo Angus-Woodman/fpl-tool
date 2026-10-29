@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchPlanTransferExplorer } from "@/lib/api";
+import { fetchPlanTransferExplorer, fetchPlanTransferPreview } from "@/lib/api";
 
 import {
+  buildExplorerHorizons,
+  buildFinancialBlockedPreview,
   buildPlannerExplorerResponse,
+  buildPlannerPreviewResponse,
+  buildStructuralBlockedPreview,
   EXPLORER_GAMEWEEK,
   EXPLORER_PLAN_ID,
 } from "../fixtures/planner-explorer";
@@ -149,6 +153,163 @@ describe("fetchPlanTransferExplorer", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(respond(500, {}));
 
     await expect(fetchPlanTransferExplorer(params)).rejects.toThrow(
+      /status 500/,
+    );
+  });
+});
+
+describe("fetchPlanTransferPreview", () => {
+  const previewParams = { ...params, playerInId: 101, projectionRunId: 42 };
+
+  it("requests the plan-scoped preview on the pinned run", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(respond(200, buildPlannerPreviewResponse()));
+
+    await fetchPlanTransferPreview(previewParams);
+
+    const url = new URL(String(fetchSpy.mock.calls[0][0]));
+    expect(url.pathname).toBe("/plans/7/gameweeks/9/transfers/6/preview");
+    expect(url.searchParams.get("player_in_id")).toBe("101");
+    expect(url.searchParams.get("projection_run_id")).toBe("42");
+    expect(fetchSpy.mock.calls[0][1]?.method ?? "GET").toBe("GET");
+  });
+
+  it("omits an unpinned run", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(respond(200, buildPlannerPreviewResponse()));
+
+    await fetchPlanTransferPreview({ ...params, playerInId: 101 });
+
+    const url = new URL(String(fetchSpy.mock.calls[0][0]));
+    expect(url.searchParams.has("projection_run_id")).toBe(false);
+  });
+
+  it("returns the exact server-issued commit descriptor untouched", async () => {
+    const payload = buildPlannerPreviewResponse();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(respond(200, payload));
+
+    const result = await fetchPlanTransferPreview(previewParams);
+
+    expect(result.type).toBe("ok");
+    if (result.type === "ok") {
+      expect(result.data.commit).toEqual(payload.commit);
+      expect(result.data.commit?.expected_revision).toBe(
+        result.data.planning_context.revision,
+      );
+      expect(result.data.planning_context).toEqual(payload.planning_context);
+    }
+  });
+
+  it("keeps a blocked candidate's conflict and withheld descriptor", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      respond(200, buildStructuralBlockedPreview()),
+    );
+
+    const result = await fetchPlanTransferPreview(previewParams);
+
+    expect(result.type).toBe("ok");
+    if (result.type === "ok") {
+      expect(result.data.confirmable).toBe(false);
+      expect(result.data.commit).toBeNull();
+      expect(result.data.conflict).toMatchObject({
+        kind: "structural",
+        gameweek: 11,
+      });
+      expect(result.data.valid_through_gameweek).toBe(10);
+    }
+  });
+
+  it("keeps a financial shortfall gameweek's accounting and shortfall", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      respond(200, buildFinancialBlockedPreview()),
+    );
+
+    const result = await fetchPlanTransferPreview(previewParams);
+
+    expect(result.type).toBe("ok");
+    if (result.type === "ok") {
+      const shortfall = result.data.gameweeks.find(
+        (week) => week.reason === "financial_shortfall",
+      );
+      expect(shortfall).toMatchObject({
+        gameweek: 10,
+        valid: false,
+        shortfall_tenths: 25,
+      });
+      expect(shortfall?.accounting?.after.closing_bank_tenths).toBe(-25);
+      expect(result.data.conflict?.kind).toBe("financial");
+    }
+  });
+
+  it("keeps partial horizon coverage", async () => {
+    const payload = buildPlannerPreviewResponse();
+    payload.projection.horizons = buildExplorerHorizons({
+      5: { evaluated_gameweeks: [9, 10], partial: true },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(respond(200, payload));
+
+    const result = await fetchPlanTransferPreview(previewParams);
+
+    expect(
+      result.type === "ok" && result.data.projection.horizons[2].partial,
+    ).toBe(true);
+  });
+
+  it("maps missing plan, player and readiness without a My Team fallback", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        respond(404, { detail: { code: "plan_not_found", message: "x" } }),
+      )
+      .mockResolvedValueOnce(
+        respond(404, { detail: { code: "player_not_found", message: "x" } }),
+      )
+      .mockResolvedValueOnce(
+        respond(409, { detail: { code: "plan_not_ready", message: "Wait" } }),
+      );
+
+    await expect(fetchPlanTransferPreview(previewParams)).resolves.toEqual({
+      type: "plan_not_found",
+    });
+    await expect(fetchPlanTransferPreview(previewParams)).resolves.toEqual({
+      type: "player_not_found",
+    });
+    await expect(fetchPlanTransferPreview(previewParams)).resolves.toEqual({
+      type: "plan_not_ready",
+      message: "Wait",
+    });
+    for (const call of fetchSpy.mock.calls) {
+      expect(String(call[0])).not.toContain("/my-team/");
+    }
+  });
+
+  it.each([
+    "player_not_in_candidate_pool",
+    "missing_projections",
+    "selectability_unknown",
+    "gameweek_not_projected",
+    "run_not_found",
+  ])("maps %s to an unavailable state with the server code", async (code) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      respond(422, {
+        detail: { code, message: `server ${code}`, missing_player_ids: [101] },
+      }),
+    );
+
+    await expect(fetchPlanTransferPreview(previewParams)).resolves.toEqual({
+      type: "unavailable",
+      code,
+      message: `server ${code}`,
+      missingPlayerIds: [101],
+    });
+  });
+
+  it("throws for unexpected failures", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(respond(500, {}));
+
+    await expect(fetchPlanTransferPreview(previewParams)).rejects.toThrow(
       /status 500/,
     );
   });

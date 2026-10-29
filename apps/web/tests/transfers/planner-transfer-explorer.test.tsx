@@ -27,6 +27,7 @@ import type {
 import {
   buildAvailableCandidate,
   buildBlockedCandidate,
+  buildFinancialBlockedCandidate,
   buildExplorerCandidate,
   buildExplorerHorizons,
   buildPlannerExplorerResponse,
@@ -432,16 +433,15 @@ describe("PlannerTransferExplorer: candidates", () => {
     expect(screen.getAllByRole("row")).toHaveLength(4);
   });
 
-  it("offers only a disabled, clearly unavailable Preview in this read-only phase", async () => {
+  it("offers an enabled Preview per candidate that only reads", async () => {
     const fetchSpy = installApi({});
     renderExplorer();
 
     await screen.findByRole("table");
-    const buttons = screen.getAllByRole("button", { name: /preview/i });
+    const buttons = screen.getAllByRole("button", { name: /^Preview / });
     expect(buttons).toHaveLength(3);
     for (const button of buttons) {
-      expect(button).toBeDisabled();
-      fireEvent.click(button);
+      expect(button).toBeEnabled();
     }
     expect(
       fetchSpy.mock.calls.every(
@@ -507,7 +507,7 @@ describe("PlannerTransferExplorer: outgoing summary", () => {
 
     expect(
       await screen.findByRole("link", { name: /choose a different player/i }),
-    ).toHaveAttribute("href", "/transfers?plan=7&gw=9");
+    ).toHaveAttribute("href", "/transfers?plan=7&gw=9&h=5&run=42");
   });
 });
 
@@ -694,5 +694,163 @@ describe("candidate fixtures used by the explorer tests", () => {
     expect(buildAvailableCandidate().state).toBe("available");
     expect(buildUnavailableCandidate().state).toBe("unavailable");
     expect(buildBlockedCandidate().state).toBe("blocked_by_later_decision");
+  });
+});
+
+describe("PlannerTransferExplorer: run and horizon survive switching players", () => {
+  it("keeps the horizon and pinned run when choosing a different player", async () => {
+    installApi({});
+    renderExplorer({ horizon: 3, runId: EXPLORER_RUN_ID });
+
+    expect(
+      await screen.findByRole("link", { name: /choose a different player/i }),
+    ).toHaveAttribute("href", "/transfers?plan=7&gw=9&h=3&run=42");
+  });
+
+  it("uses the run resolved by the first load when the address did not pin one", async () => {
+    installApi({});
+    renderExplorer({ horizon: 1 });
+
+    expect(
+      await screen.findByRole("link", { name: /choose a different player/i }),
+    ).toHaveAttribute(
+      "href",
+      `/transfers?plan=7&gw=9&h=1&run=${EXPLORER_RUN_ID}`,
+    );
+  });
+
+  it("keeps the context on the link shown with an unavailable state", async () => {
+    installApi({
+      explorer: () =>
+        json(422, { detail: { code: "no_projection_run", message: "none" } }),
+    });
+    renderExplorer({ horizon: 3, runId: 41 });
+
+    expect(
+      await screen.findByRole("link", { name: /choose a different player/i }),
+    ).toHaveAttribute("href", "/transfers?plan=7&gw=9&h=3&run=41");
+  });
+
+  it("keeps the horizon and run when a player is chosen from the selector", async () => {
+    installApi({});
+    renderExplorer({ playerOutId: null, horizon: 1, runId: 41 });
+
+    fireEvent.change(
+      await screen.findByRole("combobox", { name: "Outgoing player" }),
+      { target: { value: "8" } },
+    );
+
+    expect(routerPush).toHaveBeenCalledWith(
+      "/transfers?plan=7&gw=9&out=8&h=1&run=41",
+    );
+  });
+
+  it("asks for the newly chosen player on the same run and horizon", async () => {
+    const fetchSpy = installApi({});
+    const view = renderExplorer({ horizon: 3, runId: EXPLORER_RUN_ID });
+    await screen.findByRole("table");
+
+    view.rerenderWith({ playerOutId: 8, horizon: 3, runId: EXPLORER_RUN_ID });
+
+    await waitFor(() => {
+      const requests = fetchSpy.mock.calls
+        .map(([input]) => new URL(String(input)))
+        .filter((url) => url.pathname.includes("/transfers/"));
+      expect(requests.map((url) => url.pathname.split("/").pop())).toEqual([
+        "6",
+        "8",
+      ]);
+      for (const url of requests) {
+        expect(url.searchParams.get("primary_horizon")).toBe("3");
+        expect(url.searchParams.get("projection_run_id")).toBe("42");
+      }
+    });
+  });
+
+  it("ignores a stale response for the previous player", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const pending = [first, second];
+    installApi({ explorer: () => pending.shift()!.promise });
+    const view = renderExplorer({ runId: EXPLORER_RUN_ID });
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    view.rerenderWith({ playerOutId: 8, runId: EXPLORER_RUN_ID });
+    await waitFor(() => expect(pending).toHaveLength(0));
+
+    const forEight = buildPlannerExplorerResponse({
+      candidates: [
+        buildExplorerCandidate({ player_id: 311, web_name: "For Eight" }),
+      ],
+    });
+    forEight.outgoing.player_id = 8;
+    forEight.outgoing.web_name = "P8";
+    const forSix = buildPlannerExplorerResponse({
+      candidates: [
+        buildExplorerCandidate({ player_id: 312, web_name: "For Six" }),
+      ],
+    });
+    await act(async () => {
+      second.resolve(json(200, forEight));
+    });
+    await screen.findByText("For Eight");
+    await act(async () => {
+      first.resolve(json(200, forSix));
+    });
+
+    expect(screen.getByText("For Eight")).toBeInTheDocument();
+    expect(screen.queryByText("For Six")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /P8/ })).toBeInTheDocument();
+  });
+
+  it("changes only the run when the latest run is requested", async () => {
+    const response = buildPlannerExplorerResponse();
+    response.projection.newer_run_available = true;
+    installApi({ explorer: response });
+    renderExplorer({ horizon: 3, runId: EXPLORER_RUN_ID });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /use the latest run/i }),
+    );
+
+    expect(routerReplace).toHaveBeenCalledWith(
+      "/transfers?plan=7&gw=9&out=6&h=3",
+    );
+  });
+});
+
+describe("PlannerTransferExplorer: financial and structural conflicts", () => {
+  function financialAndStructural() {
+    installApi({
+      explorer: buildPlannerExplorerResponse({
+        candidates: [buildBlockedCandidate(), buildFinancialBlockedCandidate()],
+      }),
+    });
+  }
+
+  it("names a structural clash and its valid range", async () => {
+    financialAndStructural();
+    renderExplorer();
+
+    const row = within(await screen.findByRole("table")).getAllByRole("row")[1];
+    expect(row).toHaveTextContent("Blocked by GW11 planned transfer");
+    expect(row).toHaveTextContent("Valid through GW10");
+    expect(row).toHaveAttribute("data-conflict", "structural");
+  });
+
+  it("explains a financial conflict as a shortfall, never as a valid gameweek", async () => {
+    financialAndStructural();
+    renderExplorer();
+
+    const row = within(await screen.findByRole("table")).getAllByRole("row")[2];
+    expect(row).toHaveAttribute("data-conflict", "financial");
+    expect(row).toHaveTextContent(/GW11/);
+    expect(row).toHaveTextContent(/short by £2\.5m/i);
+    expect(row).toHaveTextContent(/cannot be afforded/i);
+    expect(row).toHaveTextContent(
+      "The bank would be short in GW11 after this transfer.",
+    );
+    expect(row).not.toHaveTextContent(/valid through/i);
+    expect(row).not.toHaveTextContent(/planned transfer/i);
   });
 });

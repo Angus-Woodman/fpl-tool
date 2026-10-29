@@ -1084,6 +1084,35 @@ async function readPlanTransferErrorDetail(
   }
 }
 
+async function mapPlanTransferFailure(
+  response: Response,
+  label: string,
+): Promise<Exclude<PlanTransferExplorerFetchResult, { type: "ok" }>> {
+  if (response.status === 404) {
+    const detail = await readPlanTransferErrorDetail(response);
+    return detail.code === "player_not_found"
+      ? { type: "player_not_found" }
+      : { type: "plan_not_found" };
+  }
+  if (response.status === 409) {
+    const detail = await readPlanTransferErrorDetail(response);
+    return {
+      type: "plan_not_ready",
+      message: detail.message ?? "This plan is not ready for transfers yet",
+    };
+  }
+  if (response.status === 422) {
+    const detail = await readPlanTransferErrorDetail(response);
+    return {
+      type: "unavailable",
+      code: detail.code ?? "transfer_explorer_unavailable",
+      message: detail.message ?? "This transfer could not be explored",
+      missingPlayerIds: detail.missing_player_ids ?? [],
+    };
+  }
+  throw new Error(`${label} request failed with status ${response.status}`);
+}
+
 export async function fetchPlanTransferExplorer(params: {
   planId: number;
   gameweek: number;
@@ -1100,41 +1129,129 @@ export async function fetchPlanTransferExplorer(params: {
   const response = await fetch(
     `${API_BASE_URL}/plans/${params.planId}/gameweeks/${params.gameweek}/transfers/${params.playerOutId}?${query.toString()}`,
   );
-
-  if (response.status === 404) {
-    const detail = await readPlanTransferErrorDetail(response);
-    return detail.code === "player_not_found"
-      ? { type: "player_not_found" }
-      : { type: "plan_not_found" };
-  }
-
-  if (response.status === 409) {
-    const detail = await readPlanTransferErrorDetail(response);
-    return {
-      type: "plan_not_ready",
-      message: detail.message ?? "This plan is not ready for transfers yet",
-    };
-  }
-
-  if (response.status === 422) {
-    const detail = await readPlanTransferErrorDetail(response);
-    return {
-      type: "unavailable",
-      code: detail.code ?? "transfer_explorer_unavailable",
-      message: detail.message ?? "This transfer could not be explored",
-      missingPlayerIds: detail.missing_player_ids ?? [],
-    };
-  }
-
   if (!response.ok) {
-    throw new Error(
-      `Planner transfer explorer request failed with status ${response.status}`,
-    );
+    return mapPlanTransferFailure(response, "Planner transfer explorer");
   }
-
   return {
     type: "ok",
     data: (await response.json()) as PlanTransferExplorerResponse,
+  };
+}
+
+export type PlanPreviewAccounting = {
+  closing_bank_tenths: number | null;
+  free_transfers_available: number | null;
+  transfers_made: number | null;
+  points_hit: number | null;
+  next_free_transfers: number | null;
+};
+
+export type PlanPreviewReason =
+  | "no_projection"
+  | "beyond_valid_range"
+  | "continuation_lineup_illegal"
+  | "financial_shortfall";
+
+export type PlanPreviewGameweek = {
+  gameweek: number;
+  basis: "saved_plan" | "assumed_continuation";
+  valid: boolean;
+  chip: string | null;
+  accounting: {
+    before: PlanPreviewAccounting;
+    after: PlanPreviewAccounting;
+  } | null;
+  squad_changed: boolean;
+  incoming_role: "starting" | "bench" | "captain" | "vice_captain" | null;
+  points: { before: number; after: number; delta: number } | null;
+  reason: PlanPreviewReason | null;
+  shortfall_tenths: number | null;
+};
+
+export type PlanPreviewTotals = {
+  saved_plan: number | null;
+  assumed_continuation: number | null;
+  hit_change: number;
+  net_saved_plan: number | null;
+};
+
+/** The Planner mutation the server issued for this preview; submitted exactly as given. */
+export type PlanCommitDescriptor = {
+  intent:
+    | {
+        kind: "add_transfer";
+        gameweek_number: number;
+        outgoing_player_id: number;
+        outgoing_ownership_id: string;
+        incoming_player_id: number;
+      }
+    | {
+        kind: "edit_transfer";
+        decision_id: string;
+        incoming_player_id: number;
+      };
+  guard: {
+    expected_outgoing_market_tenths: number;
+    expected_incoming_price_tenths: number;
+  };
+  expected_revision: number;
+};
+
+export type PlanTransferPreviewResponse = {
+  planning_context: PlanTransferExplorerResponse["planning_context"];
+  plan: PlanTransferExplorerResponse["plan"];
+  projection: PlanExplorerProjection;
+  accounting_before: PlanExplorerAccountingBefore;
+  outgoing: PlanExplorerOutgoing;
+  candidate: {
+    player_id: number;
+    web_name: string;
+    team_short_name: string;
+    position: "GK" | "DEF" | "MID" | "FWD";
+    status: string;
+    price_tenths: number;
+  };
+  state: PlanExplorerCandidateState;
+  reasons: string[];
+  conflict: PlanExplorerConflict | null;
+  valid_through_gameweek: number | null;
+  confirmable: boolean;
+  commit: PlanCommitDescriptor | null;
+  gameweeks: PlanPreviewGameweek[];
+  totals: Record<PlanExplorerHorizonKey, PlanPreviewTotals>;
+  lineup_effect: { captain_changed: boolean; vice_captain_changed: boolean };
+  best_xi: {
+    gain_by_horizon: Record<PlanExplorerHorizonKey, number>;
+    direct_xpts_difference: number | null;
+  };
+};
+
+export type PlanTransferPreviewFetchResult =
+  | { type: "ok"; data: PlanTransferPreviewResponse }
+  | Exclude<PlanTransferExplorerFetchResult, { type: "ok" }>;
+
+export async function fetchPlanTransferPreview(params: {
+  planId: number;
+  gameweek: number;
+  playerOutId: number;
+  playerInId: number;
+  projectionRunId?: number | null;
+}): Promise<PlanTransferPreviewFetchResult> {
+  const query = new URLSearchParams({
+    player_in_id: String(params.playerInId),
+  });
+  if (params.projectionRunId != null) {
+    query.set("projection_run_id", String(params.projectionRunId));
+  }
+  const response = await fetch(
+    `${API_BASE_URL}/plans/${params.planId}/gameweeks/${params.gameweek}/transfers/${params.playerOutId}/preview?${query.toString()}`,
+  );
+  if (!response.ok) {
+    return mapPlanTransferFailure(response, "Planner transfer preview");
+  }
+  return {
+    type: "ok",
+    data: (await response.json()) as PlanTransferPreviewResponse,
   };
 }
 

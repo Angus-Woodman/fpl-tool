@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { buildPlanBoardHref } from "@/lib/planner-explorer-url";
 
 export function PlannerContextBanner({
@@ -19,12 +21,12 @@ export function PlannerContextBanner({
       </span>
       <span className="font-medium">{planName}</span>
       <span>Gameweek {gameweek}</span>
-      <a
+      <Link
         href={buildPlanBoardHref(planId, gameweek)}
-        className="ml-auto font-medium underline"
+        className="ml-auto inline-flex min-h-6 items-center font-medium underline"
       >
         Back to plan
-      </a>
+      </Link>
     </section>
   );
 }

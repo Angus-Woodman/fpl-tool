@@ -32,16 +32,30 @@ function StateCell({
     );
   }
   if (candidate.state === "blocked_by_later_decision") {
+    const conflict = candidate.conflict;
+    if (conflict?.kind === "financial") {
+      // The shortfall gameweek is shown only to explain the shortfall; it is not a valid gameweek.
+      return (
+        <div className="text-xs text-amber-900">
+          <span className="rounded bg-amber-100 px-2 py-0.5 font-medium">
+            {`Blocked from GW${conflict.gameweek}: short by ${formatTenths(conflict.shortfall_tenths)}`}
+          </span>
+          <p className="mt-1 text-slate-600">{conflict.message}</p>
+          <p className="mt-1 text-slate-600">
+            GW{conflict.gameweek} cannot be afforded; its figures only explain
+            the shortfall.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="text-xs text-amber-900">
         <span className="rounded bg-amber-100 px-2 py-0.5 font-medium">
-          {candidate.conflict
-            ? `Blocked by GW${candidate.conflict.gameweek} planned transfer`
+          {conflict
+            ? `Blocked by GW${conflict.gameweek} planned transfer`
             : "Blocked by a later planned transfer"}
         </span>
-        {candidate.conflict && (
-          <p className="mt-1 text-slate-600">{candidate.conflict.message}</p>
-        )}
+        {conflict && <p className="mt-1 text-slate-600">{conflict.message}</p>}
         {candidate.valid_through_gameweek !== null && (
           <p className="mt-1 text-slate-600">
             Valid through GW{candidate.valid_through_gameweek}
@@ -79,11 +93,16 @@ function PlanImpactCell({
         Saved plan after transfer hit:{" "}
         {formatSignedPoints(impact.net_saved_plan)}
       </p>
-      {impact.valid_through_gameweek !== null && (
-        <p className="text-slate-600">
-          Valid through GW{impact.valid_through_gameweek}
-        </p>
-      )}
+      {impact.valid_through_gameweek !== null &&
+        (candidate.conflict?.kind === "financial" ? (
+          <p className="text-slate-600">
+            Includes GW{impact.valid_through_gameweek}, which cannot be afforded
+          </p>
+        ) : (
+          <p className="text-slate-600">
+            Valid through GW{impact.valid_through_gameweek}
+          </p>
+        ))}
     </div>
   );
 }
@@ -97,11 +116,13 @@ export function PlannerCandidateTable({
   horizons,
   horizon,
   bankIsEstimated,
+  onPreview,
 }: {
   candidates: PlanExplorerCandidate[];
   horizons: PlanExplorerHorizonInfo[];
   horizon: TransferHorizon;
   bankIsEstimated: boolean;
+  onPreview: (playerId: number) => void;
 }): JSX.Element {
   const selectedInfo = horizons.find((info) => info.horizon === horizon);
   const impactHeading = `Plan impact${selectedInfo ? ` (${horizonLabel(selectedInfo)})` : ""}`;
@@ -136,6 +157,7 @@ export function PlannerCandidateTable({
               <tr
                 key={candidate.player_id}
                 data-state={candidate.state}
+                data-conflict={candidate.conflict?.kind}
                 className={`border-b border-slate-100 align-top max-md:flex max-md:flex-col max-md:py-3 ${
                   candidate.state === "available" ? "" : "bg-slate-50"
                 }`}
@@ -206,9 +228,9 @@ export function PlannerCandidateTable({
                 <td className={`${CELL} max-md:order-4`}>
                   <button
                     type="button"
-                    disabled
-                    aria-label={`Preview ${candidate.web_name} (not available yet)`}
-                    className="cursor-not-allowed rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-400"
+                    onClick={() => onPreview(candidate.player_id)}
+                    aria-label={`Preview ${candidate.web_name}`}
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
                   >
                     Preview
                   </button>
@@ -219,8 +241,8 @@ export function PlannerCandidateTable({
         </tbody>
       </table>
       <p className="mt-2 text-xs text-slate-500">
-        Transfer preview is not available yet. Best-XI gain compares the saved
-        squad with the swap for the evaluated gameweeks.
+        Best-XI gain compares the saved squad with the swap for the evaluated
+        gameweeks. Preview a candidate to see its full effect before adding it.
       </p>
     </div>
   );

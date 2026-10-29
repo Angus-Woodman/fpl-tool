@@ -2,7 +2,12 @@ import type {
   PlanExplorerCandidate,
   PlanExplorerHorizonInfo,
   PlanExplorerImpact,
+  PlanCommitDescriptor,
+  PlanPreviewAccounting,
+  PlanPreviewGameweek,
+  PlanPreviewTotals,
   PlanTransferExplorerResponse,
+  PlanTransferPreviewResponse,
 } from "../../src/lib/api";
 
 import { plannerIdentity } from "./planner";
@@ -151,6 +156,29 @@ export function buildBlockedCandidate(): PlanExplorerCandidate {
   });
 }
 
+export function buildFinancialBlockedCandidate(): PlanExplorerCandidate {
+  return buildExplorerCandidate({
+    player_id: 104,
+    web_name: "Costly Cal",
+    state: "blocked_by_later_decision",
+    reasons: [],
+    valid_through_gameweek: 11,
+    conflict: {
+      kind: "financial",
+      gameweek: 11,
+      decision_id: null,
+      code: "financial_shortfall",
+      message: "The bank would be short in GW11 after this transfer.",
+      shortfall_tenths: 25,
+    },
+    plan_impact_by_horizon: {
+      "1": buildImpact(),
+      "3": buildImpact({ valid_through_gameweek: 11 }),
+      "5": buildImpact({ valid_through_gameweek: 11 }),
+    },
+  });
+}
+
 export function buildPlannerExplorerResponse(
   overrides: Partial<PlanTransferExplorerResponse> = {},
 ): PlanTransferExplorerResponse {
@@ -214,9 +242,91 @@ export function buildPlannerExplorerResponse(
   };
 }
 
-/** Preview payload (US2 reads it); kept untyped until the preview client lands. */
-export function buildPlannerPreviewPayload(playerInId = 101) {
+export function forPlan<
+  T extends {
+    planning_context: { plan_id: number };
+    plan: { plan_id: number };
+  },
+>(payload: T, planId: number): T {
+  payload.planning_context.plan_id = planId;
+  payload.plan.plan_id = planId;
+  return payload;
+}
+
+export function buildCommitDescriptor(
+  playerInId = 101,
+  overrides: Partial<PlanCommitDescriptor> = {},
+): PlanCommitDescriptor {
+  return {
+    intent: {
+      kind: "add_transfer",
+      gameweek_number: EXPLORER_GAMEWEEK,
+      outgoing_player_id: EXPLORER_OUTGOING_ID,
+      outgoing_ownership_id: plannerIdentity(1006),
+      incoming_player_id: playerInId,
+    },
+    guard: {
+      expected_outgoing_market_tenths: 54,
+      expected_incoming_price_tenths: 62,
+    },
+    expected_revision: 3,
+    ...overrides,
+  };
+}
+
+function accounting(
+  bank: number,
+  freeTransfers: number,
+  made: number,
+  hit: number,
+  next: number,
+): PlanPreviewAccounting {
+  return {
+    closing_bank_tenths: bank,
+    free_transfers_available: freeTransfers,
+    transfers_made: made,
+    points_hit: hit,
+    next_free_transfers: next,
+  };
+}
+
+export function buildPreviewGameweek(
+  overrides: Partial<PlanPreviewGameweek> & { gameweek: number },
+): PlanPreviewGameweek {
+  return {
+    basis: "saved_plan",
+    valid: true,
+    chip: null,
+    accounting: {
+      before: accounting(15, 2, 0, 0, 2),
+      after: accounting(8, 2, 1, 0, 1),
+    },
+    squad_changed: true,
+    incoming_role: "starting",
+    points: { before: 60, after: 62.5, delta: 2.5 },
+    reason: null,
+    shortfall_tenths: null,
+    ...overrides,
+  };
+}
+
+export function buildPreviewTotals(
+  overrides: Partial<PlanPreviewTotals> = {},
+): PlanPreviewTotals {
+  return {
+    saved_plan: 5,
+    assumed_continuation: 7.5,
+    hit_change: -4,
+    net_saved_plan: 1,
+    ...overrides,
+  };
+}
+
+export function buildPlannerPreviewResponse(
+  overrides: Partial<PlanTransferPreviewResponse> = {},
+): PlanTransferPreviewResponse {
   const explorer = buildPlannerExplorerResponse();
+  const candidate = buildAvailableCandidate();
   return {
     planning_context: explorer.planning_context,
     plan: explorer.plan,
@@ -224,52 +334,221 @@ export function buildPlannerPreviewPayload(playerInId = 101) {
     accounting_before: explorer.accounting_before,
     outgoing: explorer.outgoing,
     candidate: {
-      player_id: playerInId,
-      web_name: "Available Alex",
-      team_short_name: "LIV",
-      position: "MID",
-      status: "a",
-      price_tenths: 62,
+      player_id: candidate.player_id,
+      web_name: candidate.web_name,
+      team_short_name: candidate.team_short_name,
+      position: candidate.position,
+      status: candidate.status,
+      price_tenths: candidate.price_tenths,
     },
     state: "available",
-    reasons: [] as string[],
+    reasons: [],
     conflict: null,
     valid_through_gameweek: null,
     confirmable: true,
-    commit: buildPlannerCommitDescriptor(playerInId),
-    gameweeks: [],
-    totals: Object.fromEntries(
-      HORIZON_KEYS.map((key) => [
-        key,
-        {
-          saved_plan: 3.5,
-          assumed_continuation: 2.5,
-          hit_change: 0,
-          net_saved_plan: 3.5,
+    commit: buildCommitDescriptor(candidate.player_id),
+    gameweeks: [
+      buildPreviewGameweek({ gameweek: 9 }),
+      buildPreviewGameweek({
+        gameweek: 10,
+        accounting: {
+          before: accounting(8, 1, 0, 0, 1),
+          after: accounting(8, 1, 0, 0, 1),
         },
-      ]),
-    ),
-    lineup_effect: { captain_changed: false, vice_captain_changed: false },
+        incoming_role: "bench",
+        points: { before: 61, after: 61, delta: 0 },
+      }),
+      buildPreviewGameweek({
+        gameweek: 11,
+        basis: "assumed_continuation",
+        incoming_role: "captain",
+        points: { before: 62, after: 66.5, delta: 4.5 },
+      }),
+      buildPreviewGameweek({
+        gameweek: 12,
+        basis: "assumed_continuation",
+        points: { before: 63, after: 64, delta: 1 },
+      }),
+    ],
+    totals: {
+      "1": buildPreviewTotals({
+        saved_plan: 2.5,
+        assumed_continuation: null,
+        hit_change: 0,
+        net_saved_plan: 2.5,
+      }),
+      "3": buildPreviewTotals({
+        saved_plan: 2.5,
+        assumed_continuation: 4.5,
+        hit_change: 0,
+        net_saved_plan: 2.5,
+      }),
+      "5": buildPreviewTotals(),
+    },
+    lineup_effect: { captain_changed: true, vice_captain_changed: false },
     best_xi: {
       gain_by_horizon: { "1": 1.5, "3": 3.2, "5": 5.5 },
       direct_xpts_difference: 1.2,
     },
+    ...overrides,
   };
 }
 
-export function buildPlannerCommitDescriptor(playerInId = 101) {
-  return {
+function withheld(gameweek: number): PlanPreviewGameweek {
+  return buildPreviewGameweek({
+    gameweek,
+    valid: false,
+    accounting: null,
+    squad_changed: false,
+    incoming_role: null,
+    points: null,
+    reason: "beyond_valid_range",
+  });
+}
+
+/** A planned later sale of the outgoing player: values stop before the clashing GW11. */
+export function buildStructuralBlockedPreview(): PlanTransferPreviewResponse {
+  const candidate = buildBlockedCandidate();
+  return buildPlannerPreviewResponse({
+    candidate: {
+      player_id: candidate.player_id,
+      web_name: candidate.web_name,
+      team_short_name: candidate.team_short_name,
+      position: candidate.position,
+      status: candidate.status,
+      price_tenths: candidate.price_tenths,
+    },
+    state: "blocked_by_later_decision",
+    conflict: candidate.conflict,
+    valid_through_gameweek: 10,
+    confirmable: false,
+    commit: null,
+    gameweeks: [
+      buildPreviewGameweek({ gameweek: 9 }),
+      buildPreviewGameweek({ gameweek: 10 }),
+      withheld(11),
+      { ...withheld(12), basis: "assumed_continuation" },
+    ],
+    totals: {
+      "1": buildPreviewTotals({ assumed_continuation: null }),
+      "3": buildPreviewTotals({
+        saved_plan: null,
+        assumed_continuation: null,
+        net_saved_plan: null,
+      }),
+      "5": buildPreviewTotals({
+        saved_plan: null,
+        assumed_continuation: null,
+        net_saved_plan: null,
+      }),
+    },
+  });
+}
+
+/** GW10 would overdraw the bank: its figures explain the shortfall and are not a valid gameweek. */
+export function buildFinancialBlockedPreview(): PlanTransferPreviewResponse {
+  const candidate = buildFinancialBlockedCandidate();
+  return buildPlannerPreviewResponse({
+    candidate: {
+      player_id: candidate.player_id,
+      web_name: candidate.web_name,
+      team_short_name: candidate.team_short_name,
+      position: candidate.position,
+      status: candidate.status,
+      price_tenths: candidate.price_tenths,
+    },
+    state: "blocked_by_later_decision",
+    conflict: {
+      kind: "financial",
+      gameweek: 10,
+      decision_id: null,
+      code: "financial_shortfall",
+      message: "The bank would be short in GW10 after this transfer.",
+      shortfall_tenths: 25,
+    },
+    valid_through_gameweek: 10,
+    confirmable: false,
+    commit: null,
+    gameweeks: [
+      buildPreviewGameweek({ gameweek: 9 }),
+      buildPreviewGameweek({
+        gameweek: 10,
+        valid: false,
+        accounting: {
+          before: accounting(8, 1, 0, 0, 1),
+          after: accounting(-25, 1, 1, 0, 1),
+        },
+        points: null,
+        reason: "financial_shortfall",
+        shortfall_tenths: 25,
+      }),
+      withheld(11),
+      { ...withheld(12), basis: "assumed_continuation" },
+    ],
+    totals: {
+      "1": buildPreviewTotals({ assumed_continuation: null }),
+      "3": buildPreviewTotals({
+        saved_plan: null,
+        assumed_continuation: null,
+        net_saved_plan: null,
+      }),
+      "5": buildPreviewTotals({
+        saved_plan: null,
+        assumed_continuation: null,
+        net_saved_plan: null,
+      }),
+    },
+  });
+}
+
+export function buildUnavailablePreview(
+  reasons: string[] = ["club_limit"],
+): PlanTransferPreviewResponse {
+  const candidate = buildUnavailableCandidate(reasons);
+  return buildPlannerPreviewResponse({
+    candidate: {
+      player_id: candidate.player_id,
+      web_name: candidate.web_name,
+      team_short_name: candidate.team_short_name,
+      position: candidate.position,
+      status: candidate.status,
+      price_tenths: candidate.price_tenths,
+    },
+    state: "unavailable",
+    reasons,
+    valid_through_gameweek: null,
+    confirmable: false,
+    commit: null,
+    gameweeks: [withheld(9)],
+    totals: {
+      "1": buildPreviewTotals({
+        saved_plan: null,
+        assumed_continuation: null,
+        net_saved_plan: null,
+      }),
+      "3": buildPreviewTotals({
+        saved_plan: null,
+        assumed_continuation: null,
+        net_saved_plan: null,
+      }),
+      "5": buildPreviewTotals({
+        saved_plan: null,
+        assumed_continuation: null,
+        net_saved_plan: null,
+      }),
+    },
+  });
+}
+
+/** The edit variant of the descriptor, for replacing a transfer already planned in the gameweek. */
+export function buildEditCommitDescriptor(
+  playerInId = 101,
+): PlanCommitDescriptor {
+  return buildCommitDescriptor(playerInId, {
     intent: {
-      kind: "add_transfer" as const,
+      kind: "edit_transfer",
+      decision_id: plannerIdentity(9001),
       incoming_player_id: playerInId,
-      gameweek_number: EXPLORER_GAMEWEEK,
-      outgoing_player_id: EXPLORER_OUTGOING_ID,
-      outgoing_ownership_id: plannerIdentity(1006),
     },
-    guard: {
-      expected_outgoing_market_tenths: 54,
-      expected_incoming_price_tenths: 62,
-    },
-    expected_revision: 3,
-  };
+  });
 }
