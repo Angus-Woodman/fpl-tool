@@ -104,6 +104,8 @@ export class PlanSaveCoordinator {
   private listeners = new Set<() => void>();
   private transport: Transport;
   private abandonInFlight: Promise<AbandonResult> | null = null;
+  // Who raised the current `error` status, so clearing one party's error never erases another's.
+  private errorOwner: { pinnedMutationId: string } | "planner" | null = null;
 
   constructor(plan: PlanResponse, transport: Partial<Transport> = {}) {
     this.snapshot = {
@@ -263,11 +265,16 @@ export class PlanSaveCoordinator {
       pinned.status === "rejected" ||
       pinned.status === "plan_missing"
     ) {
+      const owner = this.errorOwner;
       const clearsError =
         pinned.status === "rejected" &&
         this.snapshot.status === "error" &&
+        owner !== null &&
+        owner !== "planner" &&
+        owner.pinnedMutationId === pinned.mutationId &&
         !this.active &&
         this.queue.length === 0;
+      if (clearsError) this.errorOwner = null;
       this.publish({
         pinned: null,
         ...(clearsError ? { status: "saved" as const, message: null } : {}),
@@ -297,7 +304,9 @@ export class PlanSaveCoordinator {
     }
     if (
       this.active !== envelope ||
-      this.snapshot.pinned?.mutationId !== pinned.mutationId
+      this.snapshot.pinned?.mutationId !== pinned.mutationId ||
+      // A retry started during the refresh means the outcome is no longer known not to apply.
+      this.snapshot.pinned.status !== pinned.status
     )
       return {
         type: "refresh_failed",
@@ -336,6 +345,7 @@ export class PlanSaveCoordinator {
   enqueue(intents: QueuedPlanIntent[]): void {
     if (this.snapshot.status === "missing") return;
     if (this.snapshot.acknowledged.foundation_state !== "ready") {
+      this.errorOwner = "planner";
       this.publish({
         status: "error",
         message: "Plan requires explicit initialization before editing",
@@ -506,6 +516,9 @@ export class PlanSaveCoordinator {
           diagnostics: detail.diagnostics ?? [],
           message: error.message,
         });
+        this.errorOwner = pinned.pinned
+          ? { pinnedMutationId: pinned.pinned.mutationId }
+          : "planner";
         this.active = null;
         this.publish({
           displayPlan: this.snapshot.acknowledged,

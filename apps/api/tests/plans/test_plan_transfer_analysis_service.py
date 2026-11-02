@@ -256,13 +256,27 @@ def test_a_free_hit_gameweek_limits_every_horizon_to_that_gameweek() -> None:
     assert result.plan.chip == "FREE_HIT"
 
 
-def test_replacing_a_same_gameweek_acquisition_is_an_edit_without_a_selling_price() -> None:
+def test_replacing_a_same_gameweek_acquisition_is_an_edit_that_reports_the_original_sale() -> None:
     result = listed(scenario_context("acquired_earlier_in_same_gameweek"), 102)
     assert result.outgoing.operation == "edit_transfer"
     assert result.outgoing.replaces_decision_id == identity(2001)
+    # The selected player is un-bought, not sold: it has no sale of its own...
     assert result.outgoing.selling_price_tenths is None
+    # ...but the replaced transfer still sells player 2 at the latest market (estimated basis).
+    sale = result.outgoing.replaced_sale
+    assert sale is not None
+    assert (sale.player_id, sale.purchase_price_tenths, sale.market_price_tenths) == (2, 50, 54)
+    assert (sale.selling_price_tenths, sale.selling_provisional) == (52, True)
+    assert sale.web_name
     candidate = next(item for item in result.candidates if item.player_id == 105)
-    assert candidate.resulting_bank_tenths == 10 + 52 - 50
+    assert candidate.resulting_bank_tenths == 10 + sale.selling_price_tenths - 50
+
+
+def test_a_confirmed_basis_edit_sale_is_not_provisional_and_a_new_transfer_has_none() -> None:
+    confirmed = listed(scenario_context("confirmed_basis"), 6)
+    assert confirmed.outgoing.operation == "add_transfer"
+    assert confirmed.outgoing.replaced_sale is None
+    assert confirmed.outgoing.selling_price_tenths == 52
 
 
 def test_the_response_identifies_its_planning_context_and_plan() -> None:

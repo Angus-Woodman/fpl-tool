@@ -17,6 +17,7 @@ from fpl_engine.rules import Chip, RuleViolationError
 from planning_reference_plans import (
     CLUB_LIMIT_CANDIDATE,
     OUTGOING_MARKET_TENTHS,
+    boundary,
     candidate_price,
     identity,
     metadata,
@@ -131,8 +132,30 @@ def test_replacing_a_same_gameweek_acquisition_replaces_it_instead_of_stacking()
         (2, 105)
     ]
     assert week.transfers[0].decision_id == identity(2001)
-    assert result.selling_price_tenths is None
+    # The edit keeps selling the player the original transfer sold (player 2): purchase 5.0, market
+    # 5.4, so half the rise, on an estimated purchase basis.
+    assert result.selling_price_tenths == 52
+    assert result.selling_provisional is True
     assert result.resulting_bank_tenths == 10 + 52 - candidate_price(105)
+
+
+def test_an_edit_reports_the_original_sale_with_the_basis_confirmation_of_the_sold_player() -> None:
+    reference = plan(
+        transfers={9: (transfer(2, 102, 1),)}, base=boundary(confirmation="user_confirmed")
+    )
+    evaluation = evaluate_plan(reference, META)
+    edit = assess(reference, 9, 102, 105, evaluation)
+    assert edit.operation.kind == "edit_transfer"
+    assert (edit.selling_price_tenths, edit.selling_provisional) == (52, False)
+    assert edit.evaluation is not None
+    saved = next(week for week in edit.evaluation.gameweeks if week.gameweek_number == 9)
+    sale = next(item for item in saved.sales if item.decision_id == identity(2001))
+    assert sale.selling_price_tenths == edit.selling_price_tenths
+
+    # A new transfer's sale is unchanged by this: it is still the sold player's own sale.
+    add = assess(reference, 9, 6, 106, evaluation)
+    assert add.operation.kind == "add_transfer"
+    assert (add.selling_price_tenths, add.selling_provisional) == (52, False)
 
 
 def test_resolving_an_operation_reports_the_precise_input_error() -> None:
@@ -261,6 +284,29 @@ def test_a_later_financial_shortfall_shows_values_through_that_gameweek_only() -
     assert result.resulting_bank_tenths == 10 + 52 - 59
 
 
+def test_a_financial_conflict_names_a_decision_only_when_one_planned_decision_caused_it() -> None:
+    one = next(item.plan for item in reference_plans() if item.name == "later_financial_chain")
+    single = assess(one, 8, 6, 107, evaluate_plan(one, META)).conflict
+    assert single is not None and single.decision_id == identity(2007)
+
+    # Two planned purchases share the clashing gameweek: neither alone is the cause.
+    two = plan(
+        transfers={
+            10: (
+                replace(transfer(3, 103, 7), incoming_price_tenths=56),
+                replace(transfer(4, 104, 8), incoming_price_tenths=56),
+            )
+        }
+    )
+    result = assess(two, 8, 6, 107, evaluate_plan(two, META))
+    assert result.state == "blocked_by_later_decision"
+    conflict = result.conflict
+    assert conflict is not None
+    assert (conflict.kind, conflict.gameweek, conflict.shortfall_tenths) == ("financial", 10, 5)
+    assert conflict.decision_id is None
+    assert result.valid_through_gameweek == 10
+
+
 def test_a_selected_gameweek_conflict_wins_over_a_later_one() -> None:
     reference = next(
         item.plan for item in reference_plans() if item.name == "later_financial_chain"
@@ -269,6 +315,8 @@ def test_a_selected_gameweek_conflict_wins_over_a_later_one() -> None:
     assert result.state == "unavailable"
     assert result.reasons == ("financial_shortfall",)
     assert result.conflict is not None and result.conflict.gameweek == 8
+    # The candidate itself is part of the cause in its own gameweek, so no other decision is named.
+    assert result.conflict.decision_id is None
     assert result.valid_through_gameweek == 8
 
 

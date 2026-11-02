@@ -513,6 +513,60 @@ describe("PlanSaveCoordinator pinned submission", () => {
     expect(coordinator.getSnapshot().pinned).toBeNull();
   });
 
+  it("C14 discards nothing when a retry starts while the abandon is refreshing the plan", async () => {
+    const { coordinator, send, load, plan } = setup();
+    const resend = deferred<PlanMutationResponse>();
+    send.mockRejectedValueOnce(
+      new PlannerMutationError(503, {
+        code: "accepted_not_saved",
+        message: "not saved",
+      }),
+    );
+    send.mockReturnValueOnce(resend.promise);
+    const refresh = deferred<PlanResponse | null>();
+    load.mockReturnValue(refresh.promise);
+    submit(coordinator);
+    await waitFor(() =>
+      expect(pinnedStatus(coordinator)).toBe("pending_unsaved"),
+    );
+
+    const abandoning = coordinator.abandon();
+    coordinator.retry();
+    refresh.resolve({ ...plan, revision: 0 });
+    const result = await abandoning;
+
+    expect(result).toMatchObject({ type: "refresh_failed" });
+    expect(pinnedStatus(coordinator)).toBe("sending");
+    expect(coordinator.hasUnsavedWork()).toBe(true);
+    const mutationId = send.mock.calls[0][1].mutation_id;
+    expect(send.mock.calls[1][1].mutation_id).toBe(mutationId);
+    resend.resolve(committed(plan, mutationId, 1));
+    await waitFor(() => expect(pinnedStatus(coordinator)).toBe("committed"));
+    expect(coordinator.getSnapshot().acknowledged.revision).toBe(1);
+  });
+
+  it("C14 a failed refresh during revalidate leaves the conflict in place: no success, no replay", async () => {
+    const { coordinator, send, load } = setup();
+    send.mockRejectedValue(
+      new PlannerMutationError(409, {
+        code: "revision_conflict",
+        message: "stale",
+      }),
+    );
+    submit(coordinator);
+    await waitFor(() => expect(pinnedStatus(coordinator)).toBe("conflict"));
+    load.mockRejectedValue(new Error("offline"));
+
+    await coordinator.revalidate();
+
+    const snapshot = coordinator.getSnapshot();
+    expect(snapshot.pinned?.status).toBe("conflict");
+    expect(snapshot.status).toBe("conflict");
+    expect(snapshot.inFlight).not.toBeNull();
+    expect(coordinator.hasUnsavedWork()).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("C14 ignores a repeated abandon while one is in progress", async () => {
     const { coordinator, send, load, plan } = setup();
     send.mockRejectedValue(
@@ -680,6 +734,83 @@ describe("PlanSaveCoordinator pinned submission", () => {
   });
 
   describe("rejected submissions (C20, C21)", () => {
+    it("C20 abandoning a rejected record never erases a newer Planner edit's error", async () => {
+      const { coordinator, send } = setup();
+      send.mockRejectedValueOnce(
+        new PlannerMutationError(422, {
+          code: "prices_changed",
+          message: "Prices changed",
+        }),
+      );
+      send.mockRejectedValueOnce(
+        new PlannerMutationError(422, {
+          code: "invalid_rename",
+          message: "That name is not allowed",
+          diagnostics: [DIAGNOSTIC],
+        }),
+      );
+      submit(coordinator);
+      await waitFor(() => expect(pinnedStatus(coordinator)).toBe("rejected"));
+
+      rename(coordinator, "   ");
+      await waitFor(() =>
+        expect(coordinator.getSnapshot().message).toBe(
+          "That name is not allowed",
+        ),
+      );
+      const result = await coordinator.abandon();
+
+      expect(result).toMatchObject({
+        type: "abandoned",
+        previous: { status: "rejected", code: "prices_changed" },
+      });
+      const snapshot = coordinator.getSnapshot();
+      expect(snapshot.pinned).toBeNull();
+      expect(snapshot.status).toBe("error");
+      expect(snapshot.message).toBe("That name is not allowed");
+      expect(snapshot.rejection?.diagnostics).toEqual([DIAGNOSTIC]);
+    });
+
+    it("C20 still clears the error the rejected record itself raised", async () => {
+      const { coordinator, send } = setup();
+      send.mockRejectedValue(
+        new PlannerMutationError(422, {
+          code: "prices_changed",
+          message: "Prices changed",
+        }),
+      );
+      submit(coordinator);
+      await waitFor(() => expect(pinnedStatus(coordinator)).toBe("rejected"));
+      expect(coordinator.getSnapshot().status).toBe("error");
+
+      await coordinator.abandon();
+
+      expect(coordinator.getSnapshot().status).toBe("saved");
+      expect(coordinator.getSnapshot().message).toBeNull();
+    });
+
+    it("C20 does not clear a Planner error when the record is abandoned after an identical error message", async () => {
+      const { coordinator, send } = setup();
+      const same = {
+        code: "prices_changed",
+        message: "Identical wording",
+      };
+      send.mockRejectedValueOnce(new PlannerMutationError(422, same));
+      send.mockRejectedValueOnce(new PlannerMutationError(422, same));
+      submit(coordinator);
+      await waitFor(() => expect(pinnedStatus(coordinator)).toBe("rejected"));
+      rename(coordinator);
+      await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(coordinator.getSnapshot().inFlight).toBeNull(),
+      );
+
+      await coordinator.abandon();
+
+      expect(coordinator.getSnapshot().status).toBe("error");
+      expect(coordinator.getSnapshot().message).toBe("Identical wording");
+    });
+
     async function rejected() {
       const context = setup();
       context.send.mockRejectedValueOnce(

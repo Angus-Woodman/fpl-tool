@@ -23,6 +23,7 @@ import { PlannerTransferExplorer } from "@/components/transfers/planner/planner-
 import type {
   PlanMutationEnvelope,
   PlanResponse,
+  PlanTransferExplorerResponse,
   PlanTransferPreviewResponse,
 } from "@/lib/api";
 import {
@@ -43,6 +44,7 @@ import {
   buildPlannerExplorerResponse,
   buildPlannerPlan,
   buildPlannerPreviewResponse,
+  buildPreviewTotals,
   buildStructuralBlockedPreview,
   buildUnavailablePreview,
   deferred,
@@ -91,6 +93,13 @@ type Api = {
   /** The run served when a request does not pin one. */
   latestRun: number;
   listCalls: URL[];
+  /** Adjusts a list response in place, or replaces it, by the 1-based number of the list call. */
+  listReply:
+    | ((
+        call: number,
+        response: PlanTransferExplorerResponse,
+      ) => Response | Promise<Response | void> | void)
+    | null;
   spy: MockInstance<typeof fetch>;
 };
 
@@ -118,6 +127,7 @@ function installApi(plan: PlanResponse = freshPlan()): Api {
     receiptReply: null,
     latestRun: EXPLORER_RUN_ID,
     listCalls: [],
+    listReply: null,
     spy: undefined as never,
   };
   const candidates = [
@@ -189,6 +199,8 @@ function installApi(plan: PlanResponse = freshPlan()): Api {
             url.searchParams.get("projection_run_id") ?? api.latestRun,
           );
           api.listCalls.push(url);
+          const custom = await api.listReply?.(api.listCalls.length, response);
+          if (custom instanceof Response) return custom;
           return json(200, response);
         }
         throw new Error(`Unexpected request ${method} ${url.pathname}`);
@@ -214,6 +226,7 @@ function committedBody(
 type ExplorerOptions = {
   commit?: PlannerCommitFactory;
   gameweek?: number;
+  playerOutId?: number;
   horizon?: 1 | 3 | 5;
   runId?: number | null;
   strict?: boolean;
@@ -224,7 +237,9 @@ function renderExplorer(api: Api, options: ExplorerOptions = {}) {
     <PlannerTransferExplorer
       planId={api.plan.plan_id}
       gameweek={next.gameweek ?? options.gameweek ?? EXPLORER_GAMEWEEK}
-      playerOutId={EXPLORER_OUTGOING_ID}
+      playerOutId={
+        next.playerOutId ?? options.playerOutId ?? EXPLORER_OUTGOING_ID
+      }
       horizon={next.horizon ?? 5}
       runId={next.runId === undefined ? EXPLORER_RUN_ID : next.runId}
       commit={options.commit}
@@ -424,6 +439,37 @@ describe("Planner transfer preview", () => {
     expect(within(totals).getByTestId("totals-1")).toHaveTextContent("-");
   });
 
+  it("shows the hit change as its effect on points: extra hits negative, a removed hit positive", async () => {
+    const api = installApi();
+    const reduced = buildPlannerPreviewResponse();
+    reduced.totals["3"] = buildPreviewTotals({
+      hit_change: -4,
+      net_saved_plan: 9,
+      saved_plan: 5,
+    });
+    reduced.totals["1"] = buildPreviewTotals({
+      hit_change: 0,
+      net_saved_plan: 5,
+      saved_plan: 5,
+    });
+    api.previews.set(101, () =>
+      previewAt(reduced, api.plan.plan_id, api.plan.revision),
+    );
+    renderExplorer(api);
+    const panel = await openPreview();
+
+    const totals = within(panel).getByRole("region", {
+      name: "Totals by horizon",
+    });
+    const hitOf = (key: string) =>
+      within(within(totals).getByTestId(`totals-${key}`)).getAllByRole(
+        "cell",
+      )[2].textContent;
+    expect(hitOf("1")).toContain("0");
+    expect(hitOf("3")).toContain("+4");
+    expect(hitOf("5")).toContain("-4");
+  });
+
   it("tells the manager when a transfer changes the captain", async () => {
     const api = installApi();
     renderExplorer(api);
@@ -515,6 +561,28 @@ describe("Planner transfer preview", () => {
     expect(within(panel).getByTestId("preview-gw-9")).not.toHaveTextContent(
       /invalid scenario/i,
     );
+  });
+
+  it("labels the totals of a financially blocked candidate as including the unaffordable gameweek", async () => {
+    const api = installApi();
+    renderExplorer(api);
+    const panel = await openPreview("Costly Cal");
+
+    const note = within(panel).getByTestId("totals-invalid-note");
+    expect(note).toHaveTextContent(/include GW10, which cannot be afforded/i);
+    expect(note).toHaveTextContent(/no later gameweek/i);
+    expect(note).toHaveTextContent(/cannot execute/i);
+  });
+
+  it("adds no such note to the totals of an available or structurally blocked candidate", async () => {
+    const api = installApi();
+    renderExplorer(api);
+    const available = await openPreview();
+    expect(within(available).queryByTestId("totals-invalid-note")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    const blocked = await openPreview("Blocked Ben");
+    expect(within(blocked).queryByTestId("totals-invalid-note")).toBeNull();
   });
 
   it("withholds everything the server withheld for dependent later gameweeks of a financial conflict", async () => {
@@ -1941,6 +2009,8 @@ describe("Planner Explorer navigation and departure protection", () => {
   describe("a submission resumed in a different gameweek keeps its own gameweek", () => {
     const earlier = {
       gameweek: 9,
+      outgoingPlayerId: EXPLORER_OUTGOING_ID,
+      projectionRunId: EXPLORER_RUN_ID,
       playerInId: 101,
       outgoingName: "P6",
       incomingName: "Available Alex",
@@ -2199,6 +2269,392 @@ describe("Planner Explorer navigation and departure protection", () => {
       expect(unload.defaultPrevented).toBe(false);
       expect(confirm).not.toHaveBeenCalled();
       expect(getPlanSaveCoordinator(api.plan).hasUnsavedWork()).toBe(true);
+    });
+  });
+});
+
+describe("Planner Explorer list refresh and submission-scoped recovery", () => {
+  const PRICES_CHANGED = {
+    detail: {
+      code: "prices_changed",
+      message: "Prices changed since you previewed this transfer",
+      diagnostics: [],
+    },
+  };
+  const NOT_SAVED = {
+    detail: {
+      code: "accepted_not_saved",
+      message: "The edit was accepted but not saved",
+      candidate: null,
+    },
+  };
+
+  const previewRequests = (api: Api): URL[] =>
+    api.spy.mock.calls
+      .map(([input]) => new URL(String(input)))
+      .filter((url) => url.pathname.endsWith("/preview"));
+
+  const priceOf = (name: string): HTMLElement =>
+    within(screen.getByRole("row", { name: new RegExp(name) })).getByText(
+      /^£\d+\.\dm$/,
+      { selector: "td" },
+    );
+
+  /** The server raises Available Alex's price from the second list call on. */
+  function repriceFromSecondList(api: Api, tenths = 64) {
+    api.listReply = (call, response) => {
+      if (call >= 2) {
+        response.candidates.find(
+          (item) => item.player_id === 101,
+        )!.price_tenths = tenths;
+      }
+    };
+  }
+
+  async function submitAndHold(
+    api: Api,
+    options: ExplorerOptions = {},
+    candidate = "Available Alex",
+  ) {
+    const view = renderExplorer(api, options);
+    const panel = await openPreview(candidate);
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    );
+    await waitFor(() => expect(api.mutations).toHaveLength(1));
+    return view;
+  }
+
+  const rejectWith = (api: Api, body: unknown, status = 422) =>
+    act(async () => {
+      api.mutations[0].gate.resolve(json(status, body));
+    });
+
+  describe("refreshing the candidate list after a rejection or conflict", () => {
+    it("replaces stale prices in place without unmounting the table, its controls or the pinned run", async () => {
+      const api = installApi();
+      repriceFromSecondList(api);
+      await submitAndHold(api);
+      const table = screen.getByRole("table", {
+        name: "Replacement candidates",
+      });
+      fireEvent.change(
+        screen.getByRole("searchbox", { name: "Search players" }),
+        { target: { value: "alex" } },
+      );
+      expect(priceOf("Available Alex")).toHaveTextContent("£6.2m");
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      await waitFor(() =>
+        expect(priceOf("Available Alex")).toHaveTextContent("£6.4m"),
+      );
+      expect(
+        screen.getByRole("table", { name: "Replacement candidates" }),
+      ).toBe(table);
+      expect(
+        screen.getByRole("searchbox", { name: "Search players" }),
+      ).toHaveValue("alex");
+      expect(screen.queryByText(/Loading replacements/)).toBeNull();
+      expect(api.listCalls).toHaveLength(2);
+      expect(api.listCalls[1].searchParams.get("projection_run_id")).toBe(
+        String(EXPLORER_RUN_ID),
+      );
+      expect(api.listCalls[1].searchParams.get("primary_horizon")).toBe("5");
+      // The preview is reloaded too, and nothing was resubmitted.
+      await waitFor(() => expect(api.previewCalls).toEqual([101, 101]));
+      expect(api.mutations).toHaveLength(1);
+    });
+
+    it("refreshes after a conflict, on the pinned run, and shows the refreshed state", async () => {
+      const api = installApi();
+      repriceFromSecondList(api, 66);
+      await submitAndHold(api);
+      api.plan = { ...api.plan, revision: REVISION + 1 };
+      await rejectWith(
+        api,
+        {
+          detail: {
+            code: "revision_conflict",
+            message: "Plan revision has advanced",
+            plan: api.plan,
+          },
+        },
+        409,
+      );
+      const conflict = await screen.findByTestId("commit-conflict");
+
+      fireEvent.click(
+        within(conflict).getByRole("button", {
+          name: "Refresh and preview again",
+        }),
+      );
+
+      await waitFor(() =>
+        expect(priceOf("Available Alex")).toHaveTextContent("£6.6m"),
+      );
+      expect(api.listCalls[1].searchParams.get("projection_run_id")).toBe(
+        String(EXPLORER_RUN_ID),
+      );
+      expect(api.listCalls[1].searchParams.get("primary_horizon")).toBe("5");
+      await waitFor(() => expect(api.previewCalls).toEqual([101, 101]));
+    });
+
+    it("keeps the current list visible and says it is refreshing while the refresh is pending", async () => {
+      const api = installApi();
+      const gate = deferred<void>();
+      api.listReply = async (call, response) => {
+        if (call === 2) {
+          await gate.promise;
+          response.candidates.find(
+            (item) => item.player_id === 101,
+          )!.price_tenths = 64;
+        }
+      };
+      await submitAndHold(api);
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      expect(await screen.findByTestId("list-refreshing")).toHaveTextContent(
+        /refreshing/i,
+      );
+      expect(priceOf("Available Alex")).toHaveTextContent("£6.2m");
+      expect(screen.getByTestId("commit-rejection")).toBeInTheDocument();
+      await act(async () => gate.resolve());
+      await waitFor(() =>
+        expect(priceOf("Available Alex")).toHaveTextContent("£6.4m"),
+      );
+      expect(screen.queryByTestId("list-refreshing")).toBeNull();
+    });
+
+    it("keeps the stale list with a warning when the refresh fails, and recovers on retry", async () => {
+      const api = installApi();
+      api.listReply = (call, response) => {
+        if (call === 2) return json(500, { detail: "boom" });
+        if (call >= 3) {
+          response.candidates.find(
+            (item) => item.player_id === 101,
+          )!.price_tenths = 64;
+        }
+      };
+      await submitAndHold(api);
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      const warning = await screen.findByTestId("list-refresh-failed");
+      expect(warning).toHaveTextContent(/may be out of date/i);
+      expect(priceOf("Available Alex")).toHaveTextContent("£6.2m");
+      // The rejection and its recovery are unaffected by the failed refresh.
+      expect(screen.getByTestId("commit-rejection")).toBeInTheDocument();
+      await waitFor(() => expect(api.previewCalls).toEqual([101, 101]));
+
+      fireEvent.click(
+        within(warning).getByRole("button", { name: "Retry refresh" }),
+      );
+
+      await waitFor(() =>
+        expect(priceOf("Available Alex")).toHaveTextContent("£6.4m"),
+      );
+      expect(screen.queryByTestId("list-refresh-failed")).toBeNull();
+      expect(api.listCalls).toHaveLength(3);
+    });
+
+    it("discards a refresh that finishes after the list was reloaded for another horizon", async () => {
+      const api = installApi();
+      const gate = deferred<void>();
+      api.listReply = async (call, response) => {
+        const alex = response.candidates.find(
+          (item) => item.player_id === 101,
+        )!;
+        if (call === 2) {
+          await gate.promise;
+          alex.price_tenths = 64; // the stale refresh
+        }
+        if (call === 3) alex.price_tenths = 61; // the horizon change's own load
+      };
+      const view = await submitAndHold(api);
+      await rejectWith(api, PRICES_CHANGED);
+      await screen.findByTestId("list-refreshing");
+
+      view.rerenderWith({ horizon: 3 });
+      await waitFor(() =>
+        expect(priceOf("Available Alex")).toHaveTextContent("£6.1m"),
+      );
+      await act(async () => gate.resolve());
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(priceOf("Available Alex")).toHaveTextContent("£6.1m");
+      expect(screen.queryByTestId("list-refreshing")).toBeNull();
+      expect(screen.queryByTestId("list-refresh-failed")).toBeNull();
+    });
+
+    it("does not refresh the list for a rejection that belongs to another scope", async () => {
+      const api = installApi();
+      const view = await submitAndHold(api);
+      view.rerenderWith({ gameweek: 10 });
+      await waitFor(() => expect(api.listCalls).toHaveLength(2));
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      await screen.findByTestId("commit-rejection");
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(api.listCalls).toHaveLength(2);
+    });
+  });
+
+  describe("recovery is bound to the submission's own scope", () => {
+    const recoverHref = () =>
+      screen.getByTestId("recover-link").getAttribute("href");
+
+    it("reloads the preview in place when only the horizon changed", async () => {
+      const api = installApi();
+      const view = await submitAndHold(api);
+      view.rerenderWith({ horizon: 3 });
+      await waitFor(() => expect(api.listCalls).toHaveLength(2));
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      await waitFor(() => expect(api.previewCalls).toEqual([101, 101]));
+      expect(screen.queryByTestId("recover-link")).toBeNull();
+      await waitFor(() => expect(api.listCalls).toHaveLength(3));
+      expect(api.listCalls[2].searchParams.get("primary_horizon")).toBe("3");
+    });
+
+    it("leaves a different gameweek alone and points back to the rejected transfer", async () => {
+      const api = installApi();
+      const view = await submitAndHold(api);
+      view.rerenderWith({ gameweek: 10 });
+      await waitFor(() => expect(api.listCalls).toHaveLength(2));
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      const rejection = await screen.findByTestId("commit-rejection");
+      expect(rejection).toHaveTextContent(/P6 to Available Alex in GW9/);
+      expect(recoverHref()).toBe(
+        `/transfers?plan=${api.plan.plan_id}&gw=9&out=6&h=5&run=${EXPLORER_RUN_ID}`,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(previewRequests(api)).toHaveLength(1);
+      expect(api.previewCalls).toEqual([101]);
+      expect(screen.queryByText(/Loading preview/)).toBeNull();
+    });
+
+    it("leaves a different outgoing player alone and points back to the rejected transfer", async () => {
+      const api = installApi();
+      const view = await submitAndHold(api);
+      view.rerenderWith({ playerOutId: 7 });
+      await waitFor(() => expect(api.listCalls).toHaveLength(2));
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      await screen.findByTestId("commit-rejection");
+      expect(recoverHref()).toContain("gw=9&out=6&");
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(api.previewCalls).toEqual([101]);
+    });
+
+    it("never switches to another projection run to recover", async () => {
+      const api = installApi();
+      const view = await submitAndHold(api);
+      view.rerenderWith({ runId: EXPLORER_RUN_ID + 1 });
+      await waitFor(() => expect(api.listCalls).toHaveLength(2));
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      await screen.findByTestId("commit-rejection");
+      expect(recoverHref()).toContain(`run=${EXPLORER_RUN_ID}`);
+      expect(recoverHref()).not.toContain(`run=${EXPLORER_RUN_ID + 1}`);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(api.previewCalls).toEqual([101]);
+    });
+
+    it("refreshes a conflicting submission from another scope without previewing it here", async () => {
+      const api = installApi();
+      const view = await submitAndHold(api);
+      view.rerenderWith({ gameweek: 10 });
+      await waitFor(() => expect(api.listCalls).toHaveLength(2));
+      api.plan = { ...api.plan, revision: REVISION + 1 };
+      await rejectWith(
+        api,
+        {
+          detail: {
+            code: "revision_conflict",
+            message: "Plan revision has advanced",
+            plan: api.plan,
+          },
+        },
+        409,
+      );
+      const conflict = await screen.findByTestId("commit-conflict");
+      const refresh = within(conflict).getByRole("button", {
+        name: "Refresh the plan",
+      });
+
+      fireEvent.click(refresh);
+
+      const notice = await screen.findByTestId("commit-earlier");
+      expect(notice).toHaveTextContent(/was not submitted/i);
+      expect(recoverHref()).toContain("gw=9&out=6&");
+      expect(getPlanSaveCoordinator(api.plan).getSnapshot().pinned).toBeNull();
+      // The page's own list is refreshed for the new revision; no preview is loaded for GW9.
+      await waitFor(() => expect(api.listCalls).toHaveLength(3));
+      expect(api.listCalls[2].pathname).toContain("/gameweeks/10/");
+      expect(api.previewCalls).toEqual([101]);
+      expect(api.mutations).toHaveLength(1);
+    });
+
+    it("keeps another scope's open preview when an unresolved transfer is stopped", async () => {
+      const api = installApi();
+      const view = await submitAndHold(api);
+      await rejectWith(api, NOT_SAVED, 503);
+      await screen.findByTestId("commit-pending");
+      view.rerenderWith({ playerOutId: 7 });
+      await waitFor(() => expect(api.listCalls).toHaveLength(2));
+      // The same candidate id, previewed for a different outgoing player.
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Preview Available Alex" }),
+      );
+      await screen.findByRole("region", { name: "Transfer preview" });
+      expect(api.previewCalls).toEqual([101, 101]);
+
+      fireEvent.click(
+        within(screen.getByTestId("commit-pending")).getByRole("button", {
+          name: "Stop tracking this transfer",
+        }),
+      );
+
+      await screen.findByTestId("not-added-notice");
+      expect(
+        screen.getByRole("region", { name: "Transfer preview" }),
+      ).toBeInTheDocument();
+    });
+
+    it("still closes the stopped transfer's own preview in its own scope", async () => {
+      const api = installApi();
+      await submitAndHold(api);
+      await rejectWith(api, NOT_SAVED, 503);
+      await screen.findByTestId("commit-pending");
+
+      fireEvent.click(
+        within(screen.getByTestId("commit-pending")).getByRole("button", {
+          name: "Stop tracking this transfer",
+        }),
+      );
+
+      await screen.findByTestId("not-added-notice");
+      expect(
+        screen.queryByRole("region", { name: "Transfer preview" }),
+      ).toBeNull();
     });
   });
 });

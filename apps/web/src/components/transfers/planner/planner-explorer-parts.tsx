@@ -119,6 +119,27 @@ export function OutgoingSummary({
             )}
           </dd>
         </div>
+        {outgoing.replaced_sale && (
+          <div className="col-span-2 sm:col-span-3">
+            <dt className="text-slate-500">
+              Sale kept from the replaced transfer
+            </dt>
+            <dd data-testid="replaced-sale">
+              {outgoing.replaced_sale.web_name} sells for{" "}
+              {formatTenths(outgoing.replaced_sale.selling_price_tenths)}{" "}
+              <span className="text-slate-600">
+                (market{" "}
+                {formatTenths(outgoing.replaced_sale.market_price_tenths)}
+                {outgoing.replaced_sale.purchase_price_tenths !== null &&
+                  `, bought at ${formatTenths(outgoing.replaced_sale.purchase_price_tenths)}`}
+                )
+              </span>
+              {outgoing.replaced_sale.selling_provisional && (
+                <span className="ml-1 text-xs text-slate-500">Estimated</span>
+              )}
+            </dd>
+          </div>
+        )}
         <div>
           <dt className="text-slate-500">Bank before</dt>
           <dd>{formatTenths(accounting.closing_bank_tenths)}</dd>

@@ -36,6 +36,12 @@ function formatHit(hit: number | null): string {
   return hit > 0 ? `-${hit}` : "0";
 }
 
+/** The API's `hit_change` is extra hit points deducted (positive = costlier); show it as its effect on points. */
+function formatHitChange(hitChange: number): string {
+  if (hitChange === 0) return "0";
+  return hitChange > 0 ? `-${hitChange}` : `+${-hitChange}`;
+}
+
 function unavailableReason(week: PlanPreviewGameweek): string {
   switch (week.reason) {
     case "financial_shortfall":
@@ -199,6 +205,16 @@ function Totals({
 }): JSX.Element {
   return (
     <section aria-label="Totals by horizon">
+      {data.conflict?.kind === "financial" && (
+        <p
+          data-testid="totals-invalid-note"
+          className="mb-2 text-xs text-amber-900"
+        >
+          These totals include GW{data.conflict.gameweek}, which cannot be
+          afforded, and no later gameweek. They describe a scenario your plan
+          cannot execute, not a transfer you can add.
+        </p>
+      )}
       <table className="w-full border-collapse text-sm max-md:block">
         <thead className="max-md:sr-only">
           <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
@@ -241,7 +257,7 @@ function Totals({
                   {formatSignedPoints(totals.assumed_continuation)}
                 </td>
                 <td className={CELL} data-label="Hit change">
-                  {totals.hit_change}
+                  {formatHitChange(totals.hit_change)}
                 </td>
                 <td className={CELL} data-label="Saved plan after hit">
                   {formatSignedPoints(totals.net_saved_plan)}
@@ -358,7 +374,13 @@ export type CommitRegionModel =
       onRetry: () => void;
       onStop: () => void;
     }
-  | { kind: "conflict"; message: string | null; onRefresh: () => void };
+  | {
+      kind: "conflict";
+      message: string | null;
+      /** False when the clashing transfer is not the one this page previews. */
+      previewsAgain: boolean;
+      onRefresh: () => void;
+    };
 
 const BUTTON =
   "rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
@@ -512,7 +534,9 @@ export function PlannerCommitRegion({
           </p>
           {model.message && <p>{model.message}</p>}
           <button type="button" onClick={model.onRefresh} className={BUTTON}>
-            Refresh and preview again
+            {model.previewsAgain
+              ? "Refresh and preview again"
+              : "Refresh the plan"}
           </button>
         </div>
       );

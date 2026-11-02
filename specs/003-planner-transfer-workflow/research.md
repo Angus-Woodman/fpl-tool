@@ -139,6 +139,14 @@ A first profile showed the optimiser dominating ranking (two `optimise_lineup` c
 
 **Rationale.** Everything needed is derivable from the canonical tables, and the Explorer read paths take no locks beyond the existing plan row lock, which is released after the planning context is resolved.
 
+## 14a. Where the fixture-gap classifier lives (review finding B-M4, deferred)
+
+**Decision.** The classification of why a player has no projection in a gameweek (confirmed blank, fixture not projected, schedule unknown) and the "required squad players" rule stay in `PlanTransferAnalysisService` (API layer). They are data-completeness checks over repository rows (the stored fixture schedule and projection rows), not FPL scoring or legality rules, and they run before any engine call.
+
+**Rationale.** They are exercised end to end by the service tests and the guarded integration tests, and moving them is a pure refactor with no user-visible effect; doing it inside this feature would enlarge the reviewed surface without a defect to fix.
+
+**Possible later extraction.** If a second consumer needs the same rule (for example a different analysis surface), extract the classifier into `fpl_engine.planning` as a pure function over plain values (schedule entries and projected fixture ids), reuse `LAST_GAMEWEEK` (defined in `fpl_engine.planning.impact`) instead of the literal 38 the service repeats, and keep the existing service tests as the equivalence check. No behaviour change is intended and no new scope is created by recording this.
+
 ## 15. Phase 004 adaptability (Branching Scenario Planner)
 
 Phase 004's product direction is captured in [../004-branching-scenario-planner/vision.md](../004-branching-scenario-planner/vision.md). Phase 003 does not implement it; this section records the few design choices made to limit foreseeable rework, and the ones deliberately declined.

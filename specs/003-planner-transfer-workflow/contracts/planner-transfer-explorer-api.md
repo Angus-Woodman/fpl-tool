@@ -33,6 +33,8 @@ outgoing: {
   operation: "add_transfer" | "edit_transfer", replaces_decision_id | null,
   purchase_price_tenths, purchase_basis: { basis_kind, confirmation },
   market_price_tenths, selling_price_tenths | null, selling_provisional: bool,
+  replaced_sale: { player_id, web_name, purchase_price_tenths | null, market_price_tenths,
+                   selling_price_tenths, selling_provisional } | null,   # edit only
   projected_points_by_horizon: { "1","3","5": float }
 }
 candidates: [ {
@@ -41,6 +43,7 @@ candidates: [ {
   state: "available" | "unavailable" | "blocked_by_later_decision",
   reasons: [code],                                                    # when unavailable
   conflict: { kind, gameweek, decision_id | null, code, message, shortfall_tenths | null } | null,
+                                       # financial: decision_id is null unless exactly one later planned transfer caused it
   valid_through_gameweek: int | null,
   resulting_bank_tenths | null, points_hit_after | null,
   best_xi_gain_by_horizon: { "1","3","5": float },                    # ranking measure
@@ -113,6 +116,8 @@ gameweeks: [ {
   shortfall_tenths: int | null                               # set only on a financial-conflict gameweek
 } ]
 totals: { horizon: 1|3|5 -> { saved_plan, assumed_continuation, hit_change, net_saved_plan } }
+        # hit_change = extra hit points deducted (positive = costlier); net_saved_plan = saved_plan - hit_change.
+        # The UI shows it as its effect on points: "-4" for four extra hit points, "+4" for a removed hit.
 lineup_effect: { captain_changed: bool, vice_captain_changed: bool }
 best_xi: { gain_by_horizon: { "1","3","5": float }, direct_xpts_difference: float | null }
 ```

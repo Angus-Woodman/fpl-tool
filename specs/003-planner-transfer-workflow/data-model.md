@@ -36,13 +36,15 @@ Rule (single source, server side): locate the outgoing player's ownership in the
 ### `Conflict`
 `kind` (`structural` | `financial`), `gameweek`, `code` (existing diagnostic codes such as `outgoing_not_owned`, `incoming_already_owned`, `dependency_blocked`, squad-rule codes, or `financial_shortfall`), `decision_id` (nullable), `message`, `shortfall_tenths` (financial only).
 
+`decision_id` names the clashing planned decision only when it is unambiguous. A structural conflict carries the decision the diagnostic names. A financial conflict carries one only when the conflict gameweek is *after* the selected gameweek and holds exactly one planned transfer other than the candidate's own; with two or more such transfers, or when the shortfall is in the selected gameweek (where the candidate itself contributes), it is `null`. The API never lists several ids.
+
 ### `CandidateAssessment`
 - `player_id`
 - `state`: `available` | `unavailable` | `blocked_by_later_decision`
 - `reasons`: tuple of codes when `unavailable` (squad rules, club limit, `financial_shortfall`, `sold_this_gameweek`, `player_not_selectable`)
 - `conflict`: first conflict at a later gameweek, when `blocked_by_later_decision`
 - `valid_through_gameweek`: last gameweek whose values may be displayed (see section 3)
-- `selling_price_tenths` (add operations), `resulting_bank_tenths` (closing bank of the selected gameweek after the transfer), `points_hit_after`, `evaluation` (the candidate's `PlanEvaluation`, kept only for the response builder)
+- `selling_price_tenths` and `selling_provisional`: the sale of the player the operation sells. For an add that is the selected player; for an edit it is the player the replaced transfer originally sold, priced at the latest market price like any new Planner sale (`resulting_bank_tenths` already includes it), `resulting_bank_tenths` (closing bank of the selected gameweek after the transfer), `points_hit_after`, `evaluation` (the candidate's `PlanEvaluation`, kept only for the response builder)
 
 State precedence: a conflict at the selected gameweek yields `unavailable`; otherwise a conflict at a later gameweek yields `blocked_by_later_decision`; otherwise `available`. `confirmable` is true only for `available`.
 
@@ -61,6 +63,8 @@ Let *c* be the first conflict gameweek (selected gameweek included).
 | none | all gameweeks evaluated | every horizon gameweek with projections |
 | structural at *c* | `players` is `None` from *c*; later gameweeks `dependency_blocked` | gameweeks `< c` |
 | financial at *c* | squads exist; bank negative from *c*; dependent chain flagged | gameweeks `<= c`; nothing after |
+
+**Totals for a financial conflict.** Gameweek *c* is scored with its hypothetical points and hit (its squad exists; only the bank is negative) and is marked `valid: false`, `reason: financial_shortfall` in the per-gameweek rows. `totals[h].saved_plan`, `hit_change` and `net_saved_plan` therefore include every saved-plan gameweek up to and including *c*. `assumed_continuation` is always `null` for a financially blocked candidate, because every assumed gameweek lies after *c*. These totals describe a scenario the plan cannot execute: the preview states this beside the totals and the candidate table says "Includes GW *c*, which cannot be afforded". A structural conflict stops at *c-1*, so no clashing gameweek is ever included. (FR-030 speaks of gameweeks "before the conflict" for a blocked candidate; for a financial conflict this contract deliberately extends that to *c* with the invalid marking, so the user can see the size of the shortfall. Hiding *c* instead would change the calculation, not just the labels.)
 
 `valid_through_gameweek` is computed once per candidate and applied to accounting, plan impact and consequences. Best-XI gain is a static-squad measure independent of later decisions and is always shown (FR-025, FR-016).
 

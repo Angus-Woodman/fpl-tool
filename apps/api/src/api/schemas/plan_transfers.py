@@ -66,6 +66,15 @@ class PurchaseBasisResponse(_Response):
     confirmation: str | None
 
 
+class ReplacedSaleResponse(_Response):
+    player_id: int
+    web_name: str
+    purchase_price_tenths: int | None
+    market_price_tenths: int
+    selling_price_tenths: int
+    selling_provisional: bool
+
+
 class OutgoingSummaryResponse(_Response):
     player_id: int
     web_name: str
@@ -80,6 +89,7 @@ class OutgoingSummaryResponse(_Response):
     selling_price_tenths: int | None
     selling_provisional: bool
     projected_points_by_horizon: dict[int, float]
+    replaced_sale: ReplacedSaleResponse | None
 
 
 class ConflictResponse(_Response):

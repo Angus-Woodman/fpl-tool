@@ -296,3 +296,107 @@ def test_preview_descriptors_apply_unchanged_for_add_and_same_gameweek_edit(
     for gameweek in final["gameweeks"]:
         players = {player["player_id"] for player in gameweek["players"]}
         assert 103 in players and not {2, 102} & players
+
+
+def set_projection(session: Session, player_id: int, points: float) -> None:
+    session.execute(
+        update(ProjectionModel)
+        .where(ProjectionModel.player_id == player_id)
+        .values(projected_points=points)
+    )
+    session.commit()
+
+
+def assert_points_match_planner(before: dict, after: dict, preview: dict) -> None:
+    """Preview points against the Planner's own evaluated points, like for like.
+
+    Saved-plan rows are compared gameweek by gameweek with `total_points` (which, like the
+    preview's `points`, excludes the transfer hit). The Planner has no figures beyond its last
+    saved gameweek, so an assumed-continuation row is compared with that last gameweek: valid
+    here because every gameweek projects the same points and the plan uses no chips.
+    """
+    weeks_before = {week["gameweek_number"]: week for week in before["gameweeks"]}
+    weeks_after = {week["gameweek_number"]: week for week in after["gameweeks"]}
+    saved = [row for row in preview["gameweeks"] if row["basis"] == "saved_plan"]
+    assumed = [row for row in preview["gameweeks"] if row["basis"] == "assumed_continuation"]
+    assert saved and assumed and all(row["valid"] for row in preview["gameweeks"])
+    assert [row["gameweek"] for row in saved] == sorted(weeks_after)
+    for row in saved:
+        old, new = weeks_before[row["gameweek"]], weeks_after[row["gameweek"]]
+        assert row["points"]["before"] == pytest.approx(old["total_points"], abs=0.01)
+        assert row["points"]["after"] == pytest.approx(new["total_points"], abs=0.01)
+        assert row["points"]["delta"] == pytest.approx(
+            new["total_points"] - old["total_points"], abs=0.02
+        )
+    last = max(weeks_after)
+    for row in assumed:
+        assert row["points"]["before"] == pytest.approx(
+            weeks_before[last]["total_points"], abs=0.01
+        )
+        assert row["points"]["after"] == pytest.approx(weeks_after[last]["total_points"], abs=0.01)
+
+    totals = preview["totals"]["5"]
+    saved_delta = sum(
+        weeks_after[number]["total_points"] - weeks_before[number]["total_points"]
+        for number in weeks_after
+    )
+    hit_change = sum(
+        weeks_after[number]["accounting"]["points_hit"]
+        - weeks_before[number]["accounting"]["points_hit"]
+        for number in weeks_after
+    )
+    assumed_delta = len(assumed) * (
+        weeks_after[last]["total_points"] - weeks_before[last]["total_points"]
+    )
+    assert totals["saved_plan"] == pytest.approx(saved_delta, abs=0.05)
+    assert totals["assumed_continuation"] == pytest.approx(assumed_delta, abs=0.05)
+    assert totals["hit_change"] == hit_change
+    assert totals["net_saved_plan"] == pytest.approx(saved_delta - hit_change, abs=0.05)
+
+
+@pytest.mark.parametrize(
+    ("outgoing", "incoming", "boosts", "expected_saved_delta"),
+    [
+        # Captain (player 2) out for a stronger defender: the armband doubles the gain.
+        (2, 102, {2: 2.0, 102: 6.0}, 3 * 8.0),
+        # A benched player's points never count, however strong his replacement.
+        (13, 113, {13: 1.0, 113: 9.0}, 0.0),
+        # An ordinary starter.
+        (3, 103, {3: 2.0, 103: 4.5}, 3 * 2.5),
+    ],
+    ids=["captain", "bench", "starter"],
+)
+def test_preview_points_equal_the_planners_figures_after_a_successful_commit(
+    client: TestClient,
+    planner_session: Session,
+    planner_plan: Plan,
+    planner_metadata: dict[int, PlayerRuleData],
+    outgoing: int,
+    incoming: int,
+    boosts: dict[int, float],
+    expected_saved_delta: float,
+) -> None:
+    plan_id = seed_plan_and_projections(planner_session, planner_plan, planner_metadata)
+    for player_id, points in boosts.items():
+        set_projection(planner_session, player_id, points)
+    run_ids = planner_session.scalars(select(ProjectionRunModel.id)).all()
+    assert len(run_ids) == 1  # the Planner view reads the latest run: the one the preview pins
+
+    before = client.get(f"/plans/{plan_id}").json()
+    preview = client.get(
+        f"/plans/{plan_id}/gameweeks/8/transfers/{outgoing}/preview"
+        f"?player_in_id={incoming}&projection_run_id={run_ids[0]}"
+    ).json()
+    assert preview["projection"]["run_id"] == run_ids[0]
+    assert preview["confirmable"] is True
+    submit_descriptor(client, plan_id, preview, 41)
+    after = client.get(f"/plans/{plan_id}").json()
+
+    assert_points_match_planner(before, after, preview)
+    # Guard against a vacuous comparison: the scenario really changed (or, for the bench, did not
+    # change) what the Planner scores.
+    actual = sum(
+        new["total_points"] - old["total_points"]
+        for old, new in zip(before["gameweeks"], after["gameweeks"], strict=True)
+    )
+    assert actual == pytest.approx(expected_saved_delta, abs=0.05)

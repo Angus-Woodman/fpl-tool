@@ -240,6 +240,52 @@ def test_values_beyond_the_validity_limit_are_absent_never_estimated() -> None:
     assert impact.totals[5].valid_through_gameweek == 9
 
 
+def test_a_financial_conflict_gameweek_counts_in_saved_totals_but_never_in_the_continuation() -> (
+    None
+):
+    """Documented rule: values run through the unaffordable gameweek c, which is still scored.
+
+    The squad exists in c (only the bank is negative), so its hypothetical points are kept and
+    totalled with the saved-plan gameweeks up to c; everything after c, including every
+    assumed-continuation gameweek, is withheld. Callers must label c as not executable.
+    """
+    reference = next(
+        item.plan for item in reference_plans() if item.name == "later_financial_chain"
+    )
+    baseline = evaluate_plan(reference, META)
+    operation = resolve_transfer_operation(reference, baseline, 8, 6)
+    result = assess_candidate(
+        reference, baseline, META, operation, CandidateQuote(107, OUTGOING_MARKET_TENTHS, 59)
+    )
+    assert result.conflict is not None and result.conflict.kind == "financial"
+    assert result.conflict.gameweek == 10 and result.valid_through_gameweek == 10
+    assert result.evaluation is not None
+
+    impact = compute_plan_impact(
+        plan=reference,
+        baseline=baseline,
+        candidate=result.evaluation,
+        metadata=META,
+        projections=points(range(8, 13), {6: 2.0, 107: 5.0}),
+        gameweek=8,
+        valid_through=result.valid_through_gameweek,
+    )
+
+    weeks = by_gameweek(impact)
+    assert [weeks[number].available for number in (8, 9, 10, 11, 12)] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+    assert weeks[10].delta == 3.0  # the unaffordable gameweek is scored like any other
+    assert weeks[11].reason == "beyond_valid_range"
+    assert impact.totals[5].saved_plan == 9.0  # GW8, GW9 and the unaffordable GW10
+    assert impact.totals[5].assumed_continuation is None
+    assert impact.totals[5].valid_through_gameweek == 10
+
+
 def test_projection_coverage_is_the_contiguous_run_from_the_selected_gameweek() -> None:
     reference = plan(8, 12)
     projections = points(range(8, 13))

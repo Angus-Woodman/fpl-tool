@@ -233,6 +233,7 @@ export function buildPlannerExplorerResponse(
       selling_price_tenths: 52,
       selling_provisional: true,
       projected_points_by_horizon: { "1": 2, "3": 6, "5": 10 },
+      replaced_sale: null,
     },
     candidates: [
       buildAvailableCandidate(),
@@ -317,7 +318,7 @@ export function buildPreviewTotals(
   return {
     saved_plan: 5,
     assumed_continuation: 7.5,
-    hit_change: -4,
+    hit_change: 4,
     net_saved_plan: 1,
     ...overrides,
   };

@@ -485,6 +485,50 @@ describe("PlannerTransferExplorer: outgoing summary", () => {
     expect(summary).not.toHaveTextContent("Estimated");
   });
 
+  it("shows the server's sale for the replaced transfer of an edit, with its own estimate flag", async () => {
+    const response = buildPlannerExplorerResponse();
+    response.outgoing.operation = "edit_transfer";
+    response.outgoing.selling_price_tenths = null;
+    response.outgoing.selling_provisional = false;
+    response.outgoing.replaced_sale = {
+      player_id: 2,
+      web_name: "Sold Sam",
+      purchase_price_tenths: 50,
+      market_price_tenths: 54,
+      selling_price_tenths: 52,
+      selling_provisional: true,
+    };
+    installApi({ explorer: response });
+    renderExplorer();
+
+    const summary = await screen.findByRole("region", {
+      name: /outgoing player/i,
+    });
+    const sale = within(summary).getByTestId("replaced-sale");
+    expect(sale).toHaveTextContent("Sold Sam sells for £5.2m");
+    expect(sale).toHaveTextContent(/market £5\.4m, bought at £5\.0m/);
+    expect(sale).toHaveTextContent("Estimated");
+    // The un-bought selected player has no sale of its own.
+    expect(within(summary).getByTestId("selling-price")).not.toHaveTextContent(
+      "£",
+    );
+    // The resulting banks inherit the estimate from that sale, not from the selected player.
+    const bank = within(
+      await screen.findByRole("table", { name: "Replacement candidates" }),
+    ).getAllByText("Estimated");
+    expect(bank.length).toBeGreaterThan(0);
+  });
+
+  it("shows no replaced-sale line for a new transfer", async () => {
+    installApi({});
+    renderExplorer();
+
+    const summary = await screen.findByRole("region", {
+      name: /outgoing player/i,
+    });
+    expect(within(summary).queryByTestId("replaced-sale")).toBeNull();
+  });
+
   it("explains that an edited transfer has no separate selling price", async () => {
     const response = buildPlannerExplorerResponse();
     response.outgoing.operation = "edit_transfer";

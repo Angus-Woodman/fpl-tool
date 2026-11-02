@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -123,6 +123,15 @@ function ConfirmationNoticeView({
               add it. Nothing was submitted automatically.
             </p>
           )}
+          {notice.recoverHref && (
+            <Link
+              href={notice.recoverHref}
+              data-testid="recover-link"
+              className="mt-2 inline-flex min-h-6 items-center text-sm font-medium underline"
+            >
+              Preview that transfer again
+            </Link>
+          )}
           {dismiss}
         </div>
       );
@@ -175,6 +184,15 @@ function ConfirmationNoticeView({
           className="rounded-lg border border-slate-300 bg-slate-50 p-4 text-sm text-slate-800"
         >
           <p>{notice.text}</p>
+          {notice.recoverHref && (
+            <Link
+              href={notice.recoverHref}
+              data-testid="recover-link"
+              className="mt-2 inline-flex min-h-6 items-center text-sm font-medium underline"
+            >
+              Preview that transfer again
+            </Link>
+          )}
           {dismiss}
         </div>
       );
@@ -197,6 +215,42 @@ function ExplorerWorkspace({
   const [commit] = useState(() => commitFactory(initialPlan));
   const [listState, setListState] = useState<ListState>({ kind: "idle" });
   const loadedRef = useRef<LoadedContext | null>(null);
+  const [listRefresh, setListRefresh] = useState<"idle" | "pending" | "failed">(
+    "idle",
+  );
+  const refreshSequence = useRef(0);
+
+  // Replaces the list in place, on the pinned run and current horizon, so the table, its
+  // controls and any open preview stay mounted. A newer load or refresh discards this one.
+  const refreshList = useCallback(async (): Promise<void> => {
+    const loaded = loadedRef.current;
+    if (loaded === null) return;
+    const ticket = ++refreshSequence.current;
+    setListRefresh("pending");
+    const current = () =>
+      ticket === refreshSequence.current && loadedRef.current === loaded;
+    try {
+      const result = await fetchPlanTransferExplorer({
+        planId: loaded.planId,
+        gameweek: loaded.gameweek,
+        playerOutId: loaded.playerOutId,
+        primaryHorizon: loaded.horizon,
+        projectionRunId: loaded.runId,
+      });
+      if (!current()) return;
+      if (
+        result.type === "ok" &&
+        result.data.projection.run_id === loaded.runId
+      ) {
+        setListState({ kind: "ok", data: result.data });
+        setListRefresh("idle");
+      } else {
+        setListRefresh("failed");
+      }
+    } catch {
+      if (current()) setListRefresh("failed");
+    }
+  }, []);
 
   useEffect(() => {
     if (playerOutId === null) {
@@ -219,6 +273,8 @@ function ExplorerWorkspace({
     }
 
     let cancelled = false;
+    refreshSequence.current += 1;
+    setListRefresh("idle");
     setListState({ kind: "loading" });
     fetchPlanTransferExplorer({
       planId,
@@ -310,6 +366,7 @@ function ExplorerWorkspace({
     runId: pinnedRunId,
     commit,
     onCommitted: handleCommitted,
+    refreshList: () => void refreshList(),
   });
 
   // The coordinator's acknowledged plan is the freshest the Planner and Explorer share.
@@ -512,7 +569,38 @@ function ExplorerWorkspace({
             {withheld.map((id) => `#${id}`).join(", ")}).
           </p>
         )}
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <section
+          aria-busy={listRefresh === "pending"}
+          className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+        >
+          {listRefresh === "pending" && (
+            <p
+              data-testid="list-refreshing"
+              aria-live="polite"
+              className="mb-2 text-xs text-slate-600"
+            >
+              Refreshing candidate prices and states...
+            </p>
+          )}
+          {listRefresh === "failed" && (
+            <div
+              role="alert"
+              data-testid="list-refresh-failed"
+              className={`${ALERT_CLASSES} mb-3`}
+            >
+              <p>
+                Could not refresh the candidate list. The prices and states
+                shown may be out of date.
+              </p>
+              <button
+                type="button"
+                onClick={() => void refreshList()}
+                className="mt-2 inline-flex min-h-6 items-center text-sm font-medium underline"
+              >
+                Retry refresh
+              </button>
+            </div>
+          )}
           {data.candidates.length === 0 ? (
             <p className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600">
               No replacement candidates are available for this player.
@@ -522,7 +610,10 @@ function ExplorerWorkspace({
               candidates={data.candidates}
               horizons={data.projection.horizons}
               horizon={horizon}
-              bankIsEstimated={data.outgoing.selling_provisional}
+              bankIsEstimated={
+                data.outgoing.selling_provisional ||
+                data.outgoing.replaced_sale?.selling_provisional === true
+              }
               onPreview={confirmation.openPreview}
             />
           )}

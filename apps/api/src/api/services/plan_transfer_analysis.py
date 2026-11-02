@@ -103,6 +103,18 @@ class PurchaseBasis:
 
 
 @dataclass(frozen=True)
+class ReplacedSale:
+    """For an edit: the sale the replaced transfer keeps making, at the latest market price."""
+
+    player_id: int
+    web_name: str
+    purchase_price_tenths: int | None
+    market_price_tenths: int
+    selling_price_tenths: int
+    selling_provisional: bool
+
+
+@dataclass(frozen=True)
 class OutgoingSummary:
     player_id: int
     web_name: str
@@ -117,6 +129,7 @@ class OutgoingSummary:
     selling_price_tenths: int | None
     selling_provisional: bool
     projected_points_by_horizon: dict[int, float]
+    replaced_sale: ReplacedSale | None
 
 
 @dataclass(frozen=True)
@@ -339,6 +352,7 @@ class _Prepared:
     run: ProjectionRunRecord
     newer_run_available: bool
     outgoing_record: CandidatePlayerRecord
+    sold_web_name: str
     squad: tuple[Ownership, ...]
     squad_priced: list[PricedPlayer]
     pool: list[CandidatePlayerRecord]
@@ -642,6 +656,7 @@ class PlanTransferAnalysisService:
             run,
             newer_run_available,
             outgoing_record,
+            lookup_items[operation.sold_player_id].web_name,
             squad,
             squad_priced,
             pool,
@@ -921,6 +936,37 @@ def _outgoing(prepared: _Prepared, windows: Mapping[int, object]) -> OutgoingSum
         selling_price_tenths(ownership.purchase_price_tenths, market) if is_add else None,
         is_add and ownership.provenance.confirmation == "assumed",
         horizon_points,
+        None if is_add else _replaced_sale(prepared),
+    )
+
+
+def _replaced_sale(prepared: _Prepared) -> ReplacedSale | None:
+    """The edited transfer's own sale, priced like any new Planner sale: the engine's rule on
+    the stored purchase price and the latest market price the commit will capture."""
+    operation = prepared.operation
+    sale = next(
+        (
+            item
+            for item in prepared.context.selected_week.sales
+            if item.decision_id == operation.replaces_decision_id
+        ),
+        None,
+    )
+    if sale is None:
+        return None
+    market = prepared.market_tenths[operation.sold_player_id]
+    selling = (
+        selling_price_tenths(sale.purchase_price_tenths, market)
+        if sale.purchase_price_tenths is not None
+        else sale.selling_price_tenths
+    )
+    return ReplacedSale(
+        operation.sold_player_id,
+        prepared.sold_web_name,
+        sale.purchase_price_tenths,
+        market,
+        selling,
+        sale.basis_confirmation == "assumed",
     )
 
 

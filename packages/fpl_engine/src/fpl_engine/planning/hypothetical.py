@@ -1,8 +1,11 @@
 """Assess a hypothetical transfer against a Planner plan without writing anything.
 
 Every function takes frozen `Plan` and evaluation values and returns new values. The
-acceptance verdict is the one the commit path uses (`candidate_verdict`), so what is
-reported as `available` is exactly what `apply_intents` would accept.
+acceptance verdict is `candidate_verdict`, the same diagnostics-and-shortfalls verdict the
+commit path raises from, so `available` means `apply_intents` accepts it. `apply_intents`
+also refuses an edit whose gameweek cannot be verified (`unverified_edit`); that guard is
+not part of the verdict, because `resolve_transfer_operation` has already required the
+selected gameweek to be evaluable.
 """
 
 from __future__ import annotations
@@ -195,6 +198,9 @@ def _conflicts(
     verdict_shortfalls: tuple[Diagnostic, ...],
     plan: Plan,
     evaluation: PlanEvaluation,
+    *,
+    selected_gameweek: int,
+    own_decision_id: UUID,
 ) -> tuple[Conflict, ...]:
     decisions = {week.gameweek_number: week.transfers for week in plan.gameweeks}
     shortfalls = {week.gameweek_number: week.shortfall_tenths for week in evaluation.gameweeks}
@@ -203,18 +209,35 @@ def _conflicts(
         for item in verdict_diagnostics
     ]
     for item in verdict_shortfalls:
-        transfers = decisions.get(item.gameweek_number, ())
         found.append(
             Conflict(
                 "financial",
                 item.gameweek_number,
                 item.code,
-                transfers[0].decision_id if transfers else None,
+                _sole_planned_decision(
+                    decisions.get(item.gameweek_number, ()),
+                    item.gameweek_number > selected_gameweek,
+                    own_decision_id,
+                ),
                 item.message,
                 shortfalls.get(item.gameweek_number),
             )
         )
     return tuple(sorted(found, key=lambda item: (item.gameweek, item.kind == "financial")))
+
+
+def _sole_planned_decision(
+    transfers: tuple[TransferDecision, ...], after_selected: bool, own_decision_id: UUID
+) -> UUID | None:
+    """The one planned transfer that can be blamed for a shortfall, else None (ambiguous).
+
+    In the candidate's own gameweek the candidate is itself a contributor, so no other
+    decision is named; in a later gameweek a lone planned transfer is the unambiguous trigger.
+    """
+    if not after_selected:
+        return None
+    others = [item for item in transfers if item.decision_id != own_decision_id]
+    return others[0].decision_id if len(others) == 1 else None
 
 
 def _first_sale(
@@ -249,7 +272,14 @@ def assess_candidate(
 
     verdict = candidate_verdict(plan, candidate_plan, metadata, baseline=baseline)
     evaluation = verdict.evaluation
-    conflicts = _conflicts(verdict.diagnostics, verdict.shortfalls, candidate_plan, evaluation)
+    conflicts = _conflicts(
+        verdict.diagnostics,
+        verdict.shortfalls,
+        candidate_plan,
+        evaluation,
+        selected_gameweek=operation.gameweek,
+        own_decision_id=decision.decision_id,
+    )
 
     selected = [item for item in conflicts if item.gameweek <= operation.gameweek]
     if selected:
@@ -269,11 +299,7 @@ def assess_candidate(
     )
 
     week = next(item for item in evaluation.gameweeks if item.gameweek_number == operation.gameweek)
-    sale = (
-        _first_sale(evaluation, operation.gameweek, decision.decision_id)
-        if operation.kind == "add_transfer"
-        else None
-    )
+    sale = _first_sale(evaluation, operation.gameweek, decision.decision_id)
     return CandidateAssessment(
         quote.player_id,
         state,

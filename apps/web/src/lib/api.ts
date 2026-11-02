@@ -967,6 +967,15 @@ export type PlanExplorerAccountingBefore = {
   provisional: boolean;
 };
 
+export type PlanExplorerReplacedSale = {
+  player_id: number;
+  web_name: string;
+  purchase_price_tenths: number | null;
+  market_price_tenths: number;
+  selling_price_tenths: number;
+  selling_provisional: boolean;
+};
+
 export type PlanExplorerOutgoing = {
   player_id: number;
   web_name: string;
@@ -984,6 +993,8 @@ export type PlanExplorerOutgoing = {
   selling_price_tenths: number | null;
   selling_provisional: boolean;
   projected_points_by_horizon: Record<PlanExplorerHorizonKey, number>;
+  /** For an edit: the sale the replaced transfer keeps making; null for a new transfer. */
+  replaced_sale: PlanExplorerReplacedSale | null;
 };
 
 export type PlanExplorerConflict = {

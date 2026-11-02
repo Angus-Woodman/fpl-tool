@@ -17,6 +17,7 @@ import {
   type TransferHorizon,
 } from "@/lib/api";
 import type { PlannerCommit } from "@/lib/planner-commit";
+import { buildPlannerExplorerHref } from "@/lib/planner-explorer-url";
 import type { PinnedSubmission } from "@/lib/plan-save-coordinator";
 
 export type PreviewState =
@@ -36,14 +37,18 @@ export type ConfirmationNotice =
       message: string;
       code: string | null;
       summary: string | null;
+      /** Where to preview the rejected transfer again, when it is not the page's own scope. */
+      recoverHref?: string | null;
     }
   | { kind: "not_added"; summary: string | null }
   | { kind: "committed"; summary: string; incomingName: string }
-  | { kind: "earlier"; text: string };
+  | { kind: "earlier"; text: string; recoverHref?: string | null };
 
 type OwnSubmission = {
   submissionId: string;
   gameweek: number;
+  outgoingPlayerId: number;
+  projectionRunId: number;
   playerInId: number;
   summary: string;
   outgoingName: string;
@@ -96,10 +101,14 @@ export function usePlannerConfirmation(params: {
   runId: number | null;
   commit: PlannerCommit;
   onCommitted?: (transfer: CommittedTransfer) => void;
+  /** Reloads the candidate list in the background after the plan or prices moved under it. */
+  refreshList?: () => void;
 }) {
   const { planId, gameweek, playerOutId, horizon, runId, commit } = params;
   const onCommittedRef = useRef(params.onCommitted);
   onCommittedRef.current = params.onCommitted;
+  const refreshListRef = useRef(params.refreshList);
+  refreshListRef.current = params.refreshList;
   const view = useSyncExternalStore(
     commit.subscribe,
     commit.getView,
@@ -114,6 +123,33 @@ export function usePlannerConfirmation(params: {
   const runRef = useRef(runId);
   runRef.current = runId;
   const selectedRef = useRef<number | null>(null);
+  // What the page shows now, read at call time so an async recovery sees the latest scope.
+  const scopeRef = useRef({ gameweek, playerOutId });
+  scopeRef.current = { gameweek, playerOutId };
+
+  type Scoped = Pick<
+    OwnSubmission,
+    "gameweek" | "outgoingPlayerId" | "projectionRunId"
+  >;
+  const inScope = useCallback(
+    (submission: Scoped | null | undefined): boolean =>
+      submission != null &&
+      submission.gameweek === scopeRef.current.gameweek &&
+      submission.outgoingPlayerId === scopeRef.current.playerOutId &&
+      submission.projectionRunId === runRef.current,
+    [],
+  );
+  const recoverHrefFor = useCallback(
+    (submission: Scoped): string =>
+      buildPlannerExplorerHref({
+        planId,
+        gameweek: submission.gameweek,
+        playerOutId: submission.outgoingPlayerId,
+        horizon,
+        runId: submission.projectionRunId,
+      }),
+    [planId, horizon],
+  );
 
   const loadPreview = useCallback(
     async (playerInId: number, options: { syncPlan?: boolean } = {}) => {
@@ -216,10 +252,12 @@ export function usePlannerConfirmation(params: {
 
   const acknowledge = useCallback(
     async (record: PinnedSubmission, mine: OwnSubmission | null) => {
-      // Another candidate's open preview is not replaced by the outcome of an earlier transfer.
+      // Another candidate's preview, or a preview of another gameweek, player or run, is not
+      // replaced by the outcome of an earlier transfer.
       const owns = () =>
-        selectedRef.current === null ||
-        selectedRef.current === mine?.playerInId;
+        inScope(mine) &&
+        (selectedRef.current === null ||
+          selectedRef.current === mine?.playerInId);
       if (mine && record.status === "rejected" && owns()) {
         sequence.current += 1;
         setPreview({ kind: "loading", playerInId: mine.playerInId });
@@ -255,13 +293,17 @@ export function usePlannerConfirmation(params: {
               : "The server rejected this transfer."),
           code: previous.code,
           summary: mine.summary,
+          recoverHref: inScope(mine) ? null : recoverHrefFor(mine),
         });
-        if (owns()) void loadPreview(mine.playerInId);
+        if (owns()) {
+          void loadPreview(mine.playerInId);
+          refreshListRef.current?.();
+        }
       } else {
         setNotice({ kind: "earlier", text: describeEarlier(previous) });
       }
     },
-    [commit, loadPreview],
+    [commit, loadPreview, inScope, recoverHrefFor],
   );
 
   useEffect(() => {
@@ -315,6 +357,8 @@ export function usePlannerConfirmation(params: {
     const summary = `${data.outgoing.web_name} to ${data.candidate.web_name} in GW${submittedGameweek}`;
     const result = commit.submit(descriptor, summary, {
       gameweek: submittedGameweek,
+      outgoingPlayerId: data.outgoing.player_id,
+      projectionRunId: data.projection.run_id,
       playerInId: data.candidate.player_id,
       outgoingName: data.outgoing.web_name,
       incomingName: data.candidate.web_name,
@@ -323,6 +367,8 @@ export function usePlannerConfirmation(params: {
       own.current = {
         submissionId: result.submissionId,
         gameweek: submittedGameweek,
+        outgoingPlayerId: data.outgoing.player_id,
+        projectionRunId: data.projection.run_id,
         playerInId: data.candidate.player_id,
         summary,
         outgoingName: data.outgoing.web_name,
@@ -351,7 +397,20 @@ export function usePlannerConfirmation(params: {
     if (target !== null) void loadPreview(target, { syncPlan: true });
   }, [loadPreview]);
 
+  const submissionOf = useCallback(
+    (submissionId: string | undefined): OwnSubmission | null => {
+      if (submissionId === undefined) return null;
+      const view = commit.getView();
+      if (view.pinned?.submissionId === submissionId && view.details) {
+        return { submissionId, ...view.details, summary: view.label ?? "" };
+      }
+      return own.current?.submissionId === submissionId ? own.current : null;
+    },
+    [commit],
+  );
+
   const refreshAfterConflict = useCallback(async () => {
+    const submission = submissionOf(commit.getView().pinned?.submissionId);
     const result = await commit.abandon();
     if (result.type === "refresh_failed") {
       setNotice({
@@ -360,13 +419,26 @@ export function usePlannerConfirmation(params: {
       });
       return;
     }
-    const target = own.current?.playerInId ?? selectedRef.current;
+    // The plan moved on the server, so the list this page shows is stale whichever transfer clashed.
+    refreshListRef.current?.();
+    if (submission && !inScope(submission)) {
+      // The clash belongs to another scope: keep this page and point to that transfer.
+      setNotice({
+        kind: "earlier",
+        text: `The plan was refreshed. The transfer you confirmed earlier${
+          submission.summary ? ` (${submission.summary})` : ""
+        } was not submitted; preview it again to add it.`,
+        recoverHref: recoverHrefFor(submission),
+      });
+      return;
+    }
+    const target = submission?.playerInId ?? selectedRef.current;
     if (target !== null) {
       await loadPreview(target, { syncPlan: true });
     } else {
       setPreview({ kind: "idle" });
     }
-  }, [commit, loadPreview]);
+  }, [commit, loadPreview, submissionOf, inScope, recoverHrefFor]);
 
   const stopTracking = useCallback(async () => {
     const before = commit.getView();
@@ -375,10 +447,15 @@ export function usePlannerConfirmation(params: {
       (own.current?.submissionId === before.pinned?.submissionId
         ? (own.current?.summary ?? null)
         : null);
+    const stopped = submissionOf(before.pinned?.submissionId);
     const result = await commit.abandon();
     if (result.type === "abandoned") {
-      // Only the stopped transfer's own preview needs a fresh preview; another candidate's stays open.
-      if (own.current?.playerInId === selectedRef.current) {
+      // Only a preview of the stopped transfer itself, in its own scope, is closed.
+      if (
+        stopped !== null &&
+        inScope(stopped) &&
+        stopped.playerInId === selectedRef.current
+      ) {
         sequence.current += 1;
         selectedRef.current = null;
         setPreview({ kind: "idle" });
@@ -390,7 +467,7 @@ export function usePlannerConfirmation(params: {
         text: `Could not refresh the plan: ${result.message}`,
       });
     }
-  }, [commit]);
+  }, [commit, submissionOf, inScope]);
 
   const record = view.pinned;
   const unresolvedLabel =
@@ -422,6 +499,10 @@ export function usePlannerConfirmation(params: {
     pinnedModel = {
       kind: "conflict",
       message: record.message,
+      // Only a conflict in the page's own scope reloads a preview here.
+      previewsAgain: submissionOf(record.submissionId)
+        ? inScope(submissionOf(record.submissionId))
+        : true,
       onRefresh: () => void refreshAfterConflict(),
     };
   }

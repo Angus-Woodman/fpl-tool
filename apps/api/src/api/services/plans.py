@@ -592,6 +592,21 @@ def _decode_operations(inputs: dict[str, object]) -> tuple[planning.Intent, ...]
     )
 
 
+def request_digest(body: bodies.PlanMutationRequestBody) -> str:
+    payload = body.model_dump(mode="json")
+    for intent in payload["intents"]:
+        # Absent price guards are left out so a request hashes as it did before they existed.
+        if (
+            intent.get("expected_outgoing_market_tenths") is None
+            and intent.get("expected_incoming_price_tenths") is None
+        ):
+            intent.pop("expected_outgoing_market_tenths", None)
+            intent.pop("expected_incoming_price_tenths", None)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 class PlanMutationService:
     def __init__(
         self, session: Session, player_lookup_repository: PlayerLookupRepositoryPort
@@ -880,9 +895,7 @@ class PlanMutationService:
         return apply_intents(plan, operations, self._metadata(lookup)).plan, lookup
 
     def mutate(self, plan_id: int, body: bodies.PlanMutationRequestBody) -> PlannerMutationOutcome:
-        digest = hashlib.sha256(
-            json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        digest = request_digest(body)
         try:
             self._repository.lock_plan(plan_id)
             receipt = self._repository.get_receipt(plan_id, body.mutation_id)

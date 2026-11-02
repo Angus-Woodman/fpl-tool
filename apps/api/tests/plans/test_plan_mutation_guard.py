@@ -9,7 +9,7 @@ from api.models import PlayerModel
 from api.models.entities import PlanMutationModel
 from api.repositories.plan_repository import PlanRepository
 from api.schemas.plans import PlanMutationRequestBody
-from api.services.plans import PlannerMutationError
+from api.services.plans import PlannerMutationError, request_digest
 from conftest import requires_database
 from fpl_engine.planning.mutations import MutationRejectedError
 from pydantic import ValidationError
@@ -82,6 +82,39 @@ def test_a_complete_guard_and_no_guard_are_both_valid() -> None:
     assert parse(add_transfer(**guard)).intents
     assert parse(add_transfer()).intents
     assert parse({"kind": "edit_transfer", "decision_id": str(UUID(int=7)), **guard}).intents
+
+
+@pytest.mark.parametrize(
+    ("intent", "legacy_digest"),
+    [
+        # Digests the pre-guard schema produced for these exact requests (computed on `main`),
+        # so a retry of a mutation id issued before the guard fields existed still matches.
+        (
+            add_transfer(),
+            "7b3ef5f0c2487115faccdb73fb5f07634f6320fdf2990a7f242e4209e00a24c5",
+        ),
+        (
+            {"kind": "edit_transfer", "decision_id": str(UUID(int=7)), "incoming_player_id": 103},
+            "90e5f7329fef46107f311d6b6c4a76d5bc14a95eb9aad7c8a67d0a1e198819d8",
+        ),
+    ],
+)
+def test_a_request_without_a_guard_hashes_exactly_as_it_did_before_guards_existed(
+    intent: dict[str, Any], legacy_digest: str
+) -> None:
+    assert request_digest(parse(intent)) == legacy_digest
+
+
+def test_a_guard_changes_the_digest_and_each_price_is_part_of_it() -> None:
+    plain = request_digest(parse(add_transfer()))
+    guarded = request_digest(
+        parse(add_transfer(expected_outgoing_market_tenths=50, expected_incoming_price_tenths=50))
+    )
+    other = request_digest(
+        parse(add_transfer(expected_outgoing_market_tenths=50, expected_incoming_price_tenths=52))
+    )
+
+    assert len({plain, guarded, other}) == 3
 
 
 @requires_database
@@ -228,6 +261,68 @@ def test_an_edit_is_checked_only_when_it_changes_the_incoming_player(
     )
     assert unchanged.status == "committed"
     assert unchanged.plan.gameweeks[0].transfers[0].incoming_player_id == 102
+
+
+@requires_database
+@pytest.mark.parametrize(
+    "intent_extra",
+    [{"incoming_player_id": 103}, {}],
+    ids=["new incoming player", "incoming player unchanged"],
+)
+def test_an_edit_is_price_guarded_whether_or_not_it_changes_the_incoming_player(
+    guarded: tuple[Any, int], planner_session: Session, intent_extra: dict[str, int]
+) -> None:
+    service, plan_id = guarded
+    added = service.mutate(plan_id, mutation_body(intents=[add_transfer()]))
+    decision = added.plan.gameweeks[0].transfers[0]
+    before = receipts(planner_session)
+
+    def edit(**guard: int) -> dict[str, Any]:
+        return {
+            "kind": "edit_transfer",
+            "decision_id": str(decision.decision_id),
+            **intent_extra,
+            **guard,
+        }
+
+    incoming = intent_extra.get("incoming_player_id", 102)
+    incoming_price = 50  # the fixture players are all priced 5.0m
+    for number, guard, player_id in [
+        (
+            2,
+            {
+                "expected_outgoing_market_tenths": 54,
+                "expected_incoming_price_tenths": incoming_price,
+            },
+            2,
+        ),
+        (
+            3,
+            {"expected_outgoing_market_tenths": 50, "expected_incoming_price_tenths": 49},
+            incoming,
+        ),
+    ]:
+        with pytest.raises(MutationRejectedError) as error:
+            service.mutate(plan_id, mutation_body(number, 1, [edit(**guard)]))
+        assert error.value.code == "prices_changed"
+        assert error.value.diagnostics[0].player_id == player_id
+    assert receipts(planner_session) == before
+    assert PlanRepository(planner_session).load_canonical(plan_id).revision == 1
+
+    matching = service.mutate(
+        plan_id,
+        mutation_body(
+            4,
+            1,
+            [
+                edit(
+                    expected_outgoing_market_tenths=50,
+                    expected_incoming_price_tenths=incoming_price,
+                )
+            ],
+        ),
+    )
+    assert matching.status == "committed"
 
 
 @requires_database

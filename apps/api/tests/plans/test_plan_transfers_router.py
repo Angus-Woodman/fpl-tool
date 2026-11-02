@@ -22,6 +22,7 @@ from explorer_builders import (
     context_for,
     flat_points,
     plan,
+    reference_scenarios,
     run_record,
 )
 from fastapi.testclient import TestClient
@@ -79,6 +80,7 @@ def test_a_planner_list_names_the_context_it_was_computed_for(client) -> None:  
         "limited_reason",
     }
     assert body["outgoing"]["operation"] == "add_transfer"
+    assert body["outgoing"]["replaced_sale"] is None
     assert "selling_price_is_approximate" not in body["outgoing"]
     candidate = body["candidates"][0]
     assert set(candidate["best_xi_gain_by_horizon"]) == {"1", "3", "5"}
@@ -244,3 +246,26 @@ def test_preview_resolution_errors_are_explicit(client) -> None:  # type: ignore
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "plan_not_ready"
+
+
+def test_an_edit_reports_the_replaced_transfers_sale_on_the_wire(client) -> None:  # type: ignore[no-untyped-def]
+    scenario = next(
+        item for item in reference_scenarios() if item.name == "acquired_earlier_in_same_gameweek"
+    )
+
+    response = client(
+        resolver=lambda plan_id, gameweek: context_for(scenario.plan, gameweek, plan_id=plan_id)
+    ).get(f"/plans/1/gameweeks/{scenario.gameweek}/transfers/102")
+
+    assert response.status_code == 200, response.text
+    outgoing = response.json()["outgoing"]
+    assert outgoing["operation"] == "edit_transfer"
+    assert outgoing["selling_price_tenths"] is None
+    assert outgoing["replaced_sale"] == {
+        "player_id": 2,
+        "web_name": outgoing["replaced_sale"]["web_name"],
+        "purchase_price_tenths": 50,
+        "market_price_tenths": 54,
+        "selling_price_tenths": 52,
+        "selling_provisional": True,
+    }
