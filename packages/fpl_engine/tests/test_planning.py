@@ -1268,3 +1268,90 @@ def test_batch_that_adds_a_transfer_then_trims_its_gameweek_is_a_rule_violation_
         )
     assert error.value.code == "gameweek_not_in_plan"
     assert plan == build_plan(8, 11)
+
+
+def test_candidate_verdict_accepts_what_validate_candidate_accepts() -> None:
+    from fpl_engine.planning.mutations import candidate_verdict, validate_candidate
+
+    previous = build_plan()
+    candidate = with_week(previous, 9, transfers=(build_transfer(),))
+    verdict = candidate_verdict(previous, candidate, metadata())
+    assert verdict.accepted
+    assert verdict.diagnostics == ()
+    assert verdict.shortfalls == ()
+    assert verdict.evaluation == validate_candidate(previous, candidate, metadata())
+
+
+def test_candidate_verdict_reports_every_introduced_diagnostic_and_wrapper_raises_the_first() -> (
+    None
+):
+    from fpl_engine.planning.mutations import (
+        MutationRejectedError,
+        candidate_verdict,
+        validate_candidate,
+    )
+
+    previous = build_plan()
+    missing = replace(build_transfer(), outgoing_ownership_id=identity(9999))
+    candidate = with_week(previous, 9, transfers=(missing,))
+    verdict = candidate_verdict(previous, candidate, metadata())
+    assert not verdict.accepted
+    assert verdict.diagnostics[0].code == "outgoing_not_owned"
+    assert verdict.diagnostics[0].gameweek_number == 9
+    assert {error.code for error in verdict.diagnostics} >= {"outgoing_not_owned"}
+    assert len(verdict.diagnostics) > 1  # later gameweeks are dependency_blocked as well
+    with pytest.raises(MutationRejectedError) as error:
+        validate_candidate(previous, candidate, metadata())
+    assert error.value.diagnostics == verdict.diagnostics
+    assert error.value.code == verdict.diagnostics[0].code
+
+
+def test_candidate_verdict_reports_every_new_shortfall_and_wrapper_raises_the_first() -> None:
+    from fpl_engine.planning.mutations import (
+        MutationRejectedError,
+        candidate_verdict,
+        validate_candidate,
+    )
+
+    previous = build_plan()
+    costly = replace(build_transfer(), incoming_price_tenths=80)
+    candidate = with_week(previous, 9, transfers=(costly,))
+    verdict = candidate_verdict(previous, candidate, metadata())
+    assert not verdict.accepted
+    assert verdict.diagnostics == ()
+    assert [error.gameweek_number for error in verdict.shortfalls] == [9, 10, 11]
+    assert {error.code for error in verdict.shortfalls} == {"financial_shortfall"}
+    with pytest.raises(MutationRejectedError) as error:
+        validate_candidate(previous, candidate, metadata())
+    assert error.value.diagnostics == (verdict.shortfalls[0],)
+    assert str(error.value) == f"Gameweek 9: {verdict.shortfalls[0].message}"
+
+
+def test_candidate_verdict_ignores_an_unchanged_shortfall_and_the_purchase_correction() -> None:
+    from fpl_engine.planning.mutations import candidate_verdict, validate_candidate
+
+    costly = replace(build_transfer(), incoming_price_tenths=80)
+    previous = with_week(build_plan(), 9, transfers=(costly,))
+    unchanged = candidate_verdict(previous, replace(previous, name="Renamed"), metadata())
+    assert unchanged.accepted
+    worse = with_week(build_plan(), 9, transfers=(replace(costly, incoming_price_tenths=90),))
+    assert not candidate_verdict(previous, worse, metadata()).accepted
+    exempt = candidate_verdict(previous, worse, metadata(), purchase_correction=True)
+    assert exempt.accepted
+    assert exempt.evaluation == validate_candidate(
+        previous, worse, metadata(), purchase_correction=True
+    )
+
+
+def test_candidate_verdict_reuses_a_supplied_baseline_without_changing_the_result() -> None:
+    from fpl_engine.planning.evaluate import evaluate_plan
+    from fpl_engine.planning.mutations import candidate_verdict
+
+    previous = build_plan()
+    candidate = with_week(
+        previous, 9, transfers=(replace(build_transfer(), incoming_price_tenths=80),)
+    )
+    baseline = evaluate_plan(previous, metadata())
+    assert candidate_verdict(previous, candidate, metadata(), baseline=baseline) == (
+        candidate_verdict(previous, candidate, metadata())
+    )

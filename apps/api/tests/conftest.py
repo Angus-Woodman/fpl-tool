@@ -122,6 +122,8 @@ def seed_planner_players(session: Session, metadata: dict[int, PlayerRuleData]) 
                 position=StoredPosition(player.position.value),
                 current_price=5.0,
                 status="a",
+                can_select=True,
+                can_transact=True,
             )
         )
     session.flush()

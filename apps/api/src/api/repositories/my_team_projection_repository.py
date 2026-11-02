@@ -70,18 +70,26 @@ class MyTeamProjectionRepository:
         return self._rows_to_records(rows)
 
     def list_player_fixture_projections_for_run(
-        self, player_ids: list[int], run_id: int
+        self,
+        player_ids: list[int],
+        run_id: int,
+        *,
+        min_gameweek: int | None = None,
+        max_gameweek: int | None = None,
     ) -> list[PlayerProjectionFixtureRecord]:
         """Every row comes from one explicit projection run -- never rows
         merely sharing a timestamp across models, and never a mix of an old
-        and a new run for the same model."""
+        and a new run for the same model. Optional inclusive gameweek bounds
+        limit the rows; omitting them returns every gameweek."""
         if not player_ids:
             return []
 
-        rows = self._session.execute(
-            self._base_statement(player_ids).where(ProjectionModel.run_id == run_id)
-        ).all()
-        return self._rows_to_records(rows)
+        statement = self._base_statement(player_ids).where(ProjectionModel.run_id == run_id)
+        if min_gameweek is not None:
+            statement = statement.where(GameweekModel.number >= min_gameweek)
+        if max_gameweek is not None:
+            statement = statement.where(GameweekModel.number <= max_gameweek)
+        return self._rows_to_records(self._session.execute(statement).all())
 
     def _base_statement(self, player_ids: list[int]) -> Select[Any]:
         home_team = aliased(TeamModel)

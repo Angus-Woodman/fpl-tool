@@ -24,6 +24,7 @@ from fpl_engine.rules import (
     validate_chip_usage,
     validate_squad,
 )
+from fpl_engine.transfers import IncomingSelectabilityExclusion, incoming_selectability_exclusion
 from pydantic import TypeAdapter
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -515,6 +516,12 @@ def checked_tenths(value: float, *, positive: bool = True) -> int:
     return result
 
 
+def _selectability_message(reason: IncomingSelectabilityExclusion, name: str) -> str:
+    if reason == "player_not_selectable":
+        return f"{name} is not currently selectable in FPL."
+    return f"Selectability for {name} has not been imported yet. Refresh FPL data and try again."
+
+
 @dataclass(frozen=True)
 class PlannerMutationOutcome:
     status: Literal["committed", "already_committed", "accepted_not_saved"]
@@ -583,6 +590,21 @@ def _decode_operations(inputs: dict[str, object]) -> tuple[planning.Intent, ...]
         )
         for operation in operations
     )
+
+
+def request_digest(body: bodies.PlanMutationRequestBody) -> str:
+    payload = body.model_dump(mode="json")
+    for intent in payload["intents"]:
+        # Absent price guards are left out so a request hashes as it did before they existed.
+        if (
+            intent.get("expected_outgoing_market_tenths") is None
+            and intent.get("expected_incoming_price_tenths") is None
+        ):
+            intent.pop("expected_outgoing_market_tenths", None)
+            intent.pop("expected_incoming_price_tenths", None)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 class PlanMutationService:
@@ -759,6 +781,54 @@ class PlanMutationService:
                     raise RuleViolationError(
                         "missing_price_observation", "Stored player/price observation missing"
                     )
+                outgoing_tenths = checked_tenths(lookup[outgoing].current_price)
+                incoming_tenths = checked_tenths(lookup[incoming].current_price)
+                target_gameweek = (
+                    request.gameweek_number
+                    if isinstance(request, bodies.AddTransferIntent)
+                    else next(
+                        week.gameweek_number
+                        for week in plan.gameweeks
+                        if old is not None
+                        and any(item.decision_id == old.decision_id for item in week.transfers)
+                    )
+                )
+                changes_incoming = old is None or old.incoming_player_id != incoming
+                if changes_incoming:
+                    # Saved decisions replay unchecked; only a newly chosen incoming player is.
+                    exclusion = incoming_selectability_exclusion(
+                        lookup[incoming].can_select, lookup[incoming].can_transact
+                    )
+                    if exclusion is not None:
+                        raise MutationRejectedError(
+                            (
+                                planning.Diagnostic(
+                                    exclusion,
+                                    _selectability_message(exclusion, lookup[incoming].web_name),
+                                    target_gameweek,
+                                    player_id=incoming,
+                                ),
+                            )
+                        )
+                if request.expected_outgoing_market_tenths is not None and (
+                    request.expected_outgoing_market_tenths != outgoing_tenths
+                    or request.expected_incoming_price_tenths != incoming_tenths
+                ):
+                    changed = (
+                        outgoing
+                        if request.expected_outgoing_market_tenths != outgoing_tenths
+                        else incoming
+                    )
+                    raise MutationRejectedError(
+                        (
+                            planning.Diagnostic(
+                                "prices_changed",
+                                "A price changed since the preview; preview the transfer again",
+                                target_gameweek,
+                                player_id=changed,
+                            ),
+                        )
+                    )
                 decision = planning.TransferDecision(
                     old.decision_id if old else uuid4(),
                     outgoing,
@@ -767,8 +837,8 @@ class PlanMutationService:
                     old.incoming_ownership_id
                     if old and old.incoming_player_id == incoming
                     else uuid4(),
-                    checked_tenths(lookup[outgoing].current_price),
-                    checked_tenths(lookup[incoming].current_price),
+                    outgoing_tenths,
+                    incoming_tenths,
                     "stored_player_observation",
                     dt.datetime.now(dt.UTC).isoformat(),
                     "captured",
@@ -825,9 +895,7 @@ class PlanMutationService:
         return apply_intents(plan, operations, self._metadata(lookup)).plan, lookup
 
     def mutate(self, plan_id: int, body: bodies.PlanMutationRequestBody) -> PlannerMutationOutcome:
-        digest = hashlib.sha256(
-            json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        digest = request_digest(body)
         try:
             self._repository.lock_plan(plan_id)
             receipt = self._repository.get_receipt(plan_id, body.mutation_id)

@@ -1,10 +1,15 @@
-import type { MyTeamPlayerItem } from "@/lib/api";
+export type OutgoingPlayerOption = {
+  player_id: number;
+  web_name: string;
+  position: string;
+  team_short_name: string;
+};
 
 export function OutgoingPlayerSelector({
   players,
   onSelect,
 }: {
-  players: MyTeamPlayerItem[];
+  players: OutgoingPlayerOption[];
   onSelect: (playerId: number) => void;
 }): JSX.Element {
   return (

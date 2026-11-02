@@ -283,3 +283,96 @@ def test_list_latest_can_request_a_different_model_explicitly(db_session: Sessio
     )
 
     assert [row.projected_points for row in rows] == [2.0]
+
+
+def _seed_five_gameweeks(session: Session) -> tuple[int, int]:
+    """One player with a fixture and projection in each of gameweeks 5 to 9 of one run."""
+    team = TeamModel(external_fpl_id=1, name="Arsenal", short_name="ARS", source_difficulty=4)
+    opponent = TeamModel(external_fpl_id=2, name="Chelsea", short_name="CHE", source_difficulty=3)
+    session.add_all([team, opponent])
+    session.flush()
+    player = PlayerModel(
+        external_fpl_id=101,
+        first_name="Bukayo",
+        second_name="Saka",
+        web_name="Saka",
+        team_id=team.id,
+        position="MID",
+        current_price=10.5,
+        status="a",
+    )
+    session.add(player)
+    run_id = _create_run(session, model_version="component_v3", generated_at=GENERATED_AT)
+    session.flush()
+    for number in range(5, 10):
+        gameweek = GameweekModel(
+            number=number,
+            name=f"Gameweek {number}",
+            deadline=dt.datetime(2026, 9, 20, 17, 30, tzinfo=dt.UTC) + dt.timedelta(days=number),
+            is_current=False,
+            is_next=number == 5,
+            is_finished=False,
+        )
+        session.add(gameweek)
+        session.flush()
+        fixture = FixtureModel(
+            external_fpl_id=2000 + number,
+            gameweek_id=gameweek.id,
+            home_team_id=team.id,
+            away_team_id=opponent.id,
+            kickoff_time=dt.datetime(2026, 9, 20, 15, 0, tzinfo=dt.UTC) + dt.timedelta(days=number),
+            finished=False,
+        )
+        session.add(fixture)
+        session.flush()
+        _create_projection(
+            session,
+            player_id=player.id,
+            fixture_id=fixture.id,
+            gameweek_id=gameweek.id,
+            run_id=run_id,
+            model_version="component_v3",
+            generated_at=GENERATED_AT,
+            projected_points=float(number),
+        )
+    session.flush()
+    return player.id, run_id
+
+
+def test_gameweek_bounds_return_only_rows_inside_them(planner_session: Session) -> None:
+    player_id, run_id = _seed_five_gameweeks(planner_session)
+    repository = MyTeamProjectionRepository(planner_session)
+
+    both = repository.list_player_fixture_projections_for_run(
+        [player_id], run_id, min_gameweek=6, max_gameweek=8
+    )
+    assert [row.gameweek_number for row in both] == [6, 7, 8]
+    assert [row.projected_points for row in both] == [6.0, 7.0, 8.0]
+    assert [
+        row.gameweek_number
+        for row in repository.list_player_fixture_projections_for_run(
+            [player_id], run_id, min_gameweek=8
+        )
+    ] == [8, 9]
+    assert [
+        row.gameweek_number
+        for row in repository.list_player_fixture_projections_for_run(
+            [player_id], run_id, max_gameweek=5
+        )
+    ] == [5]
+    assert (
+        repository.list_player_fixture_projections_for_run(
+            [player_id], run_id, min_gameweek=10, max_gameweek=12
+        )
+        == []
+    )
+
+
+def test_omitting_the_bounds_keeps_every_row_for_existing_callers(planner_session: Session) -> None:
+    player_id, run_id = _seed_five_gameweeks(planner_session)
+    repository = MyTeamProjectionRepository(planner_session)
+
+    unbounded = repository.list_player_fixture_projections_for_run([player_id], run_id)
+    assert [row.gameweek_number for row in unbounded] == [5, 6, 7, 8, 9]
+    latest = repository.list_latest_player_fixture_projections([player_id])
+    assert [row.gameweek_number for row in latest] == [5, 6, 7, 8, 9]

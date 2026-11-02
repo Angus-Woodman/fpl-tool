@@ -1,11 +1,11 @@
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from api.schemas.lineup import LineupRearrangementResponse
 from fpl_engine.planning.models import Diagnostic, LineupRole, PurchaseProvenance
 from fpl_engine.rules import Chip
 from fpl_engine.rules.chips import ChipAvailability
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_ID = 2_147_483_647
 MAX_PRICE_TENTHS = 10_000
@@ -81,7 +81,22 @@ class MoveChipIntent(PlannerIntentBody):
     chip: WireChip
 
 
-class AddTransferIntent(PlannerIntentBody):
+class TransferPriceGuard(PlannerIntentBody):
+    """Compare-only prices the user previewed; the saved quote is always the server's own."""
+
+    expected_outgoing_market_tenths: int | None = Field(default=None, gt=0, le=MAX_PRICE_TENTHS)
+    expected_incoming_price_tenths: int | None = Field(default=None, gt=0, le=MAX_PRICE_TENTHS)
+
+    @model_validator(mode="after")
+    def guard_is_complete_or_absent(self) -> Self:
+        if (self.expected_outgoing_market_tenths is None) != (
+            self.expected_incoming_price_tenths is None
+        ):
+            raise ValueError("Send both expected prices or neither")
+        return self
+
+
+class AddTransferIntent(TransferPriceGuard):
     kind: Literal["add_transfer"]
     gameweek_number: int = Field(ge=1, le=38)
     outgoing_player_id: int = Field(gt=0, le=MAX_ID)
@@ -89,7 +104,7 @@ class AddTransferIntent(PlannerIntentBody):
     incoming_player_id: int = Field(gt=0, le=MAX_ID)
 
 
-class EditTransferIntent(PlannerIntentBody):
+class EditTransferIntent(TransferPriceGuard):
     kind: Literal["edit_transfer"]
     decision_id: WireUUID
     outgoing_player_id: int | None = Field(default=None, gt=0, le=MAX_ID)

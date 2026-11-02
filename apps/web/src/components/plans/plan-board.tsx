@@ -1,7 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import {
   PlanChip,
@@ -19,7 +25,11 @@ import {
   PlanSaveSnapshot,
   getPlanSaveCoordinator,
 } from "@/lib/plan-save-coordinator";
-import { installHistoryDepartureGuard } from "@/lib/history-departure-guard";
+import { useDepartureGuard } from "@/lib/use-departure-guard";
+import {
+  clearTransferNotice,
+  peekTransferNotice,
+} from "@/lib/planner-transfer-notice";
 import {
   hasTargets,
   resolveSelection,
@@ -36,6 +46,7 @@ import {
 import { SquadPitch } from "@/components/team/squad-pitch";
 import { SquadPlayerCard } from "@/components/team/squad-player-card";
 import { POSITION_ORDER, type Position } from "@/components/team/types";
+import { buildPlannerExplorerHref } from "@/lib/planner-explorer-url";
 
 const EMPTY_SUBSCRIBE = () => () => {};
 const EMPTY_SNAPSHOT = () => null;
@@ -642,9 +653,38 @@ function StartingStatePanel({
   );
 }
 
+function positiveInteger(value: string | null): number | null {
+  return value !== null && /^[0-9]+$/.test(value) && Number(value) > 0
+    ? Number(value)
+    : null;
+}
+
+function readArrival(): { gameweek: number | null; highlight: number | null } {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    gameweek: positiveInteger(params.get("gw")),
+    highlight: positiveInteger(params.get("highlight")),
+  };
+}
+
+/** Keeps the selected gameweek in this history entry so Back from the Explorer returns to it. */
+function rememberGameweek(gameweek: number): void {
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${window.location.pathname}?gw=${gameweek}`,
+  );
+}
+
 export function PlanBoard({ planId }: { planId: number }): JSX.Element {
   const [state, setState] = useState<LoadState>({ type: "loading" });
   const [selectedGameweek, setSelectedGameweek] = useState<number | null>(null);
+  const [highlight, setHighlight] = useState<{
+    gameweek: number;
+    playerId: number;
+  } | null>(null);
+  const [transferNotice, setTransferNotice] = useState<string | null>(null);
+  const scrolledRef = useRef(false);
   const [coordinator, setCoordinator] = useState<PlanSaveCoordinator | null>(
     null,
   );
@@ -673,9 +713,30 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
         }
         setState({ type: "loaded", plan });
         setCoordinator(getPlanSaveCoordinator(plan));
+        // Arrival from the Explorer is honoured once, on the first load only.
+        const arrival = readArrival();
+        const arrivalGameweek =
+          arrival.gameweek !== null &&
+          plan.gameweeks.some(
+            (week) => week.gameweek_number === arrival.gameweek,
+          )
+            ? arrival.gameweek
+            : null;
         setSelectedGameweek(
-          (current) => current ?? plan.gameweeks[0]?.gameweek_number ?? null,
+          (current) =>
+            current ??
+            arrivalGameweek ??
+            plan.gameweeks[0]?.gameweek_number ??
+            null,
         );
+        if (arrivalGameweek !== null && arrival.highlight !== null) {
+          setHighlight({
+            gameweek: arrivalGameweek,
+            playerId: arrival.highlight,
+          });
+        }
+        const notice = peekTransferNotice(planId);
+        if (notice) setTransferNotice(notice.message);
       } catch (error) {
         if (!cancelled) {
           setState({
@@ -717,50 +778,32 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
     setTransferOutId(null);
   }, [gameweek?.gameweek_number]);
 
+  useDepartureGuard(coordinator);
+
   useEffect(() => {
-    if (!coordinator) return;
-    const warning =
-      "Your latest Planner edit is not saved yet. Leave this page anyway?";
-    const historyGuard = installHistoryDepartureGuard(coordinator, warning);
-    const onUnload = (event: BeforeUnloadEvent): void => {
-      if (historyGuard.leaving() || !coordinator.hasUnsavedWork()) return;
-      event.preventDefault();
-      event.returnValue = warning;
-    };
-    const onClick = (event: MouseEvent): void => {
-      if (!coordinator.hasUnsavedWork() || event.defaultPrevented) return;
-      if (
-        event.button !== 0 ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.shiftKey
-      )
-        return;
-      const link = (event.target as Element | null)?.closest?.("a[href]");
-      if (!(link instanceof HTMLAnchorElement)) return;
-      if (link.target === "_blank" || link.hasAttribute("download")) return;
-      const destination = new URL(link.href, window.location.href);
-      if (!/^https?:$/.test(destination.protocol)) return;
-      const here = new URL(window.location.href);
-      if (
-        destination.origin === here.origin &&
-        destination.pathname === here.pathname &&
-        destination.search === here.search
-      )
-        return;
-      if (!window.confirm(warning)) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    };
-    window.addEventListener("beforeunload", onUnload);
-    document.addEventListener("click", onClick, true);
-    return () => {
-      window.removeEventListener("beforeunload", onUnload);
-      document.removeEventListener("click", onClick, true);
-      historyGuard.dispose();
-    };
-  }, [coordinator]);
+    if (transferNotice !== null) clearTransferNotice(planId);
+  }, [transferNotice, planId]);
+
+  useEffect(() => {
+    if (
+      highlight === null ||
+      scrolledRef.current ||
+      gameweek?.gameweek_number !== highlight.gameweek
+    ) {
+      return;
+    }
+    const card = document.querySelector(
+      `[data-player-id="${highlight.playerId}"]`,
+    );
+    if (!card) return;
+    scrolledRef.current = true;
+    const reduceMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    card.scrollIntoView?.({
+      block: "center",
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
+  }, [highlight, gameweek, plan]);
 
   useEffect(() => {
     if (
@@ -967,6 +1010,24 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
       onSelect: () => handleSelect(playerId),
       selectionDisabled: saveStatus === "saving",
     };
+  }
+
+  function exploreLink(player: PlanPlayer): JSX.Element | null {
+    if (gameweek === null) return null;
+    return (
+      <Link
+        href={buildPlannerExplorerHref({
+          planId: currentPlan.plan_id,
+          gameweek: gameweek.gameweek_number,
+          playerOutId: player.player_id,
+        })}
+        onClick={() => rememberGameweek(gameweek.gameweek_number)}
+        aria-label={`Explore transfers for ${player.web_name}`}
+        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+      >
+        Explore transfers
+      </Link>
+    );
   }
 
   function transferOptions(player: PlanPlayer): JSX.Element | null {
@@ -1178,6 +1239,22 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
           {`Edit not applied: ${item.reason}`}
         </p>
       ))}
+      {transferNotice !== null && (
+        <div
+          role="status"
+          data-testid="transfer-notice"
+          className="sticky top-2 z-20 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900 shadow-md"
+        >
+          <p>{transferNotice}</p>
+          <button
+            type="button"
+            className="inline-flex min-h-6 items-center font-medium underline"
+            onClick={() => setTransferNotice(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <FinancialResolutionPanel plan={currentPlan} onGo={setSelectedGameweek} />
       <TransferRepairPanel
         key={`${currentPlan.revision}-${JSON.stringify(snapshot?.rejection?.intents ?? [])}`}
@@ -1229,6 +1306,16 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                       : 0}
                 </p>
               </div>
+              <Link
+                href={buildPlannerExplorerHref({
+                  planId: currentPlan.plan_id,
+                  gameweek: gameweek.gameweek_number,
+                })}
+                onClick={() => rememberGameweek(gameweek.gameweek_number)}
+                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50"
+              >
+                Explore transfers for this gameweek
+              </Link>
             </div>
 
             <div className="mt-4 flex flex-wrap gap-2">
@@ -1373,6 +1460,12 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               keyFor={(player) => player.player_id}
               renderCard={(player) => (
                 <SquadPlayerCard
+                  playerId={player.player_id}
+                  highlighted={
+                    highlight !== null &&
+                    highlight.gameweek === gameweek.gameweek_number &&
+                    highlight.playerId === player.player_id
+                  }
                   webName={player.web_name}
                   teamShortName={player.team_short_name}
                   position={player.position}
@@ -1414,6 +1507,7 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                     >
                       VC
                     </button>
+                    {exploreLink(player)}
                   </div>
                   {transferOptions(player)}
                 </SquadPlayerCard>
@@ -1425,6 +1519,12 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
               keyFor={(player) => player.player_id}
               renderCard={(player) => (
                 <SquadPlayerCard
+                  playerId={player.player_id}
+                  highlighted={
+                    highlight !== null &&
+                    highlight.gameweek === gameweek.gameweek_number &&
+                    highlight.playerId === player.player_id
+                  }
                   webName={player.web_name}
                   teamShortName={player.team_short_name}
                   position={player.position}
@@ -1434,15 +1534,18 @@ export function PlanBoard({ planId }: { planId: number }): JSX.Element {
                   opponentLabel={opponentLabel(player)}
                   {...selectionProps(player.player_id)}
                 >
-                  <button
-                    type="button"
-                    aria-label={`Transfer ${player.web_name}`}
-                    aria-expanded={transferOutId === player.player_id}
-                    className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
-                    onClick={() => void handleOpenTransfer(player)}
-                  >
-                    Transfer
-                  </button>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      aria-label={`Transfer ${player.web_name}`}
+                      aria-expanded={transferOutId === player.player_id}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                      onClick={() => void handleOpenTransfer(player)}
+                    >
+                      Transfer
+                    </button>
+                    {exploreLink(player)}
+                  </div>
                   {transferOptions(player)}
                 </SquadPlayerCard>
               )}

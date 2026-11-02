@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from api.models import FixtureModel, GameweekModel, TeamModel
@@ -21,6 +21,16 @@ class FixtureTickerItem:
 
 
 @dataclass(frozen=True)
+class ScheduledFixtureRecord:
+    fixture_id: int
+    # None for a fixture the league has not (re)scheduled into a gameweek.
+    gameweek_number: int | None
+    home_team_id: int
+    away_team_id: int
+    finished: bool
+
+
+@dataclass(frozen=True)
 class FixtureTickerResult:
     items: list[FixtureTickerItem]
     total: int
@@ -31,6 +41,35 @@ class FixtureTickerResult:
 class FixtureReadRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    def list_schedule(
+        self, *, min_gameweek: int, max_gameweek: int
+    ) -> list[ScheduledFixtureRecord]:
+        """Every fixture in the gameweek range, plus every unfinished unscheduled one.
+
+        Postponed fixtures have no gameweek, so they are returned regardless of range:
+        a club with one has an incomplete schedule.
+        """
+        rows = self._session.execute(
+            select(
+                FixtureModel.id,
+                GameweekModel.number,
+                FixtureModel.home_team_id,
+                FixtureModel.away_team_id,
+                FixtureModel.finished,
+            )
+            .outerjoin(GameweekModel, GameweekModel.id == FixtureModel.gameweek_id)
+            .where(
+                or_(
+                    and_(
+                        GameweekModel.number >= min_gameweek, GameweekModel.number <= max_gameweek
+                    ),
+                    and_(GameweekModel.number.is_(None), FixtureModel.finished.is_(False)),
+                )
+            )
+            .order_by(FixtureModel.id)
+        ).all()
+        return [ScheduledFixtureRecord(row[0], row[1], row[2], row[3], row[4]) for row in rows]
 
     def list_upcoming(
         self,
