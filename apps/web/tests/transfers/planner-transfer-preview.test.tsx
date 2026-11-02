@@ -213,6 +213,7 @@ function committedBody(
 
 type ExplorerOptions = {
   commit?: PlannerCommitFactory;
+  gameweek?: number;
   horizon?: 1 | 3 | 5;
   runId?: number | null;
   strict?: boolean;
@@ -222,7 +223,7 @@ function renderExplorer(api: Api, options: ExplorerOptions = {}) {
   const element = (next: ExplorerOptions) => (
     <PlannerTransferExplorer
       planId={api.plan.plan_id}
-      gameweek={EXPLORER_GAMEWEEK}
+      gameweek={next.gameweek ?? options.gameweek ?? EXPLORER_GAMEWEEK}
       playerOutId={EXPLORER_OUTGOING_ID}
       horizon={next.horizon ?? 5}
       runId={next.runId === undefined ? EXPLORER_RUN_ID : next.runId}
@@ -1935,6 +1936,124 @@ describe("Planner Explorer navigation and departure protection", () => {
     expect(
       JSON.parse(window.sessionStorage.getItem(noticeKey(api)) ?? "null"),
     ).toMatchObject({ message: "Transferred P6 for Available Alex in GW9" });
+  });
+
+  describe("a submission resumed in a different gameweek keeps its own gameweek", () => {
+    const earlier = {
+      gameweek: 9,
+      playerInId: 101,
+      outgoingName: "P6",
+      incomingName: "Available Alex",
+    };
+
+    it("reports GW9 for the notice, return URL and highlight when the real coordinator commits it while GW10 is shown", async () => {
+      const api = installApi();
+      const first = await confirmOwn(api);
+      const original = api.mutations[0].envelope;
+      await act(async () => {
+        api.mutations[0].gate.reject(new TypeError("Failed to fetch"));
+      });
+      await screen.findByTestId("commit-unknown");
+      first.unmount();
+
+      renderExplorer(api, { gameweek: 10 });
+      const region = await screen.findByRole("region", {
+        name: "Unresolved transfer confirmation",
+      });
+      expect(region).toHaveTextContent("P6 to Available Alex in GW9");
+      fireEvent.click(
+        within(region).getByRole("button", { name: "Retry same transfer" }),
+      );
+      await waitFor(() => expect(api.mutations).toHaveLength(2));
+      expect(api.mutations[1].envelope).toEqual(original);
+      await act(async () => {
+        api.mutations[1].gate.resolve(
+          json(200, committedBody(api, original, REVISION + 1)),
+        );
+      });
+
+      await waitFor(() => expect(routerPush).toHaveBeenCalledTimes(1));
+      expect(routerPush).toHaveBeenCalledWith(
+        `/plans/${api.plan.plan_id}?gw=9&highlight=101`,
+      );
+      expect(
+        JSON.parse(window.sessionStorage.getItem(noticeKey(api)) ?? "null"),
+      ).toEqual({
+        message: "Transferred P6 for Available Alex in GW9",
+        gameweek: 9,
+        incomingPlayerId: 101,
+      });
+      expect(screen.getByTestId("commit-success")).toHaveTextContent("GW9");
+      expect(screen.getByTestId("commit-success")).not.toHaveTextContent(
+        "GW10",
+      );
+    });
+
+    it("uses the original gameweek for an unresolved record observed while mounted", async () => {
+      const api = installApi();
+      const { factory, set } = createFakeCommit(api, {
+        pinned: pinned({ submissionId: "earlier-1", status: "unknown" }),
+        label: "P6 to Available Alex in GW9",
+        details: earlier,
+      });
+      renderExplorer(api, { commit: factory, gameweek: 10 });
+      await screen.findByRole("region", {
+        name: "Unresolved transfer confirmation",
+      });
+
+      act(() =>
+        set({
+          pinned: pinned({ submissionId: "earlier-1", status: "committed" }),
+          idle: true,
+        }),
+      );
+
+      await waitFor(() => expect(routerPush).toHaveBeenCalledTimes(1));
+      expect(routerPush).toHaveBeenCalledWith(
+        `/plans/${api.plan.plan_id}?gw=9&highlight=101`,
+      );
+      expect(
+        JSON.parse(window.sessionStorage.getItem(noticeKey(api)) ?? "null"),
+      ).toMatchObject({
+        message: "Transferred P6 for Available Alex in GW9",
+        gameweek: 9,
+      });
+    });
+
+    it("does not navigate for a terminal record already present on mount, even with remembered details", async () => {
+      const api = installApi();
+      const { fake, factory } = createFakeCommit(api, {
+        pinned: pinned({ submissionId: "earlier-1", status: "committed" }),
+        label: "P6 to Available Alex in GW9",
+        details: earlier,
+      });
+      renderExplorer(api, { commit: factory, gameweek: 10 });
+
+      await screen.findByTestId("commit-earlier");
+      await waitFor(() => expect(fake.abandon).toHaveBeenCalledTimes(1));
+
+      expect(routerPush).not.toHaveBeenCalled();
+      expect(window.sessionStorage.getItem(noticeKey(api))).toBeNull();
+    });
+
+    it("does not navigate for another submission's acknowledgement while GW10 is shown", async () => {
+      const api = installApi();
+      const { factory, set } = createFakeCommit(api);
+      renderExplorer(api, { commit: factory, gameweek: 10 });
+      await screen.findByRole("button", { name: "Preview Available Alex" });
+
+      act(() =>
+        set({
+          pinned: pinned({ submissionId: "someone-else", status: "committed" }),
+          label: "P6 to Available Alex in GW9",
+          details: earlier,
+        }),
+      );
+
+      await screen.findByTestId("commit-earlier");
+      expect(routerPush).not.toHaveBeenCalled();
+      expect(window.sessionStorage.getItem(noticeKey(api))).toBeNull();
+    });
   });
 
   it("shows a commit that finished while the Explorer was away once, without navigating", async () => {

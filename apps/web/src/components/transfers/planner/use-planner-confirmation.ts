@@ -43,6 +43,7 @@ export type ConfirmationNotice =
 
 type OwnSubmission = {
   submissionId: string;
+  gameweek: number;
   playerInId: number;
   summary: string;
   outgoingName: string;
@@ -239,7 +240,7 @@ export function usePlannerConfirmation(params: {
           incomingName: mine.incomingName,
         });
         onCommittedRef.current?.({
-          gameweek,
+          gameweek: mine.gameweek,
           playerInId: mine.playerInId,
           outgoingName: mine.outgoingName,
           incomingName: mine.incomingName,
@@ -260,7 +261,7 @@ export function usePlannerConfirmation(params: {
         setNotice({ kind: "earlier", text: describeEarlier(previous) });
       }
     },
-    [commit, loadPreview, gameweek],
+    [commit, loadPreview],
   );
 
   useEffect(() => {
@@ -310,8 +311,10 @@ export function usePlannerConfirmation(params: {
     const data = preview.data;
     const descriptor = data.commit;
     if (!descriptor) return;
-    const summary = `${data.outgoing.web_name} to ${data.candidate.web_name} in GW${gameweek}`;
+    const submittedGameweek = data.planning_context.gameweek;
+    const summary = `${data.outgoing.web_name} to ${data.candidate.web_name} in GW${submittedGameweek}`;
     const result = commit.submit(descriptor, summary, {
+      gameweek: submittedGameweek,
       playerInId: data.candidate.player_id,
       outgoingName: data.outgoing.web_name,
       incomingName: data.candidate.web_name,
@@ -319,6 +322,7 @@ export function usePlannerConfirmation(params: {
     if (result.type === "started") {
       own.current = {
         submissionId: result.submissionId,
+        gameweek: submittedGameweek,
         playerInId: data.candidate.player_id,
         summary,
         outgoingName: data.outgoing.web_name,
@@ -340,7 +344,7 @@ export function usePlannerConfirmation(params: {
                 ? "This plan is not ready for transfers yet."
                 : "This plan no longer exists.",
     });
-  }, [preview, commit, gameweek]);
+  }, [preview, commit]);
 
   const previewAgain = useCallback(() => {
     const target = selectedRef.current;

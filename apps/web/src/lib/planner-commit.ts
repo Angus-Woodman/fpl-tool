@@ -9,6 +9,7 @@ import {
 
 /** What a submission was for, remembered with its identity so a returned Explorer can tell it is its own. */
 export type SubmissionDetails = {
+  gameweek: number;
   playerInId: number;
   outgoingName: string;
   incomingName: string;
