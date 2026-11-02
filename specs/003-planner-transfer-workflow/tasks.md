@@ -160,9 +160,9 @@ description: "Dependency-ordered implementation tasks for the Planner-aware Tran
 
 **Depends on**: US1 (table and data). Independent of US2 and US3.
 
-- [ ] T067 [P] [US4] Component tests in `apps/web/tests/transfers/planner-candidate-table.test.tsx`: name search; filters by club, maximum price, "available to apply only", playing status; sorts by gain at 1, 3 and 5, price, resulting bank and fixture difficulty with stable `player_id` tie-break; visible and clearable active filters and sort; empty state; default order equals server order; fixtures over the horizon (opponent, home or away, difficulty) starting at the selected gameweek; no legality, money, gain or fixture recomputation (quickstart W3; FR-043 to FR-046).
-- [ ] T068 [US4] Implement search, filters, sorts and fixture display in `apps/web/src/components/transfers/planner/planner-candidate-table.tsx` as presentation over server results only; no saved filters, no comparison panels (FR-043 to FR-046).
-- [ ] T069 [US4] Playwright smoke in `apps/web/tests/e2e/planner-transfer-workflow.spec.ts`: search, filter and sort on a realistic pool at 1440 and 390 (SC-009).
+- [X] T067 [P] [US4] Component tests in `apps/web/tests/transfers/planner-candidate-table.test.tsx`: name search; filters by club, maximum price, "available to apply only", playing status; sorts by gain at 1, 3 and 5, price, resulting bank and fixture difficulty with stable `player_id` tie-break; visible and clearable active filters and sort; empty state; default order equals server order; fixtures over the horizon (opponent, home or away, difficulty) starting at the selected gameweek; no legality, money, gain or fixture recomputation (quickstart W3; FR-043 to FR-046).
+- [X] T068 [US4] Implement search, filters, sorts and fixture display in `apps/web/src/components/transfers/planner/planner-candidate-table.tsx` as presentation over server results only; no saved filters, no comparison panels (FR-043 to FR-046).
+- [X] T069 [US4] Playwright smoke in `apps/web/tests/e2e/planner-transfer-workflow.spec.ts`: search, filter and sort on a realistic pool at 1440 and 390 (SC-009).
 
 ---
 

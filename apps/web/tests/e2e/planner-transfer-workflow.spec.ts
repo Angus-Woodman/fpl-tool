@@ -2,11 +2,12 @@ import fs from "node:fs";
 
 import { expect, test, type Page } from "@playwright/test";
 
-import type { PlanResponse } from "../../src/lib/api";
+import type { PlanExplorerCandidate, PlanResponse } from "../../src/lib/api";
 import {
   buildFinancialBlockedCandidate,
   buildPlannerExplorerResponse,
   buildPlannerPreviewResponse,
+  buildRealisticCandidatePool,
   buildStructuralBlockedPreview,
   EXPLORER_RUN_ID,
 } from "../fixtures/planner-explorer";
@@ -193,6 +194,9 @@ type MockedServer = {
   incomingPriceTenths: number;
   latestRun: number;
   gameweek: number;
+  /** Replaces the default three candidates; fixtures are shifted to the selected gameweek. */
+  pool: PlanExplorerCandidate[] | null;
+  listRequests: URL[];
   /** When set, mutations wait for it before the server answers. */
   hold: Promise<void> | null;
   myTeamRequests: number;
@@ -244,6 +248,19 @@ function previewPayload(
   if (payload.valid_through_gameweek !== null) {
     payload.valid_through_gameweek = gameweek + 1;
   }
+  const pooled = server.pool?.find(
+    (candidate) => candidate.player_id === playerInId,
+  );
+  if (pooled && ![101, 103].includes(playerInId)) {
+    payload.candidate = {
+      player_id: pooled.player_id,
+      web_name: pooled.web_name,
+      team_short_name: pooled.team_short_name,
+      position: pooled.position,
+      status: pooled.status,
+      price_tenths: pooled.price_tenths,
+    };
+  }
   payload.candidate.price_tenths =
     playerInId === 101
       ? server.incomingPriceTenths
@@ -283,7 +300,7 @@ function applyTransfer(server: MockedServer) {
 async function installTransferApi(
   page: Page,
   planName: string,
-  options: { gameweek?: number } = {},
+  options: { gameweek?: number; pool?: PlanExplorerCandidate[] } = {},
 ) {
   const plan = buildPlannerPlan(GAMEWEEK, GAMEWEEK + 2);
   plan.name = planName;
@@ -293,6 +310,8 @@ async function installTransferApi(
     incomingPriceTenths: 62,
     latestRun: EXPLORER_RUN_ID,
     gameweek: options.gameweek ?? GAMEWEEK,
+    pool: options.pool ?? null,
+    listRequests: [],
     hold: null,
     myTeamRequests: 0,
     mutations: [],
@@ -403,7 +422,22 @@ async function installTransferApi(
       );
       payload.projection.newer_run_available =
         payload.projection.run_id !== server.latestRun;
-      payload.candidates.push(buildFinancialBlockedCandidate());
+      server.listRequests.push(url);
+      if (server.pool) {
+        const shift = server.gameweek - 9;
+        payload.candidates = structuredClone(server.pool).map((candidate) => {
+          candidate.fixtures.forEach((fixture) => (fixture.gameweek += shift));
+          if (candidate.conflict) {
+            candidate.conflict.gameweek += shift;
+            if (candidate.valid_through_gameweek !== null) {
+              candidate.valid_through_gameweek += shift;
+            }
+          }
+          return candidate;
+        });
+      } else {
+        payload.candidates.push(buildFinancialBlockedCandidate());
+      }
       return route.fulfill({ json: payload, headers: HEADERS });
     }
     return route.fulfill({
@@ -1221,6 +1255,284 @@ for (const viewport of [
       expect(await scrolls(page)).toEqual([
         { id: String(OUTGOING_ID), behavior: "auto" },
       ]);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// US4: comparing replacement options on a realistic pool (mocked API). The
+// pool's fixtures start at GW9 in the fixture and are shifted to GW12 here.
+// ---------------------------------------------------------------------------
+
+const POOL_SERVER_ORDER = [
+  207, 201, 202, 203, 204, 205, 206, 208, 209, 210, 211, 212,
+];
+const BY_PRICE = [211, 210, 208, 209, 205, 206, 203, 204, 202, 201, 212, 207];
+const BY_GAIN_3 = [207, 201, 202, 203, 204, 208, 205, 206, 209, 210, 211, 212];
+const BY_DIFFICULTY = [
+  207, 212, 204, 201, 202, 208, 209, 203, 205, 206, 210, 211,
+];
+
+const candidateIds = (page: Page) =>
+  page
+    .locator("tbody tr[data-player-id]")
+    .evaluateAll((rows) =>
+      rows.map((row) => Number(row.getAttribute("data-player-id"))),
+    );
+
+async function expectOrder(page: Page, expected: number[]) {
+  await expect.poll(() => candidateIds(page)).toEqual(expected);
+}
+
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test.describe(`US4 comparison controls at ${viewport.width}px`, () => {
+    test.beforeEach(async ({ page }) => {
+      await page.setViewportSize(viewport);
+    });
+
+    async function openPool(page: Page) {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      const server = await installTransferApi(page, "Comparison", {
+        gameweek: GAMEWEEK,
+        pool: buildRealisticCandidatePool(),
+      });
+      await openExplorer(page, server);
+      await expectOrder(page, POOL_SERVER_ORDER);
+      return { server, errors };
+    }
+
+    const search = (page: Page) =>
+      page.getByRole("searchbox", { name: "Search players" });
+    const club = (page: Page) => page.getByRole("combobox", { name: "Club" });
+    const maxPrice = (page: Page) =>
+      page.getByRole("textbox", { name: "Maximum price (£m)" });
+    const availableOnly = (page: Page) =>
+      page.getByRole("checkbox", { name: "Available to apply only" });
+    const status = (page: Page) =>
+      page.getByRole("combobox", { name: "Playing status" });
+    const sortBy = (page: Page) =>
+      page.getByRole("combobox", { name: "Sort by" });
+    const reset = (page: Page) =>
+      page.getByRole("button", { name: "Reset filters and sort" });
+
+    test("searching and filtering narrow the list, and Reset restores the server order", async ({
+      page,
+    }) => {
+      const { server, errors } = await openPool(page);
+
+      await search(page).fill("JAMIE");
+      await expectOrder(page, [201, 211]);
+      await expect(page.getByTestId("result-count")).toHaveText(
+        "Showing 2 of 12 candidates",
+      );
+      await search(page).fill("");
+      await expectOrder(page, POOL_SERVER_ORDER);
+
+      // Affordable candidates from one club.
+      await club(page).selectOption("CHE");
+      await maxPrice(page).fill("6.0");
+      await expectOrder(page, [209]);
+      const chips = page.getByRole("list", { name: "Active filters" });
+      await expect(chips).toContainText("Club: CHE");
+      await expect(chips).toContainText("Maximum price: £6.0m");
+      await maxPrice(page).fill("6.2");
+      await expectOrder(page, [202, 209]);
+      await page.getByRole("button", { name: "Remove Club: CHE" }).click();
+      await expectOrder(page, [202, 203, 204, 205, 206, 208, 209, 210, 211]);
+      await reset(page).click();
+      await expectOrder(page, POOL_SERVER_ORDER);
+      await expect(chips).toHaveCount(0);
+
+      // The server's availability, independent of playing status.
+      await availableOnly(page).check();
+      await expectOrder(page, [201, 202, 203, 204, 205, 208, 209, 210, 211]);
+      await status(page).selectOption("i");
+      await expectOrder(page, [205]);
+      await expect(page.locator('tr[data-player-id="205"]')).toHaveAttribute(
+        "data-state",
+        "available",
+      );
+      await expect(page.locator('tr[data-player-id="205"]')).toContainText(
+        "Injured",
+      );
+      await reset(page).click();
+
+      // Nothing matches.
+      await search(page).fill("zzz");
+      await expect(page.getByTestId("no-matches")).toContainText(
+        "No candidates match these filters.",
+      );
+      await page.getByRole("button", { name: "Clear filters" }).click();
+      await expectOrder(page, POOL_SERVER_ORDER);
+
+      expect(server.mutations).toHaveLength(0);
+      expect(server.listRequests).toHaveLength(1);
+      expect(server.previewRequests).toEqual([]);
+      expect(errors).toEqual([]);
+    });
+
+    test("sorting by price, three-gameweek gain and fixture difficulty is deterministic and reversible", async ({
+      page,
+    }) => {
+      const { server } = await openPool(page);
+
+      await sortBy(page).selectOption("price");
+      await expectOrder(page, BY_PRICE);
+      await expect(
+        page.getByRole("list", { name: "Active filters" }),
+      ).toContainText("Sorted by Price, lowest first");
+      await expect(
+        page.getByRole("columnheader", { name: "Price" }),
+      ).toHaveAttribute("aria-sort", "ascending");
+      await page.getByRole("button", { name: /^Sort direction: / }).click();
+      await expectOrder(
+        page,
+        [207, 212, 201, 202, 204, 203, 206, 205, 208, 209, 210, 211],
+      );
+
+      await sortBy(page).selectOption("gain-3");
+      await expectOrder(page, BY_GAIN_3);
+      await expect(
+        page.getByRole("list", { name: "Active filters" }),
+      ).toContainText("Sorted by Best-XI gain over 3 GWs, highest first");
+
+      await sortBy(page).selectOption("difficulty");
+      await expectOrder(page, BY_DIFFICULTY);
+      await expect(
+        page.getByText(/mean of the supplied difficulties over GW12-16/i),
+      ).toBeVisible();
+
+      // Sorting a filtered list sorts only that list.
+      await club(page).selectOption("TOT");
+      await expectOrder(page, [212, 205]);
+
+      await page
+        .getByRole("button", {
+          name: "Remove Sorted by Fixture difficulty, easiest first",
+        })
+        .click();
+      await expectOrder(page, [205, 212]);
+      await reset(page).click();
+      await expectOrder(page, POOL_SERVER_ORDER);
+      await expect(sortBy(page)).toHaveValue("default");
+
+      // Local controls never ask the server for anything or change a plan.
+      expect(server.listRequests).toHaveLength(1);
+      expect(server.previewRequests).toEqual([]);
+      expect(server.mutations).toHaveLength(0);
+    });
+
+    test("fixtures show opponent, venue and difficulty over the selected horizon, including blanks, doubles and missing data", async ({
+      page,
+    }) => {
+      await openPool(page);
+      const fixtures = (id: number) =>
+        page.locator(`tr[data-player-id="${id}"]`).getByTestId("fixtures");
+
+      await expect(
+        page.getByRole("columnheader", { name: "Fixtures GW12-16" }),
+      ).toBeVisible();
+      await expect(fixtures(201).locator("li")).toHaveText([
+        "GW12 BOU (H) Diff 2",
+        "GW13 CHE (A) Diff 4",
+        "GW14 EVE (H) Diff 2",
+        "GW15 TOT (A) Diff 4",
+        "GW16 WHU (H) Diff 2",
+      ]);
+      // A double gameweek keeps both fixtures; a blank is a known blank.
+      const double = fixtures(204).locator('li[data-gameweek="14"]');
+      await expect(double).toHaveAttribute("data-double", "true");
+      await expect(double.getByTestId("fixture")).toHaveText([
+        "FUL (H) Diff 2",
+        "TOT (A) Diff 3",
+      ]);
+      await expect(fixtures(203).locator('li[data-gameweek="13"]')).toHaveText(
+        "GW13 Blank gameweek",
+      );
+      // Missing schedule data and a missing difficulty are never invented.
+      await expect(fixtures(205).locator('li[data-gameweek="15"]')).toHaveText(
+        "GW15 No fixture data",
+      );
+      await expect(fixtures(211).locator("li")).toHaveText([
+        "GW12 No fixture data",
+        "GW13 No fixture data",
+        "GW14 No fixture data",
+        "GW15 No fixture data",
+        "GW16 No fixture data",
+      ]);
+      await expect(fixtures(206).locator('li[data-gameweek="13"]')).toHaveText(
+        "GW13 CHE (H) Diff n/a",
+      );
+
+      // A shorter horizon is a new server request and shows only its gameweeks.
+      await page.getByRole("button", { name: "3 GWs", exact: true }).click();
+      await expect(
+        page.getByRole("columnheader", { name: "Fixtures GW12-14" }),
+      ).toBeVisible();
+      await expect(fixtures(201).locator("li")).toHaveCount(3);
+    });
+
+    test("a candidate can be previewed after sorting and filtering, and a new horizon returns to the server ranking", async ({
+      page,
+    }) => {
+      const { server } = await openPool(page);
+
+      await sortBy(page).selectOption("price");
+      await club(page).selectOption("CHE");
+      await expectOrder(page, [209, 202]);
+      await page.getByRole("button", { name: "Preview Kofi Mensah" }).click();
+
+      const panel = page.getByRole("region", { name: "Transfer preview" });
+      await expect(panel).toContainText("Kofi Mensah");
+      expect(server.previewRequests).toEqual([209]);
+      // Previewing does not disturb the controls.
+      await expectOrder(page, [209, 202]);
+      await panel.getByRole("button", { name: "Close preview" }).click();
+
+      await page.getByRole("button", { name: "3 GWs", exact: true }).click();
+      await expect.poll(() => server.listRequests.length).toBe(2);
+      expect(server.listRequests[1].searchParams.get("primary_horizon")).toBe(
+        "3",
+      );
+      await expect(sortBy(page)).toHaveValue("default");
+      expect(server.mutations).toHaveLength(0);
+    });
+
+    test("controls are keyboard operable, focus is visible, and the page neither overflows nor has undersized targets", async ({
+      page,
+    }) => {
+      await openPool(page);
+      await search(page).fill("o");
+      await maxPrice(page).fill("6.5");
+      await sortBy(page).selectOption("difficulty");
+
+      await sortBy(page).focus();
+      await page.keyboard.press("Tab");
+      const direction = page.getByRole("button", { name: /^Sort direction: / });
+      await expect(direction).toBeFocused();
+      expect(
+        await direction.evaluate(
+          (element) => getComputedStyle(element).outlineStyle,
+        ),
+      ).not.toBe("none");
+      await page.keyboard.press("Enter");
+      await expect(direction).toHaveAccessibleName(/hardest first/);
+
+      await maxPrice(page).fill("6.55");
+      await expect(maxPrice(page)).toHaveAttribute("aria-invalid", "true");
+      await expect(page.getByText(/Enter a price in £m/)).toBeVisible();
+      await maxPrice(page).fill("6.5");
+
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth - window.innerWidth,
+        ),
+      ).toBeLessThanOrEqual(0);
+      expect(await smallTargets(page)).toEqual([]);
     });
   });
 }

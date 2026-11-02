@@ -1,5 +1,6 @@
 import type {
   PlanExplorerCandidate,
+  PlanExplorerFixture,
   PlanExplorerHorizonInfo,
   PlanExplorerImpact,
   PlanCommitDescriptor,
@@ -552,4 +553,254 @@ export function buildEditCommitDescriptor(
       incoming_player_id: playerInId,
     },
   });
+}
+
+type FixtureSpec = [
+  gameweek: number,
+  opponent: string | null,
+  home: boolean | null,
+  difficulty: number | null,
+];
+
+const fixtureOf = ([
+  gameweek,
+  opponent,
+  home,
+  difficulty,
+]: FixtureSpec): PlanExplorerFixture => ({
+  gameweek,
+  opponent_short_name: opponent,
+  is_home: home,
+  difficulty,
+});
+
+const NO_IMPACT = buildImpact({
+  saved_plan: null,
+  assumed_continuation: null,
+  net_saved_plan: null,
+});
+
+/**
+ * Twelve MID candidates in the server's order (best-XI gain over five gameweeks, ties by
+ * player id), for an outgoing player sold at 5.2m with a 1.5m bank (so a 6.7m ceiling).
+ * Built to exercise ties, nulls, a blank and a double gameweek, a gameweek without
+ * fixture data, a missing difficulty, an empty schedule and advisory playing statuses.
+ */
+export function buildRealisticCandidatePool(): PlanExplorerCandidate[] {
+  const spec = (
+    id: number,
+    name: string,
+    team: string,
+    price: number,
+    status: string,
+    gains: [number, number, number],
+    fixtures: FixtureSpec[],
+    overrides: Partial<PlanExplorerCandidate> = {},
+  ): PlanExplorerCandidate =>
+    buildExplorerCandidate({
+      player_id: id,
+      web_name: name,
+      team_short_name: team,
+      price_tenths: price,
+      status,
+      resulting_bank_tenths: 67 - price,
+      best_xi_gain_by_horizon: { "1": gains[0], "3": gains[1], "5": gains[2] },
+      fixtures: fixtures.map(fixtureOf),
+      ...overrides,
+    });
+  const unavailable = {
+    state: "unavailable" as const,
+    reasons: ["financial_shortfall"],
+    resulting_bank_tenths: null,
+    points_hit_after: null,
+    plan_impact_by_horizon: { "1": NO_IMPACT, "3": NO_IMPACT, "5": NO_IMPACT },
+  };
+  return [
+    spec(
+      207,
+      "Marco Vidal",
+      "MCI",
+      125,
+      "a",
+      [7.5, 14.0, 22.0],
+      [
+        [9, "EVE", true, 2],
+        [10, "BOU", false, 2],
+        [11, "LIV", true, 4],
+        [12, "FUL", false, 2],
+        [13, "WHU", true, 2],
+      ],
+      unavailable,
+    ),
+    spec(
+      201,
+      "Jamie Okafor",
+      "LIV",
+      66,
+      "a",
+      [6.1, 12.0, 20.5],
+      [
+        [9, "BOU", true, 2],
+        [10, "CHE", false, 4],
+        [11, "EVE", true, 2],
+        [12, "TOT", false, 4],
+        [13, "WHU", true, 2],
+      ],
+    ),
+    spec(
+      202,
+      "Luca Brandt",
+      "CHE",
+      62,
+      "a",
+      [5.0, 10.5, 18.0],
+      [
+        [9, "LIV", true, 4],
+        [10, "BOU", false, 2],
+        [11, "FUL", true, 2],
+        [12, "TOT", false, 3],
+        [13, "NEW", true, 3],
+      ],
+    ),
+    // A blank gameweek 10.
+    spec(
+      203,
+      "Sam Whitaker",
+      "BRE",
+      58,
+      "a",
+      [4.2, 9.0, 15.5],
+      [
+        [9, "MCI", false, 4],
+        [10, null, null, null],
+        [11, "WHU", true, 2],
+        [12, "MCI", false, 5],
+        [13, "EVE", true, 2],
+      ],
+    ),
+    // A double gameweek 11; doubtful.
+    spec(
+      204,
+      "Tomas Nilsson",
+      "NEW",
+      60,
+      "d",
+      [4.0, 9.0, 15.5],
+      [
+        [9, "EVE", false, 2],
+        [10, "BRE", true, 3],
+        [11, "FUL", true, 2],
+        [11, "TOT", false, 3],
+        [12, "BOU", true, 2],
+        [13, "CHE", false, 4],
+      ],
+    ),
+    // Injured, but still selectable; no fixture data for gameweek 12.
+    spec(
+      205,
+      "Rory Lindqvist",
+      "TOT",
+      55,
+      "i",
+      [4.5, 7.0, 12.0],
+      [
+        [9, "MCI", true, 5],
+        [10, "NEW", false, 3],
+        [11, "LIV", true, 4],
+        [13, "FUL", false, 2],
+      ],
+    ),
+    // Blocked by a later planned transfer; one fixture without a difficulty.
+    spec(
+      206,
+      "Ben Ashworth",
+      "WHU",
+      57,
+      "a",
+      [3.0, 6.5, 11.0],
+      [
+        [9, "LIV", false, 5],
+        [10, "CHE", true, null],
+        [11, "BOU", false, 2],
+        [12, "CHE", true, 4],
+        [13, "EVE", false, 3],
+      ],
+      {
+        state: "blocked_by_later_decision",
+        valid_through_gameweek: 10,
+        conflict: {
+          kind: "structural",
+          gameweek: 11,
+          decision_id: plannerIdentity(9011),
+          code: "sold_this_gameweek",
+          message: "Ben is sold by a planned transfer in GW11.",
+          shortfall_tenths: null,
+        },
+      },
+    ),
+    spec(
+      208,
+      "Diego Ferraz",
+      "BOU",
+      52,
+      "a",
+      [2.5, 9.0, 10.5],
+      [
+        [9, "LIV", false, 4],
+        [10, "CHE", true, 3],
+        [11, "NEW", false, 3],
+        [12, "EVE", true, 2],
+        [13, "FUL", false, 3],
+      ],
+    ),
+    spec(
+      209,
+      "Kofi Mensah",
+      "CHE",
+      52,
+      "a",
+      [2.2, 5.5, 9.9],
+      [
+        [9, "TOT", true, 3],
+        [10, "LIV", true, 4],
+        [11, "WHU", false, 2],
+        [12, "BRE", true, 2],
+        [13, "MCI", true, 4],
+      ],
+    ),
+    // Suspended; the server supplied no difficulty values at all.
+    spec(
+      210,
+      "Alex Okonkwo",
+      "LIV",
+      45,
+      "s",
+      [0.9, 2.0, 3.0],
+      [
+        [9, "BOU", true, null],
+        [10, "CHE", false, null],
+        [11, "EVE", true, null],
+        [12, "TOT", false, null],
+        [13, "WHU", true, null],
+      ],
+    ),
+    // Status "u"; no fixtures returned at all.
+    spec(211, "Jamie Ward", "NEW", 40, "u", [0.5, 1.2, 2.0], []),
+    spec(
+      212,
+      "Pedro Alves",
+      "TOT",
+      70,
+      "a",
+      [0.2, -0.4, -1.0],
+      [
+        [9, "EVE", true, 2],
+        [10, "BRE", false, 2],
+        [11, "BOU", true, 2],
+        [12, "MCI", false, 5],
+        [13, "FUL", true, 2],
+      ],
+      unavailable,
+    ),
+  ];
 }
