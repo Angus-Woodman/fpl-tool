@@ -17,6 +17,8 @@ import {
   type MockInstance,
 } from "vitest";
 
+import { StrictMode } from "react";
+
 import { PlannerTransferExplorer } from "@/components/transfers/planner/planner-transfer-explorer";
 import type {
   PlanMutationEnvelope,
@@ -213,6 +215,7 @@ type ExplorerOptions = {
   commit?: PlannerCommitFactory;
   horizon?: 1 | 3 | 5;
   runId?: number | null;
+  strict?: boolean;
 };
 
 function renderExplorer(api: Api, options: ExplorerOptions = {}) {
@@ -226,10 +229,12 @@ function renderExplorer(api: Api, options: ExplorerOptions = {}) {
       commit={options.commit}
     />
   );
-  const view = render(element(options));
+  const wrap = (node: JSX.Element) =>
+    options.strict ? <StrictMode>{node}</StrictMode> : node;
+  const view = render(wrap(element(options)));
   return {
     ...view,
-    rerenderWith: (next: ExplorerOptions) => view.rerender(element(next)),
+    rerenderWith: (next: ExplorerOptions) => view.rerender(wrap(element(next))),
   };
 }
 
@@ -262,6 +267,7 @@ function createFakeCommit(api: Api, initial: Partial<PlannerCommitView> = {}) {
     idle: true,
     pinned: null,
     label: null,
+    details: null,
     ...initial,
   };
   const listeners = new Set<() => void>();
@@ -293,6 +299,11 @@ function createFakeCommit(api: Api, initial: Partial<PlannerCommitView> = {}) {
       };
     }),
     synchronize: vi.fn(),
+    hasUnsavedWork: () =>
+      view.pinned !== null &&
+      ["sending", "unknown", "pending_unsaved", "conflict"].includes(
+        view.pinned.status,
+      ),
   };
   const factory: PlannerCommitFactory = () => fake;
   return { fake, factory, set };
@@ -783,7 +794,10 @@ describe("Planner transfer confirmation through the commit adapter", () => {
     expect(
       within(success).getByRole("link", { name: /back to plan/i }),
     ).toHaveAttribute("href", `/plans/${api.plan.plan_id}?gw=9`);
-    expect(routerPush).not.toHaveBeenCalled();
+    expect(routerPush).toHaveBeenCalledTimes(1);
+    expect(routerPush).toHaveBeenCalledWith(
+      `/plans/${api.plan.plan_id}?gw=9&highlight=101`,
+    );
   });
 
   it("does not report success for a committed submission it did not start", async () => {
@@ -1072,7 +1086,10 @@ describe("Planner transfer confirmation through the real coordinator", () => {
     const snapshot = getPlanSaveCoordinator(api.plan).getSnapshot();
     expect(snapshot.pinned).toBeNull();
     expect(snapshot.acknowledged.revision).toBe(REVISION + 1);
-    expect(routerPush).not.toHaveBeenCalled();
+    expect(routerPush).toHaveBeenCalledTimes(1);
+    expect(routerPush).toHaveBeenCalledWith(
+      `/plans/${api.plan.plan_id}?gw=9&highlight=101`,
+    );
   });
 
   it("sends once when Confirm is clicked twice", async () => {
@@ -1683,5 +1700,386 @@ describe("Planner unresolved submissions stay with their own transfer", () => {
       screen.getByRole("heading", { name: /for Blocked Ben/ }),
     ).toBeInTheDocument();
     expect(api.previewCalls).toEqual([101, 103]);
+  });
+});
+
+describe("Planner Explorer navigation and departure protection", () => {
+  const WARNING =
+    "Your latest Planner edit is not saved yet. Leave this page anyway?";
+  const noticeKey = (api: Api) => `plannerTransferNotice:${api.plan.plan_id}`;
+  const documentListeners: [string, EventListener][] = [];
+  const onDocument = (type: string, listener: EventListener) => {
+    document.addEventListener(type, listener);
+    documentListeners.push([type, listener]);
+  };
+
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/transfers");
+  });
+
+  afterEach(() => {
+    window.sessionStorage.clear();
+    for (const [type, listener] of documentListeners.splice(0)) {
+      document.removeEventListener(type, listener);
+    }
+  });
+
+  async function confirmOwn(api: Api, options: ExplorerOptions = {}) {
+    const view = renderExplorer(api, options);
+    const panel = await openPreview();
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    );
+    await waitFor(() => expect(api.mutations).toHaveLength(1));
+    return view;
+  }
+
+  it("navigates to the plan with the incoming player only after its own commit is acknowledged", async () => {
+    const api = installApi();
+    await confirmOwn(api);
+    expect(routerPush).not.toHaveBeenCalled();
+    const { envelope, gate } = api.mutations[0];
+
+    await act(async () => {
+      gate.resolve(json(200, committedBody(api, envelope, REVISION + 1)));
+    });
+
+    await waitFor(() => expect(routerPush).toHaveBeenCalledTimes(1));
+    expect(routerPush).toHaveBeenCalledWith(
+      `/plans/${api.plan.plan_id}?gw=9&highlight=101`,
+    );
+    expect(getPlanSaveCoordinator(api.plan).getSnapshot().pinned).toBeNull();
+    expect(
+      JSON.parse(window.sessionStorage.getItem(noticeKey(api)) ?? "null"),
+    ).toEqual({
+      message: "Transferred P6 for Available Alex in GW9",
+      gameweek: 9,
+      incomingPlayerId: 101,
+    });
+    expect(screen.getByTestId("commit-success")).toHaveTextContent(
+      /P6.*Available Alex.*GW9/,
+    );
+  });
+
+  it("navigates exactly once under React Strict Mode and across rerenders", async () => {
+    const api = installApi();
+    const view = await confirmOwn(api, { strict: true });
+    const { envelope, gate } = api.mutations[0];
+
+    await act(async () => {
+      gate.resolve(json(200, committedBody(api, envelope, REVISION + 1)));
+    });
+    await waitFor(() => expect(routerPush).toHaveBeenCalledTimes(1));
+    view.rerenderWith({ horizon: 3, runId: EXPLORER_RUN_ID, strict: true });
+    view.rerenderWith({ horizon: 1, runId: EXPLORER_RUN_ID, strict: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(routerPush).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not navigate because an unrelated revision arrived while sending", async () => {
+    const api = installApi();
+    await confirmOwn(api);
+
+    act(() => {
+      getPlanSaveCoordinator(api.plan).synchronize({
+        ...api.plan,
+        revision: REVISION + 1,
+      });
+    });
+
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(getPlanSaveCoordinator(api.plan).getSnapshot().pinned?.status).toBe(
+      "sending",
+    );
+    expect(window.sessionStorage.getItem(noticeKey(api))).toBeNull();
+  });
+
+  it("does not navigate when another submission's record is acknowledged as committed", async () => {
+    const api = installApi();
+    const { factory, set } = createFakeCommit(api);
+    renderExplorer(api, { commit: factory });
+    const panel = await openPreview();
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Confirm transfer" }),
+    );
+    act(() =>
+      set({
+        pinned: pinned({ submissionId: "someone-else", status: "committed" }),
+      }),
+    );
+
+    await screen.findByTestId("commit-earlier");
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem(noticeKey(api))).toBeNull();
+  });
+
+  it.each([
+    "unknown",
+    "pending_unsaved",
+    "conflict",
+    "rejected",
+    "plan_missing",
+  ] as const)(
+    "never navigates automatically for an own submission that is %s",
+    async (status) => {
+      const api = installApi();
+      const { factory, set } = createFakeCommit(api);
+      renderExplorer(api, { commit: factory });
+      const panel = await openPreview();
+      fireEvent.click(
+        within(panel).getByRole("button", { name: "Confirm transfer" }),
+      );
+
+      act(() =>
+        set({
+          pinned: pinned({ submissionId: "own-1", status, message: "no" }),
+          idle: status === "rejected" || status === "plan_missing",
+        }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(routerPush).not.toHaveBeenCalled();
+      expect(routerReplace).not.toHaveBeenCalledWith(
+        expect.stringContaining("/plans/"),
+      );
+      expect(window.sessionStorage.getItem(noticeKey(api))).toBeNull();
+    },
+  );
+
+  it.each(["committed", "rejected", "plan_missing"] as const)(
+    "shows a %s record found on mount once, clears it and neither navigates nor submits",
+    async (status) => {
+      const api = installApi();
+      const { fake, factory } = createFakeCommit(api, {
+        pinned: pinned({ submissionId: "old", status, message: "Earlier" }),
+      });
+      renderExplorer(api, { commit: factory });
+
+      await screen.findByTestId("commit-earlier");
+      await waitFor(() => expect(fake.abandon).toHaveBeenCalledTimes(1));
+
+      expect(routerPush).not.toHaveBeenCalled();
+      expect(fake.submit).not.toHaveBeenCalled();
+      expect(window.sessionStorage.getItem(noticeKey(api))).toBeNull();
+    },
+  );
+
+  it("keeps an unresolved submission, with its identity, when the Explorer unmounts and returns", async () => {
+    const api = installApi();
+    const first = await confirmOwn(api);
+    const original = api.mutations[0].envelope.mutation_id;
+    await act(async () => {
+      api.mutations[0].gate.reject(new TypeError("Failed to fetch"));
+    });
+    await screen.findByTestId("commit-unknown");
+
+    first.unmount();
+
+    const coordinator = getPlanSaveCoordinator(api.plan);
+    expect(coordinator.getSnapshot().pinned?.status).toBe("unknown");
+    expect(coordinator.hasUnsavedWork()).toBe(true);
+    renderExplorer(api);
+    const region = await screen.findByRole("region", {
+      name: "Unresolved transfer confirmation",
+    });
+    fireEvent.click(
+      within(region).getByRole("button", { name: "Check save status" }),
+    );
+    await waitFor(() => expect(api.receipts).toEqual([original]));
+    fireEvent.click(
+      within(
+        screen.getByRole("region", {
+          name: "Unresolved transfer confirmation",
+        }),
+      ).getByRole("button", { name: "Retry same transfer" }),
+    );
+    await waitFor(() => expect(api.mutations).toHaveLength(2));
+    expect(api.mutations[1].envelope.mutation_id).toBe(original);
+  });
+
+  it("navigates when a returned Explorer's retry of its own earlier submission commits", async () => {
+    const api = installApi();
+    const first = await confirmOwn(api);
+    const original = api.mutations[0].envelope.mutation_id;
+    await act(async () => {
+      api.mutations[0].gate.reject(new TypeError("Failed to fetch"));
+    });
+    await screen.findByTestId("commit-unknown");
+    first.unmount();
+
+    renderExplorer(api);
+    const region = await screen.findByRole("region", {
+      name: "Unresolved transfer confirmation",
+    });
+    fireEvent.click(
+      within(region).getByRole("button", { name: "Retry same transfer" }),
+    );
+    await waitFor(() => expect(api.mutations).toHaveLength(2));
+    expect(api.mutations[1].envelope.mutation_id).toBe(original);
+    await act(async () => {
+      api.mutations[1].gate.resolve(
+        json(200, committedBody(api, api.mutations[1].envelope, REVISION + 1)),
+      );
+    });
+
+    await waitFor(() => expect(routerPush).toHaveBeenCalledTimes(1));
+    expect(routerPush).toHaveBeenCalledWith(
+      `/plans/${api.plan.plan_id}?gw=9&highlight=101`,
+    );
+    expect(
+      JSON.parse(window.sessionStorage.getItem(noticeKey(api)) ?? "null"),
+    ).toMatchObject({ message: "Transferred P6 for Available Alex in GW9" });
+  });
+
+  it("shows a commit that finished while the Explorer was away once, without navigating", async () => {
+    const api = installApi();
+    const first = await confirmOwn(api);
+    first.unmount();
+    await act(async () => {
+      api.mutations[0].gate.resolve(
+        json(200, committedBody(api, api.mutations[0].envelope, REVISION + 1)),
+      );
+    });
+    expect(getPlanSaveCoordinator(api.plan).getSnapshot().pinned?.status).toBe(
+      "committed",
+    );
+
+    renderExplorer(api);
+
+    expect(await screen.findByTestId("commit-earlier")).toHaveTextContent(
+      /earlier.*added to your plan/i,
+    );
+    await waitFor(() =>
+      expect(getPlanSaveCoordinator(api.plan).getSnapshot().pinned).toBeNull(),
+    );
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem(noticeKey(api))).toBeNull();
+  });
+
+  describe("departure while a submission is unresolved", () => {
+    function backToPlan() {
+      return within(
+        screen.getByRole("region", { name: "Planner context" }),
+      ).getByRole("link", { name: "Back to plan" });
+    }
+
+    async function unresolved(status: "sending" | "unknown") {
+      const api = installApi();
+      await confirmOwn(api);
+      if (status === "unknown") {
+        await act(async () => {
+          api.mutations[0].gate.reject(new TypeError("Failed to fetch"));
+        });
+        await screen.findByTestId("commit-unknown");
+      }
+      return api;
+    }
+
+    it.each(["sending", "unknown"] as const)(
+      "offers the same warning as the Planner while %s and keeps the submission when declined",
+      async (status) => {
+        const api = await unresolved(status);
+        const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+        const stop = vi.fn();
+        onDocument("click", (event) => {
+          stop(event.defaultPrevented);
+          event.preventDefault();
+        });
+
+        fireEvent.click(backToPlan());
+
+        expect(confirm).toHaveBeenCalledWith(WARNING);
+        expect(stop).not.toHaveBeenCalled();
+        const unload = new Event("beforeunload", { cancelable: true });
+        window.dispatchEvent(unload);
+        expect(unload.defaultPrevented).toBe(true);
+        expect(
+          getPlanSaveCoordinator(api.plan).getSnapshot().pinned?.status,
+        ).toBe(status);
+      },
+    );
+
+    it("lets an accepted departure through and leaves the submission in the shared coordinator", async () => {
+      const api = await unresolved("unknown");
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      const reached: boolean[] = [];
+      onDocument("click", (event) => {
+        reached.push(event.defaultPrevented);
+        event.preventDefault();
+      });
+
+      fireEvent.click(backToPlan());
+
+      expect(reached).toEqual([false]);
+      expect(
+        getPlanSaveCoordinator(api.plan).getSnapshot().pinned?.status,
+      ).toBe("unknown");
+    });
+
+    it("prompts on browser Back and stays on the Explorer when declined", async () => {
+      const api = await unresolved("unknown");
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const go = vi.spyOn(window.history, "go").mockImplementation(() => {});
+      const back = vi
+        .spyOn(window.history, "back")
+        .mockImplementation(() => {});
+
+      act(() => {
+        window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+      });
+
+      expect(confirm).toHaveBeenCalledWith(WARNING);
+      expect(go).toHaveBeenCalledWith(1);
+      expect(back).not.toHaveBeenCalled();
+      expect(screen.getByTestId("commit-unknown")).toBeInTheDocument();
+      expect(
+        getPlanSaveCoordinator(api.plan).getSnapshot().pinned?.status,
+      ).toBe("unknown");
+    });
+
+    it("does not warn once the submission is committed or rejected", async () => {
+      const api = installApi();
+      await confirmOwn(api);
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      await act(async () => {
+        api.mutations[0].gate.resolve(
+          json(422, {
+            detail: {
+              code: "prices_changed",
+              message: "Prices",
+              diagnostics: [],
+            },
+          }),
+        );
+      });
+      await screen.findByTestId("commit-rejection");
+      onDocument("click", (event) => event.preventDefault());
+
+      fireEvent.click(backToPlan());
+      const unload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(unload);
+
+      expect(confirm).not.toHaveBeenCalled();
+      expect(unload.defaultPrevented).toBe(false);
+    });
+
+    it("stops guarding after the Explorer unmounts but the coordinator still reports the work", async () => {
+      const api = await unresolved("unknown");
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      cleanup();
+
+      const unload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(unload);
+
+      expect(unload.defaultPrevented).toBe(false);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(getPlanSaveCoordinator(api.plan).hasUnsavedWork()).toBe(true);
+    });
   });
 });

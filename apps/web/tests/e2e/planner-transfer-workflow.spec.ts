@@ -10,7 +10,7 @@ import {
   buildStructuralBlockedPreview,
   EXPLORER_RUN_ID,
 } from "../fixtures/planner-explorer";
-import { buildPlannerPlan } from "../fixtures/planner";
+import { buildPlannerPlan, plannerIdentity } from "../fixtures/planner";
 
 test.use({ baseURL: process.env.PLANNER_BASE_URL ?? "http://127.0.0.1:3000" });
 
@@ -23,20 +23,24 @@ const HEADERS = {
 const GAMEWEEK = 12;
 const OUTGOING_ID = 6;
 
-function explorerPayload(planId: number, planName: string) {
+function explorerPayload(
+  planId: number,
+  planName: string,
+  gameweek = GAMEWEEK,
+) {
   const shift = (gameweeks: number[]) =>
-    gameweeks.map((gameweek) => gameweek + (GAMEWEEK - 9));
+    gameweeks.map((week) => week + (gameweek - 9));
   const payload = buildPlannerExplorerResponse();
   payload.planning_context = {
     plan_id: planId,
-    gameweek: GAMEWEEK,
+    gameweek,
     revision: 0,
   };
   payload.plan = {
     ...payload.plan,
     plan_id: planId,
     name: planName,
-    gameweek: GAMEWEEK,
+    gameweek,
     start_gameweek: GAMEWEEK,
     end_gameweek: GAMEWEEK + 2,
   };
@@ -51,8 +55,8 @@ function explorerPayload(planId: number, planName: string) {
     (candidate) => candidate.state === "blocked_by_later_decision",
   );
   if (blocked?.conflict) {
-    blocked.conflict.gameweek = GAMEWEEK + 2;
-    blocked.valid_through_gameweek = GAMEWEEK + 1;
+    blocked.conflict.gameweek = gameweek + 2;
+    blocked.valid_through_gameweek = gameweek + 1;
   }
   return payload;
 }
@@ -188,6 +192,10 @@ type MockedServer = {
   revision: number;
   incomingPriceTenths: number;
   latestRun: number;
+  gameweek: number;
+  /** When set, mutations wait for it before the server answers. */
+  hold: Promise<void> | null;
+  myTeamRequests: number;
   mutations: {
     mutation_id: string;
     expected_revision: number;
@@ -212,35 +220,36 @@ function previewPayload(
     playerInId === 103
       ? buildStructuralBlockedPreview()
       : buildPlannerPreviewResponse();
-  const shift = GAMEWEEK - 9;
+  const gameweek = server.gameweek;
+  const shift = gameweek - 9;
   const payload = structuredClone(base);
   payload.projection.run_id = runId;
   payload.planning_context = {
     plan_id: server.plan.plan_id,
-    gameweek: GAMEWEEK,
+    gameweek,
     revision: server.revision,
   };
   payload.plan = {
     ...payload.plan,
     plan_id: server.plan.plan_id,
     name: server.plan.name,
-    gameweek: GAMEWEEK,
+    gameweek,
     revision: server.revision,
   };
   payload.gameweeks = payload.gameweeks.map((week) => ({
     ...week,
     gameweek: week.gameweek + shift,
   }));
-  if (payload.conflict) payload.conflict.gameweek = GAMEWEEK + 2;
+  if (payload.conflict) payload.conflict.gameweek = gameweek + 2;
   if (payload.valid_through_gameweek !== null) {
-    payload.valid_through_gameweek = GAMEWEEK + 1;
+    payload.valid_through_gameweek = gameweek + 1;
   }
   payload.candidate.price_tenths =
     playerInId === 101
       ? server.incomingPriceTenths
       : payload.candidate.price_tenths;
   if (payload.commit && payload.commit.intent.kind === "add_transfer") {
-    payload.commit.intent.gameweek_number = GAMEWEEK;
+    payload.commit.intent.gameweek_number = gameweek;
     payload.commit.expected_revision = server.revision;
     payload.commit.guard.expected_incoming_price_tenths =
       server.incomingPriceTenths;
@@ -248,7 +257,34 @@ function previewPayload(
   return payload;
 }
 
-async function installTransferApi(page: Page, planName: string) {
+function applyTransfer(server: MockedServer) {
+  for (const week of server.plan.gameweeks) {
+    if (week.gameweek_number < server.gameweek) continue;
+    week.players = week.players.map((player) =>
+      player.player_id === OUTGOING_ID
+        ? {
+            ...player,
+            player_id: 101,
+            web_name: "Available Alex",
+            team_short_name: "LIV",
+            ownership_id: plannerIdentity(2101),
+            purchase_price_tenths: 62,
+          }
+        : player,
+    );
+    if (week.total_points !== null) week.total_points += 2.5;
+    if (week.gameweek_number === server.gameweek) {
+      week.transfers_out = [{ player_id: OUTGOING_ID, web_name: "P6" }];
+      week.transfers_in = [{ player_id: 101, web_name: "Available Alex" }];
+    }
+  }
+}
+
+async function installTransferApi(
+  page: Page,
+  planName: string,
+  options: { gameweek?: number } = {},
+) {
   const plan = buildPlannerPlan(GAMEWEEK, GAMEWEEK + 2);
   plan.name = planName;
   const server: MockedServer = {
@@ -256,6 +292,9 @@ async function installTransferApi(page: Page, planName: string) {
     revision: 0,
     incomingPriceTenths: 62,
     latestRun: EXPLORER_RUN_ID,
+    gameweek: options.gameweek ?? GAMEWEEK,
+    hold: null,
+    myTeamRequests: 0,
     mutations: [],
     receipts: [],
     previewRequests: [],
@@ -263,17 +302,20 @@ async function installTransferApi(page: Page, planName: string) {
     committed: [],
   };
   const planAt = () => ({ ...server.plan, revision: server.revision });
-  await page.route("http://127.0.0.1:8000/**", async (route) => {
+  // On the context so a second tab shares the same server.
+  await page.context().route("http://127.0.0.1:8000/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() === "OPTIONS") {
       return route.fulfill({ status: 204, headers: HEADERS });
     }
+    if (url.pathname.startsWith("/my-team")) server.myTeamRequests += 1;
     const base = `/plans/${plan.plan_id}`;
     if (request.method() === "POST" && url.pathname === `${base}/mutations`) {
       const envelope = request.postDataJSON();
       const index = server.mutations.length;
       server.mutations.push(envelope);
+      if (server.hold) await server.hold;
       const outcome = server.onMutation(index);
       if (outcome === "network") return route.abort("failed");
       if (outcome === "price_changed") {
@@ -318,6 +360,7 @@ async function installTransferApi(page: Page, planName: string) {
       }
       server.revision = envelope.expected_revision + 1;
       server.committed.push(index);
+      applyTransfer(server);
       return route.fulfill({
         json: {
           status: "committed",
@@ -353,7 +396,7 @@ async function installTransferApi(page: Page, planName: string) {
       });
     }
     if (url.pathname.includes("/transfers/")) {
-      const payload = explorerPayload(plan.plan_id, plan.name);
+      const payload = explorerPayload(plan.plan_id, plan.name, server.gameweek);
       payload.planning_context.revision = server.revision;
       payload.projection.run_id = Number(
         url.searchParams.get("projection_run_id") ?? server.latestRun,
@@ -374,11 +417,52 @@ async function installTransferApi(page: Page, planName: string) {
 
 async function openExplorer(page: Page, server: MockedServer) {
   await page.goto(
-    `/transfers?plan=${server.plan.plan_id}&gw=${GAMEWEEK}&out=${OUTGOING_ID}`,
+    `/transfers?plan=${server.plan.plan_id}&gw=${server.gameweek}&out=${OUTGOING_ID}`,
   );
   await expect(
     page.getByRole("table", { name: "Replacement candidates" }),
   ).toBeVisible();
+}
+
+// The pinned notice stays in view beside the highlighted card, without covering it.
+async function expectNoticeBesideHighlight(page: Page, playerId: number) {
+  const notice = page.getByTestId("transfer-notice");
+  const card = page.locator(
+    `[data-player-id="${playerId}"][data-highlighted="true"]`,
+  );
+  await expect(card).toBeInViewport();
+  await expect(notice).toBeInViewport({ ratio: 1 });
+  await expect
+    .poll(async () => {
+      const [a, b] = await Promise.all([
+        notice.boundingBox(),
+        card.boundingBox(),
+      ]);
+      if (!a || !b) return "missing";
+      const overlaps =
+        a.x < b.x + b.width &&
+        b.x < a.x + a.width &&
+        a.y < b.y + b.height &&
+        b.y < a.y + a.height;
+      return overlaps ? "overlap" : "clear";
+    })
+    .toBe("clear");
+}
+
+async function expectReturnedToPlanner(
+  page: Page,
+  server: MockedServer,
+  incomingId = 101,
+  incomingName = "Available Alex",
+) {
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/plans/${server.plan.plan_id}\\?gw=${server.gameweek}&highlight=${incomingId}$`,
+    ),
+  );
+  await expect(page.getByTestId("transfer-notice")).toContainText(
+    `Transferred P${OUTGOING_ID} for ${incomingName} in GW${server.gameweek}`,
+  );
 }
 
 async function smallTargets(page: Page) {
@@ -391,7 +475,11 @@ async function smallTargets(page: Page) {
           box.width > 0 &&
           style.visibility !== "hidden" &&
           !(el as HTMLButtonElement).disabled &&
-          (box.height < 24 || box.width < 24)
+          (box.height < 24 || box.width < 24) &&
+          !(
+            el instanceof HTMLInputElement &&
+            ["checkbox", "radio"].includes(el.type)
+          )
         );
       })
       .map(
@@ -466,9 +554,7 @@ for (const viewport of [
 
       await panel.getByRole("button", { name: "Confirm transfer" }).dblclick();
 
-      await expect(page.getByTestId("commit-success")).toContainText(
-        "Transfer added to your plan",
-      );
+      await expectReturnedToPlanner(page, server);
       expect(server.mutations).toHaveLength(1);
       expect(server.mutations[0].expected_revision).toBe(0);
       expect(server.mutations[0].intents[0]).toMatchObject({
@@ -479,7 +565,6 @@ for (const viewport of [
         expected_outgoing_market_tenths: 54,
         expected_incoming_price_tenths: 62,
       });
-      await expect(page).toHaveURL(/\/transfers\?plan=/);
     });
 
     test("B4 a price change between preview and confirm is rejected, kept visible, re-previewed and needs a second explicit confirm", async ({
@@ -513,7 +598,7 @@ for (const viewport of [
 
       await page.getByRole("button", { name: "Confirm transfer" }).click();
 
-      await expect(page.getByTestId("commit-success")).toBeVisible();
+      await expectReturnedToPlanner(page, server);
       expect(server.mutations).toHaveLength(2);
       expect(server.mutations[1].mutation_id).not.toBe(
         server.mutations[0].mutation_id,
@@ -596,7 +681,7 @@ for (const viewport of [
 
       await page.getByRole("button", { name: "Retry same transfer" }).click();
 
-      await expect(page.getByTestId("commit-success")).toBeVisible();
+      await expectReturnedToPlanner(page, server);
       expect(server.mutations).toHaveLength(2);
       expect(server.mutations[1].mutation_id).toBe(
         server.mutations[0].mutation_id,
@@ -636,7 +721,7 @@ for (const viewport of [
       ).toBeEnabled();
       expect(server.mutations).toHaveLength(1);
       await page.getByRole("button", { name: "Confirm transfer" }).click();
-      await expect(page.getByTestId("commit-success")).toBeVisible();
+      await expectReturnedToPlanner(page, server);
       expect(server.mutations[1].expected_revision).toBe(1);
       expect(server.mutations[1].mutation_id).not.toBe(
         server.mutations[0].mutation_id,
@@ -648,6 +733,7 @@ for (const viewport of [
     }) => {
       const server = await installTransferApi(page, "B5 return");
       server.onMutation = () => "accepted_not_saved";
+      page.on("dialog", (dialog) => void dialog.accept());
       await openExplorer(page, server);
       await page
         .getByRole("button", { name: "Preview Available Alex" })
@@ -763,6 +849,383 @@ for (const viewport of [
 }
 
 // ---------------------------------------------------------------------------
+// US3: return to the plan, history, deep links and departure protection
+// (mocked API).
+// ---------------------------------------------------------------------------
+
+const DEPARTURE_WARNING =
+  "Your latest Planner edit is not saved yet. Leave this page anyway?";
+
+type ScrollRecord = { id: string | null; behavior?: string };
+
+async function recordScrolls(page: Page) {
+  await page.addInitScript(() => {
+    const scrolls: ScrollRecord[] = [];
+    (window as unknown as { __scrolls: ScrollRecord[] }).__scrolls = scrolls;
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (
+      arg?: boolean | ScrollIntoViewOptions,
+    ) {
+      scrolls.push({
+        id: this.getAttribute("data-player-id"),
+        behavior: typeof arg === "object" ? arg?.behavior : undefined,
+      });
+      return original.call(this, arg as ScrollIntoViewOptions);
+    };
+  });
+}
+
+const scrolls = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __scrolls: ScrollRecord[] }).__scrolls,
+  );
+
+function answerDialogs(page: Page) {
+  const state = { accept: false, messages: [] as string[] };
+  page.on("dialog", async (dialog) => {
+    state.messages.push(dialog.message());
+    if (state.accept) await dialog.accept();
+    else await dialog.dismiss();
+  });
+  return state;
+}
+
+const backToPlanLink = (page: Page) =>
+  page
+    .getByRole("region", { name: "Planner context" })
+    .getByRole("link", { name: "Back to plan" });
+
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test.describe(`US3 mocked journeys at ${viewport.width}px`, () => {
+    test.beforeEach(async ({ page }) => {
+      await page.setViewportSize(viewport);
+    });
+
+    test("B1 explore, preview, confirm and return: same gameweek, highlighted player in view, notice, later gameweeks changed, My Team untouched", async ({
+      page,
+    }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      const server = await installTransferApi(page, "B1 loop", {
+        gameweek: 13,
+      });
+      await recordScrolls(page);
+      await page.goto(`/plans/${server.plan.plan_id}`);
+      await page.getByLabel("Gameweek 13", { exact: true }).click();
+
+      await page
+        .getByRole("link", { name: `Explore transfers for P${OUTGOING_ID}` })
+        .click();
+
+      await expect(page).toHaveURL(
+        new RegExp(
+          `/transfers\\?plan=${server.plan.plan_id}&gw=13&out=${OUTGOING_ID}`,
+        ),
+      );
+      await expect(
+        page.getByRole("region", { name: "Planner context" }),
+      ).toContainText("Gameweek 13");
+      await page
+        .getByRole("button", { name: "Preview Available Alex" })
+        .click();
+      await page.getByRole("button", { name: "Confirm transfer" }).click();
+
+      await expectReturnedToPlanner(page, server);
+      await expect(
+        page.getByLabel("Gameweek 13", { exact: true }),
+      ).toHaveAttribute("aria-current", "true");
+      const card = page.locator('[data-player-id="101"]');
+      await expect(card).toHaveAttribute("data-highlighted", "true");
+      await expect(card).toContainText("Just transferred in");
+      await expect(card).toBeInViewport();
+      await expectNoticeBesideHighlight(page, 101);
+      expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+      expect(await scrolls(page)).toEqual([{ id: "101", behavior: "smooth" }]);
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth - window.innerWidth,
+        ),
+      ).toBeLessThanOrEqual(0);
+      expect(await smallTargets(page)).toEqual([]);
+
+      // Later gameweeks carry the transfer; the earlier one does not.
+      await page.getByLabel("Gameweek 14", { exact: true }).click();
+      await expect(page.locator('[data-player-id="101"]')).toHaveCount(1);
+      await expect(
+        page.locator('[data-player-id="101"][data-highlighted]'),
+      ).toHaveCount(0);
+      await expect(
+        page.locator(`[data-player-id="${OUTGOING_ID}"]`),
+      ).toHaveCount(0);
+      await page.getByLabel("Gameweek 12", { exact: true }).click();
+      await expect(
+        page.locator(`[data-player-id="${OUTGOING_ID}"]`),
+      ).toHaveCount(1);
+      expect(await scrolls(page)).toHaveLength(1);
+
+      // The notice is one-shot.
+      await page.reload();
+      await expect(
+        page.getByLabel("Gameweek 13", { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByTestId("transfer-notice")).toHaveCount(0);
+      expect(server.myTeamRequests).toBe(0);
+      expect(server.mutations).toHaveLength(1);
+      expect(errors).toEqual([]);
+    });
+
+    test("B2 Back returns to the selected gameweek, Forward and reload restore the Explorer, a new tab opens the same context", async ({
+      page,
+    }) => {
+      const server = await installTransferApi(page, "B2 history", {
+        gameweek: 13,
+      });
+      await page.goto(`/plans/${server.plan.plan_id}`);
+      await page.getByLabel("Gameweek 13", { exact: true }).click();
+      await page
+        .getByRole("link", { name: `Explore transfers for P${OUTGOING_ID}` })
+        .click();
+      const explorerUrl = new RegExp(
+        `/transfers\\?plan=${server.plan.plan_id}&gw=13&out=${OUTGOING_ID}&h=5&run=${EXPLORER_RUN_ID}$`,
+      );
+      await expect(page).toHaveURL(explorerUrl);
+      await expect(
+        page.getByRole("table", { name: "Replacement candidates" }),
+      ).toBeVisible();
+
+      await page.goBack();
+
+      await expect(page).toHaveURL(
+        new RegExp(`/plans/${server.plan.plan_id}\\?gw=13$`),
+      );
+      await expect(
+        page.getByLabel("Gameweek 13", { exact: true }),
+      ).toHaveAttribute("aria-current", "true");
+      expect(server.mutations).toHaveLength(0);
+
+      await page.goForward();
+
+      await expect(page).toHaveURL(explorerUrl);
+      await expect(
+        page.getByRole("region", { name: "Planner context" }),
+      ).toContainText("Planner mode");
+      await expect(
+        page.getByRole("table", { name: "Replacement candidates" }),
+      ).toBeVisible();
+
+      await page.reload();
+      await expect(page).toHaveURL(explorerUrl);
+      await expect(
+        page.getByRole("region", { name: "Planner context" }),
+      ).toContainText("Gameweek 13");
+      await expect(
+        page.getByRole("table", { name: "Replacement candidates" }),
+      ).toBeVisible();
+
+      const tab = await page.context().newPage();
+      await tab.setViewportSize(viewport);
+      await tab.goto(page.url());
+      await expect(
+        tab.getByRole("region", { name: "Planner context" }),
+      ).toContainText("Planner mode");
+      await expect(
+        tab.getByRole("table", { name: "Replacement candidates" }),
+      ).toBeVisible();
+      await tab.close();
+
+      // Horizon and player switches keep their context through history.
+      await page.getByRole("button", { name: "3 GWs", exact: true }).click();
+      await expect(page).toHaveURL(/out=6&h=3&run=42$/);
+      await page
+        .getByRole("link", { name: "Choose a different player" })
+        .click();
+      await expect(page).toHaveURL(
+        new RegExp(`gw=13&h=3&run=${EXPLORER_RUN_ID}$`),
+      );
+      await expect(
+        page.getByRole("combobox", { name: "Outgoing player" }),
+      ).toBeVisible();
+      await page.goBack();
+      await expect(page).toHaveURL(/out=6&h=3&run=42$/);
+      await page.goForward();
+      await expect(
+        page.getByRole("combobox", { name: "Outgoing player" }),
+      ).toBeVisible();
+    });
+
+    test("B5 an unresolved submission survives declined and accepted departures and can be retried on return", async ({
+      page,
+    }) => {
+      const server = await installTransferApi(page, "B5 depart", {
+        gameweek: 13,
+      });
+      server.onMutation = (index) =>
+        index === 0 ? "accepted_not_saved" : "commit";
+      const dialogs = answerDialogs(page);
+      await openExplorer(page, server);
+      await page
+        .getByRole("button", { name: "Preview Available Alex" })
+        .click();
+      await page.getByRole("button", { name: "Confirm transfer" }).click();
+      await expect(page.getByTestId("commit-pending")).toBeVisible();
+      const original = server.mutations[0].mutation_id;
+
+      // Declined: the user stays and the submission is intact.
+      await backToPlanLink(page).click();
+      await expect.poll(() => dialogs.messages).toEqual([DEPARTURE_WARNING]);
+      await expect(page).toHaveURL(/\/transfers\?/);
+      await expect(page.getByTestId("commit-pending")).toBeVisible();
+
+      // Accepted: client-side navigation keeps the shared coordinator.
+      dialogs.accept = true;
+      await backToPlanLink(page).click();
+      await expect(page).toHaveURL(
+        new RegExp(`/plans/${server.plan.plan_id}\\?gw=13$`),
+      );
+      await expect(
+        page.getByRole("status").filter({ hasText: "Not saved" }),
+      ).toBeVisible();
+
+      // The Planner stacks its guard entry once it has mounted; wait for it.
+      // Browser Back is guarded the same way: cancel, then confirm.
+      await expect
+        .poll(() =>
+          page.evaluate(() => [
+            location.pathname,
+            window.history.state?.plannerDepartureGuard === true,
+          ]),
+        )
+        .toEqual(["/plans/" + server.plan.plan_id, true]);
+      dialogs.accept = false;
+      await page.goBack();
+      // Dialog 1: declined link click. Dialog 2: accepted link click. Dialog 3: Back.
+      await expect.poll(() => dialogs.messages.length).toBe(3);
+      await expect(page).toHaveURL(/\/plans\//);
+      // Declining restores the guard entry asynchronously (history.go(1)).
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => window.history.state?.plannerDepartureGuard === true,
+          ),
+        )
+        .toBe(true);
+      dialogs.accept = true;
+      await page.goBack();
+      await expect(page).toHaveURL(/\/transfers\?/);
+
+      const region = page.getByRole("region", {
+        name: "Unresolved transfer confirmation",
+      });
+      await expect(region).toContainText(
+        `P${OUTGOING_ID} to Available Alex in GW13`,
+      );
+      expect(server.mutations).toHaveLength(1);
+
+      await region.getByRole("button", { name: "Retry same transfer" }).click();
+
+      await expectReturnedToPlanner(page, server);
+      expect(server.mutations).toHaveLength(2);
+      expect(server.mutations[1].mutation_id).toBe(original);
+      expect(server.committed).toEqual([1]);
+    });
+
+    test("a terminal record found after navigating back is shown once, without navigation or resubmission", async ({
+      page,
+    }) => {
+      const server = await installTransferApi(page, "Terminal", {
+        gameweek: 13,
+      });
+      server.onMutation = () => "price_changed";
+      let release!: () => void;
+      server.hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const dialogs = answerDialogs(page);
+      dialogs.accept = true;
+      await openExplorer(page, server);
+      await page
+        .getByRole("button", { name: "Preview Available Alex" })
+        .click();
+      await page.getByRole("button", { name: "Confirm transfer" }).click();
+      await expect.poll(() => server.mutations.length).toBe(1);
+
+      await backToPlanLink(page).click();
+      await expect(page).toHaveURL(/\/plans\//);
+      expect(dialogs.messages).toEqual([DEPARTURE_WARNING]);
+      const settled = page.waitForResponse(
+        (response) => response.request().method() === "POST",
+      );
+      release();
+      await settled;
+      await expect(
+        page.getByRole("status").filter({ hasText: /^Saved$/ }),
+      ).toBeVisible();
+
+      await page.goBack();
+
+      await expect(page).toHaveURL(/\/transfers\?/);
+      expect(dialogs.messages).toEqual([DEPARTURE_WARNING]);
+      const earlier = page.getByTestId("commit-earlier");
+      await expect(earlier).toContainText(
+        "Prices changed since you previewed this transfer",
+      );
+      expect(server.mutations).toHaveLength(1);
+      expect(server.committed).toEqual([]);
+
+      await backToPlanLink(page).click();
+      await expect(page).toHaveURL(/\/plans\//);
+      await page.goBack();
+      await expect(
+        page.getByRole("table", { name: "Replacement candidates" }),
+      ).toBeVisible();
+      await expect(page.getByTestId("commit-earlier")).toHaveCount(0);
+      expect(server.mutations).toHaveLength(1);
+    });
+
+    test("arrival scrolls without animation when reduced motion is requested", async ({
+      page,
+    }) => {
+      const server = await installTransferApi(page, "Reduced motion", {
+        gameweek: 13,
+      });
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await recordScrolls(page);
+      await page.addInitScript((planId) => {
+        window.sessionStorage.setItem(
+          `plannerTransferNotice:${planId}`,
+          JSON.stringify({
+            message: "Transferred P8 for P6 in GW13",
+            gameweek: 13,
+            incomingPlayerId: 6,
+          }),
+        );
+      }, server.plan.plan_id);
+
+      await page.goto(
+        `/plans/${server.plan.plan_id}?gw=13&highlight=${OUTGOING_ID}`,
+      );
+
+      await expect(
+        page.getByLabel("Gameweek 13", { exact: true }),
+      ).toHaveAttribute("aria-current", "true");
+      await expect(
+        page.locator(
+          `[data-player-id="${OUTGOING_ID}"][data-highlighted="true"]`,
+        ),
+      ).toBeVisible();
+      await expect(page.getByTestId("transfer-notice")).toHaveCount(1);
+      await expectNoticeBesideHighlight(page, OUTGOING_ID);
+      expect(await scrolls(page)).toEqual([
+        { id: String(OUTGOING_ID), behavior: "auto" },
+      ]);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // US2 guarded real-API journeys. They run only through the guarded harness
 // (apps/api/tests/repositories/test_plan_transfer_browser_journeys.py), which
 // serves the real API on an isolated test schema and drives the triggers below.
@@ -837,6 +1300,27 @@ async function openRealExplorer(page: Page) {
   ).toBeVisible();
 }
 
+async function expectReturnedToRealPlanner(page: Page) {
+  await expect(page).toHaveURL(
+    new RegExp(`/plans/${REAL_PLAN_ID}\\?gw=${REAL_GAMEWEEK}&highlight=106$`),
+  );
+  await expect(page.getByTestId("transfer-notice")).toContainText(
+    `Transferred P${OUTGOING_ID} for P106 in GW${REAL_GAMEWEEK}`,
+  );
+  await expect(
+    page.getByLabel(`Gameweek ${REAL_GAMEWEEK}`, { exact: true }),
+  ).toHaveAttribute("aria-current", "true");
+  const card = page.locator('[data-player-id="106"][data-highlighted="true"]');
+  await expect(card).toBeVisible();
+  await expectNoticeBesideHighlight(page, 106);
+  await expect(page.locator(`[data-player-id="${OUTGOING_ID}"]`)).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByText(new RegExp(`Transfers: P${OUTGOING_ID} → P106`)),
+  ).toBeVisible();
+}
+
 async function expectPersistedOnPlanner(page: Page) {
   await page.goto(`/plans/${REAL_PLAN_ID}`);
   await page.getByLabel(`Gameweek ${REAL_GAMEWEEK}`, { exact: true }).click();
@@ -889,9 +1373,18 @@ test("US2 real API confirm persists the transfer after a reload", async ({
 
   await panel.getByRole("button", { name: "Confirm transfer" }).click();
 
-  await expect(page.getByTestId("commit-success")).toContainText(
-    `Transfer added to your plan: P${OUTGOING_ID} to P106 in GW${REAL_GAMEWEEK}`,
-  );
+  await expectReturnedToRealPlanner(page);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+  // The pre-existing text-style "Remove transfer" control is not touched by this feature.
+  expect(
+    (await smallTargets(page)).filter(
+      (label) => !label.startsWith("BUTTON Remove transfer "),
+    ),
+  ).toEqual([]);
   const posts = seen.filter((item) => item.method === "POST");
   expect(posts).toHaveLength(1);
   expect(posts[0].status).toBe(200);
@@ -906,6 +1399,13 @@ test("US2 real API confirm persists the transfer after a reload", async ({
     { gameweek: REAL_GAMEWEEK, out: OUTGOING_ID, in: 106 },
   ]);
   expect(after.revision).toBe(before.revision + 1);
+
+  // Back from the Planner reopens the Explorer, which now reports the player as sold.
+  await page.goBack();
+  await expect(page).toHaveURL(/\/transfers\?/);
+  await expect(
+    page.locator("[role=alert]:not(#__next-route-announcer__)"),
+  ).toContainText(`not in your squad for GW${REAL_GAMEWEEK}`);
 
   // A hard reload loses client state: the server is the only source of truth.
   await expectPersistedOnPlanner(page);
@@ -963,7 +1463,7 @@ test("US2 real API prices changed between preview and confirm is rejected then r
 
   await page.getByRole("button", { name: "Confirm transfer" }).click();
 
-  await expect(page.getByTestId("commit-success")).toBeVisible();
+  await expectReturnedToRealPlanner(page);
   posts = seen.filter((item) => item.method === "POST");
   expect(posts).toHaveLength(2);
   expect(posts[1].status).toBe(200);
@@ -1030,7 +1530,7 @@ test("US2 real API accepted-but-not-saved can be abandoned without a saved trans
   await page.getByRole("button", { name: "Preview P106" }).click();
   await page.getByRole("button", { name: "Confirm transfer" }).click();
 
-  await expect(page.getByTestId("commit-success")).toBeVisible();
+  await expectReturnedToRealPlanner(page);
   const posts = seen.filter((item) => item.method === "POST");
   expect(posts).toHaveLength(2);
   expect(posts[1].status).toBe(200);

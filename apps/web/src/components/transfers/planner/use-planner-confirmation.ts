@@ -45,6 +45,15 @@ type OwnSubmission = {
   submissionId: string;
   playerInId: number;
   summary: string;
+  outgoingName: string;
+  incomingName: string;
+};
+
+/** Reported once, after the Explorer's own submission is acknowledged as committed and cleared. */
+export type CommittedTransfer = {
+  gameweek: number;
+  playerInId: number;
+  outgoingName: string;
   incomingName: string;
 };
 
@@ -85,8 +94,11 @@ export function usePlannerConfirmation(params: {
   horizon: TransferHorizon;
   runId: number | null;
   commit: PlannerCommit;
+  onCommitted?: (transfer: CommittedTransfer) => void;
 }) {
   const { planId, gameweek, playerOutId, horizon, runId, commit } = params;
+  const onCommittedRef = useRef(params.onCommitted);
+  onCommittedRef.current = params.onCommitted;
   const view = useSyncExternalStore(
     commit.subscribe,
     commit.getView,
@@ -97,6 +109,7 @@ export function usePlannerConfirmation(params: {
   const sequence = useRef(0);
   const own = useRef<OwnSubmission | null>(null);
   const handled = useRef(new Set<string>());
+  const watched = useRef(new Set<string>());
   const runRef = useRef(runId);
   runRef.current = runId;
   const selectedRef = useRef<number | null>(null);
@@ -225,6 +238,12 @@ export function usePlannerConfirmation(params: {
           summary: mine.summary,
           incomingName: mine.incomingName,
         });
+        onCommittedRef.current?.({
+          gameweek,
+          playerInId: mine.playerInId,
+          outgoingName: mine.outgoingName,
+          incomingName: mine.incomingName,
+        });
       } else if (previous.status === "rejected") {
         setNotice({
           kind: "rejected",
@@ -241,24 +260,32 @@ export function usePlannerConfirmation(params: {
         setNotice({ kind: "earlier", text: describeEarlier(previous) });
       }
     },
-    [commit, loadPreview],
+    [commit, loadPreview, gameweek],
   );
 
   useEffect(() => {
     const record = view.pinned;
-    if (
-      !record ||
-      !["committed", "rejected", "plan_missing"].includes(record.status)
-    ) {
+    if (!record) return;
+    if (!["committed", "rejected", "plan_missing"].includes(record.status)) {
+      // Seen unresolved while mounted, so its outcome belongs to this Explorer even if it was started earlier.
+      watched.current.add(record.submissionId);
       return;
     }
     const key = `${record.submissionId}:${record.status}`;
     if (handled.current.has(key)) return;
     handled.current.add(key);
-    const mine =
-      own.current?.submissionId === record.submissionId ? own.current : null;
+    let mine: OwnSubmission | null = null;
+    if (own.current?.submissionId === record.submissionId) {
+      mine = own.current;
+    } else if (watched.current.has(record.submissionId) && view.details) {
+      mine = {
+        submissionId: record.submissionId,
+        ...view.details,
+        summary: view.label ?? "",
+      };
+    }
     void acknowledge(record, mine);
-  }, [view.pinned, acknowledge]);
+  }, [view.pinned, view.details, view.label, acknowledge]);
 
   const openPreview = useCallback(
     (playerInId: number) => {
@@ -284,12 +311,17 @@ export function usePlannerConfirmation(params: {
     const descriptor = data.commit;
     if (!descriptor) return;
     const summary = `${data.outgoing.web_name} to ${data.candidate.web_name} in GW${gameweek}`;
-    const result = commit.submit(descriptor, summary);
+    const result = commit.submit(descriptor, summary, {
+      playerInId: data.candidate.player_id,
+      outgoingName: data.outgoing.web_name,
+      incomingName: data.candidate.web_name,
+    });
     if (result.type === "started") {
       own.current = {
         submissionId: result.submissionId,
         playerInId: data.candidate.player_id,
         summary,
+        outgoingName: data.outgoing.web_name,
         incomingName: data.candidate.web_name,
       };
       setNotice(null);

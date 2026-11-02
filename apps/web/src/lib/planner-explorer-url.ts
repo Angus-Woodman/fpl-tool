@@ -115,6 +115,13 @@ export function buildPlannerExplorerHref(params: {
   return `/transfers?${query.toString()}`;
 }
 
-export function buildPlanBoardHref(planId: number, gameweek: number): string {
-  return `/plans/${planId}?gw=${gameweek}`;
+export function buildPlanBoardHref(
+  planId: number,
+  gameweek: number,
+  highlightPlayerId?: number,
+): string {
+  const base = `/plans/${planId}?gw=${gameweek}`;
+  return highlightPlayerId === undefined
+    ? base
+    : `${base}&highlight=${highlightPlayerId}`;
 }

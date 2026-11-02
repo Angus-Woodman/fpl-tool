@@ -21,6 +21,7 @@ import {
 } from "@/components/transfers/planner/planner-transfer-preview";
 import {
   usePlannerConfirmation,
+  type CommittedTransfer,
   type ConfirmationNotice,
 } from "@/components/transfers/planner/use-planner-confirmation";
 import { ProjectionRunBadge } from "@/components/team/projection-run-badge";
@@ -35,6 +36,8 @@ import {
   createPlannerCommit,
   type PlannerCommitFactory,
 } from "@/lib/planner-commit";
+import { writeTransferNotice } from "@/lib/planner-transfer-notice";
+import { useDepartureGuard } from "@/lib/use-departure-guard";
 import {
   buildPlanBoardHref,
   buildPlannerExplorerHref,
@@ -283,6 +286,19 @@ function ExplorerWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [planId, gameweek, playerOutId, horizon, runId]);
 
+  useDepartureGuard(commit);
+
+  const handleCommitted = (transfer: CommittedTransfer): void => {
+    writeTransferNotice(planId, {
+      message: `Transferred ${transfer.outgoingName} for ${transfer.incomingName} in GW${transfer.gameweek}`,
+      gameweek: transfer.gameweek,
+      incomingPlayerId: transfer.playerInId,
+    });
+    router.push(
+      buildPlanBoardHref(planId, transfer.gameweek, transfer.playerInId),
+    );
+  };
+
   const pinnedRunId =
     runId ??
     (listState.kind === "ok" ? listState.data.projection.run_id : null);
@@ -293,6 +309,7 @@ function ExplorerWorkspace({
     horizon,
     runId: pinnedRunId,
     commit,
+    onCommitted: handleCommitted,
   });
 
   // The coordinator's acknowledged plan is the freshest the Planner and Explorer share.

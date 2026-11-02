@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PlanBoard } from "@/components/plans/plan-board";
 import { getPlanSaveCoordinator } from "@/lib/plan-save-coordinator";
@@ -2819,5 +2819,275 @@ describe("PlanBoard Explorer entry points", () => {
     const transfer = screen.getAllByRole("button", { name: /^Transfer / })[0];
 
     expect(transfer).toHaveAttribute("aria-expanded", "false");
+  });
+});
+
+describe("PlanBoard arrival from and departure to the Explorer", () => {
+  const scrollIntoView = vi.fn();
+  let reducedMotion = false;
+
+  function visit(plan: PlanResponse, query = "") {
+    window.history.replaceState({}, "", `/plans/${plan.plan_id}${query}`);
+  }
+
+  beforeEach(() => {
+    scrollIntoView.mockReset();
+    reducedMotion = false;
+    window.sessionStorage.clear();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    window.matchMedia = ((query: string) => ({
+      matches: reducedMotion && query.includes("prefers-reduced-motion"),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      onchange: null,
+      dispatchEvent: () => false,
+    })) as typeof window.matchMedia;
+  });
+
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
+    window.sessionStorage.clear();
+  });
+
+  function threeWeekPlan() {
+    return buildPlan([
+      { gameweek_number: 12 },
+      { gameweek_number: 13 },
+      { gameweek_number: 14 },
+    ]);
+  }
+
+  it("opens on the first gameweek for a normal visit", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+
+    expect(await screen.findByLabelText("Gameweek 12")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("transfer-notice")).not.toBeInTheDocument();
+  });
+
+  it("opens on the gameweek named by ?gw", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13");
+    render(<PlanBoard planId={plan.plan_id} />);
+
+    expect(await screen.findByLabelText("Gameweek 13")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("falls back to the default gameweek for a gameweek outside the plan", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=39");
+    render(<PlanBoard planId={plan.plan_id} />);
+
+    expect(await screen.findByLabelText("Gameweek 12")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("does not override the manager's later gameweek choices", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13");
+    render(<PlanBoard planId={plan.plan_id} />);
+    await screen.findByLabelText("Gameweek 13");
+
+    fireEvent.click(screen.getByLabelText("Gameweek 14"));
+    fireEvent.click(screen.getByLabelText("Gameweek 12"));
+
+    expect(screen.getByLabelText("Gameweek 12")).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("highlights the incoming player's card and scrolls it into view once", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13&highlight=8");
+    const { container } = render(<PlanBoard planId={plan.plan_id} />);
+
+    await screen.findByLabelText("Gameweek 13");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    const card = container.querySelector('[data-player-id="8"]');
+    expect(card).toHaveAttribute("data-highlighted", "true");
+    expect(card).toHaveTextContent("Just transferred in");
+    expect(
+      container.querySelectorAll('[data-highlighted="true"]'),
+    ).toHaveLength(1);
+    expect(scrollIntoView.mock.instances[0]).toBe(card);
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: "center",
+      behavior: "smooth",
+    });
+
+    fireEvent.click(screen.getByLabelText("Gameweek 14"));
+    fireEvent.click(screen.getByLabelText("Gameweek 13"));
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("scrolls without animation when reduced motion is requested", async () => {
+    reducedMotion = true;
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13&highlight=8");
+    render(<PlanBoard planId={plan.plan_id} />);
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: "center",
+      behavior: "auto",
+    });
+  });
+
+  it("ignores a highlight for a player who is not in that gameweek", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13&highlight=999");
+    const { container } = render(<PlanBoard planId={plan.plan_id} />);
+
+    await screen.findByLabelText("Gameweek 13");
+    expect(container.querySelector('[data-highlighted="true"]')).toBeNull();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("does not highlight the card in another gameweek", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13&highlight=8");
+    const { container } = render(<PlanBoard planId={plan.plan_id} />);
+    await screen.findByLabelText("Gameweek 13");
+
+    fireEvent.click(screen.getByLabelText("Gameweek 14"));
+
+    expect(container.querySelector('[data-highlighted="true"]')).toBeNull();
+  });
+
+  it("shows the one-shot transfer notice once and clears it", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13&highlight=8");
+    const key = `plannerTransferNotice:${plan.plan_id}`;
+    window.sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        message: "Transferred DEF Four for MID One in GW13",
+        gameweek: 13,
+        incomingPlayerId: 8,
+      }),
+    );
+    const first = render(<PlanBoard planId={plan.plan_id} />);
+
+    expect(await screen.findByTestId("transfer-notice")).toHaveTextContent(
+      "Transferred DEF Four for MID One in GW13",
+    );
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+    first.unmount();
+
+    render(<PlanBoard planId={plan.plan_id} />);
+    await screen.findByLabelText("Gameweek 13");
+    expect(screen.queryByTestId("transfer-notice")).not.toBeInTheDocument();
+  });
+
+  it("keeps a single accessible notice pinned in view after the highlight scroll", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13&highlight=8");
+    window.sessionStorage.setItem(
+      `plannerTransferNotice:${plan.plan_id}`,
+      JSON.stringify({
+        message: "Transferred DEF Four for MID One in GW13",
+        gameweek: 13,
+        incomingPlayerId: 8,
+      }),
+    );
+    render(<PlanBoard planId={plan.plan_id} />);
+
+    const notice = await screen.findByTestId("transfer-notice");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).toHaveClass("sticky");
+    expect(screen.getAllByTestId("transfer-notice")).toHaveLength(1);
+    expect(
+      screen.getAllByText("Transferred DEF Four for MID One in GW13"),
+    ).toHaveLength(1);
+
+    fireEvent.click(screen.getByLabelText("Gameweek 14"));
+    expect(screen.getByTestId("transfer-notice")).toBe(notice);
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("transfer-notice")).not.toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears an unreadable notice without showing it", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan);
+    const key = `plannerTransferNotice:${plan.plan_id}`;
+    window.sessionStorage.setItem(key, "not json");
+    render(<PlanBoard planId={plan.plan_id} />);
+
+    await screen.findByLabelText("Gameweek 12");
+    expect(screen.queryByTestId("transfer-notice")).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+  });
+
+  it("keeps the selected gameweek in the history entry only when launching the Explorer", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan, "?gw=13&highlight=8");
+    const replace = vi.spyOn(window.history, "replaceState");
+    const stopNavigation = (event: Event) => event.preventDefault();
+    document.addEventListener("click", stopNavigation);
+    render(<PlanBoard planId={plan.plan_id} />);
+    await screen.findByLabelText("Gameweek 13");
+    fireEvent.click(screen.getByLabelText("Gameweek 14"));
+    const arrival = replace.mock.calls.length;
+
+    fireEvent.click(
+      screen.getByRole("link", { name: "Explore transfers for this gameweek" }),
+    );
+
+    expect(replace).toHaveBeenCalledTimes(arrival + 1);
+    expect(replace.mock.calls.at(-1)?.[2]).toBe(`/plans/${plan.plan_id}?gw=14`);
+
+    fireEvent.click(
+      screen.getAllByRole("link", {
+        name: /^Explore transfers for (?!this)/,
+      })[0],
+    );
+    expect(replace).toHaveBeenCalledTimes(arrival + 2);
+    expect(replace.mock.calls.at(-1)?.[2]).toBe(`/plans/${plan.plan_id}?gw=14`);
+    document.removeEventListener("click", stopNavigation);
+  });
+
+  it("does not write the address when the manager only changes gameweek", async () => {
+    const plan = threeWeekPlan();
+    mockFetch(plan);
+    visit(plan);
+    render(<PlanBoard planId={plan.plan_id} />);
+    await screen.findByLabelText("Gameweek 12");
+    const replace = vi.spyOn(window.history, "replaceState");
+    const push = vi.spyOn(window.history, "pushState");
+
+    fireEvent.click(screen.getByLabelText("Gameweek 13"));
+
+    expect(replace).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
   });
 });

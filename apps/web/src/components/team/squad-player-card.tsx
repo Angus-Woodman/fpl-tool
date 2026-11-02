@@ -23,6 +23,10 @@ export type SquadPlayerCardProps = {
   selectionState?: SelectionState;
   onSelect?: () => void;
   selectionDisabled?: boolean;
+  /** Lets a page find the card, for example to scroll to it. */
+  playerId?: number;
+  /** Marks the card of a player who was just transferred in. */
+  highlighted?: boolean;
   children?: React.ReactNode;
 };
 
@@ -53,6 +57,8 @@ export function SquadPlayerCard({
   selectionState = "idle",
   onSelect,
   selectionDisabled = false,
+  playerId,
+  highlighted = false,
   children,
 }: SquadPlayerCardProps): JSX.Element {
   const selectable = onSelect !== undefined;
@@ -60,8 +66,10 @@ export function SquadPlayerCard({
 
   return (
     <article
-      className={`rounded-lg border p-3 ${selectable ? SELECTION_CARD_CLASSES[selectionState] : "border-slate-200"}`}
+      className={`rounded-lg border p-3 ${selectable ? SELECTION_CARD_CLASSES[selectionState] : "border-slate-200"}${highlighted ? " ring-2 ring-emerald-500 bg-emerald-50" : ""}`}
       data-selection-state={selectable ? selectionState : undefined}
+      data-player-id={playerId}
+      data-highlighted={highlighted ? "true" : undefined}
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -78,6 +86,12 @@ export function SquadPlayerCard({
           </span>
         )}
       </div>
+
+      {highlighted && (
+        <p className="mt-2 inline-block rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-800">
+          Just transferred in
+        </p>
+      )}
 
       {changeTag && (
         <p className="mt-2 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">
