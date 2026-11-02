@@ -295,9 +295,9 @@ export function usePlannerConfirmation(params: {
           summary: mine.summary,
           recoverHref: inScope(mine) ? null : recoverHrefFor(mine),
         });
-        if (owns()) {
-          void loadPreview(mine.playerInId);
+        if (inScope(mine)) {
           refreshListRef.current?.();
+          if (owns()) void loadPreview(mine.playerInId);
         }
       } else {
         setNotice({ kind: "earlier", text: describeEarlier(previous) });

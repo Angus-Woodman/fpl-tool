@@ -2366,6 +2366,41 @@ describe("Planner Explorer list refresh and submission-scoped recovery", () => {
       expect(api.mutations).toHaveLength(1);
     });
 
+    it("refreshes the list for an in-scope rejection while another candidate's preview is open, leaving that preview alone", async () => {
+      const api = installApi();
+      repriceFromSecondList(api);
+      await submitAndHold(api);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Preview Blocked Ben" }),
+      );
+      await screen.findByRole("heading", { name: /for Blocked Ben/ });
+      const open = screen.getByRole("region", { name: "Transfer preview" });
+      const before = open.textContent;
+      expect(priceOf("Available Alex")).toHaveTextContent("£6.2m");
+
+      await rejectWith(api, PRICES_CHANGED);
+
+      await waitFor(() =>
+        expect(priceOf("Available Alex")).toHaveTextContent("£6.4m"),
+      );
+      expect(api.listCalls).toHaveLength(2);
+      expect(await screen.findByTestId("commit-rejection")).toHaveTextContent(
+        /prices changed/i,
+      );
+      expect(
+        screen.getByRole("heading", { name: /for Blocked Ben/ }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Transfer preview" })).toBe(
+        open,
+      );
+      // Only the confirmation line may change: the saving notice goes once the submission ends.
+      expect(open.textContent?.split("Add to plan GW9")[0]).toBe(
+        before?.split("Add to plan GW9")[0],
+      );
+      expect(api.previewCalls).toEqual([101, 103]);
+      expect(api.mutations).toHaveLength(1);
+    });
+
     it("refreshes after a conflict, on the pinned run, and shows the refreshed state", async () => {
       const api = installApi();
       repriceFromSecondList(api, 66);
